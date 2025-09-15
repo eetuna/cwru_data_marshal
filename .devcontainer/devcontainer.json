@@ -1,28 +1,28 @@
 {
-    "name": "data-marshal-beast",
+    "name": "cwru_data_marshal",
     "build": {
-        "dockerfile": "Dockerfile",
-        "context": ".."
-    },
-    "settings": {
-        "terminal.integrated.shell.linux": "/bin/bash"
+        "context": ".",
+        "dockerfile": "docker/Dockerfile",
+        "target": "dev",
+        "args": {
+            "BUILD_ISMRMRD_FROM_SOURCE": "false",
+            "ISMRMRD_TAG": "v1.14.0"
+        }
     },
     "customizations": {
         "vscode": {
+            "settings": {},
             "extensions": [
                 "ms-vscode.cpptools",
-                "ms-vscode.cmake-tools",
-                "twxs.cmake",
-                "ms-vscode.test-adapter-converter"
+                "twxs.cmake"
             ]
         }
     },
-    "mounts": [
-        "source=${localWorkspaceFolder},target=/src,type=bind,consistency=cached",
-        "source=${localWorkspaceFolder}/data,target=/data,type=bind"
-        //"source=cwru_data_marshal_data,target=/data,type=volume"
-    ],
     "workspaceFolder": "/src",
+    "mounts": [
+        "source=${localWorkspaceFolder},target=/src,type=bind"
+    ],
     "remoteUser": "root",
-    //"postCreateCommand": "mkdir -p /data && cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Debug && cmake --build /build -j"
+    "updateRemoteUserUID": false,
+    "postCreateCommand": "printf 'Devcontainer built using %s\\n' 'docker/Dockerfile'"
 }

@@ -1,3 +1,6 @@
+
+# Add local CMake modules (e.g., FindPugiXML.cmake)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 cmake_minimum_required(VERSION 3.21)
 project(data_marshal_beast LANGUAGES C CXX)
 

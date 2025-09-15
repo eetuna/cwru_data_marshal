@@ -1,58 +1,35 @@
+
 version: "3.9"
 services:
-marshal:
-build:
-context: .
-dockerfile: docker/marshal.Dockerfile
-image: marshal:dev
-command: ["/app/marshal", "--http", "0.0.0.0:8080", "--ws", "0.0.0.0:8090", "--data", "/data"]
-ports: ["8080:8080", "8090:8090"]
-volumes:
-- ./data:/data
-healthcheck:
-test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
-interval: 5s
-timeout: 2s
-retries: 10
+  marshal:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+      args:
+        BUILD_ISMRMRD_FROM_SOURCE: "false"
+        ISMRMRD_TAG: "v1.14.0"
+    command: bash -lc "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j && ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data /data"
+    ports: ["8080:8080","8090:8090"]
+    volumes: ["./data:/data", ".:/src"]
+    working_dir: /src
 
+  viz:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    command: bash -lc "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j && ./build/viz_client --ws ws://marshal:8090/ws --data /data"
+    depends_on: ["marshal"]
+    volumes: ["./data:/data", ".:/src"]
+    working_dir: /src
 
-dumpbox:
-build:
-context: .
-dockerfile: docker/dumpbox.Dockerfile
-image: dumpbox:dev
-depends_on: [marshal]
-command: ["/app/dumpbox", "--ws", "ws://marshal:8090/ws", "--data", "/data"]
-volumes:
-- ./data:/data
-
-
-playback:
-build:
-context: .
-dockerfile: docker/playback.Dockerfile
-image: playback:dev
-depends_on: [marshal]
-command: ["/app/playback", "--http", "http://marshal:8080", "--ws", "ws://marshal:8090/ws", "--data", "/data"]
-volumes:
-- ./data:/data
-
-
-fk_client:
-build:
-context: .
-dockerfile: docker/clients.Dockerfile
-image: clients:dev
-depends_on: [marshal]
-command: ["/app/fk_client", "--http", "http://marshal:8080"]
-
-
-viz_client:
-build:
-context: .
-dockerfile: docker/clients.Dockerfile
-image: clients:dev
-depends_on: [marshal]
-command: ["/app/viz_client", "--ws", "ws://marshal:8090/ws", "--data", "/data"]
-volumes:
-- ./data:/data
+  fk:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    command: bash -lc "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j && ./build/fk_client --http http://marshal:8080 --count 5 --step 0.05"
+    depends_on: ["marshal"]
+    volumes: [".:/src"]
+    working_dir: /src

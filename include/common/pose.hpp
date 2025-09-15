@@ -1,3 +1,15 @@
+/*
+ * File: include/common/pose.hpp
+ * Project: CWRU Data Marshal
+ * Purpose: Internal support module
+ * Notes:
+ *  - See docs/PURPOSE.md and docs/ARCHITECTURE.md
+ *  - Atomic file writes via include/atomic_write.hpp
+ *  - /health returns constant JSON; no shared state
+ *  - WebSocket ping/pong keepalive recommended
+ * Last updated: 2025-09-15
+ */
+
 #pragma once
 #include <array>
 #include <string>

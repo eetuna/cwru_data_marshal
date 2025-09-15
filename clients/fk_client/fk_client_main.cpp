@@ -1,3 +1,15 @@
+/*
+ * File: clients/fk_client/fk_client_main.cpp
+ * Project: CWRU Data Marshal
+ * Purpose: Example HTTP consumer client
+ * Notes:
+ *  - See docs/PURPOSE.md and docs/ARCHITECTURE.md
+ *  - Atomic file writes via include/atomic_write.hpp
+ *  - /health returns constant JSON; no shared state
+ *  - WebSocket ping/pong keepalive recommended
+ * Last updated: 2025-09-15
+ */
+
 #include <iostream>
 #include <boost/asio.hpp>
 #include <boost/beast/http.hpp>

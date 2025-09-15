@@ -1,3 +1,15 @@
+/*
+ * File: src/marshal_http.hpp
+ * Project: CWRU Data Marshal
+ * Purpose: HTTP routing and handlers
+ * Notes:
+ *  - See docs/PURPOSE.md and docs/ARCHITECTURE.md
+ *  - Atomic file writes via include/atomic_write.hpp
+ *  - /health returns constant JSON; no shared state
+ *  - WebSocket ping/pong keepalive recommended
+ * Last updated: 2025-09-15
+ */
+
 #pragma once
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -61,7 +73,8 @@ inline void ensure_dir(const fs::path& p) {
 }
 
 // atomic file write: write to .tmp then rename
-inline void write_atomic(const fs::path& dst, const void* data, size_t n) {
+inline void // Atomic write helper
+write_atomic(const fs::path& dst, const void* data, size_t n) {
     fs::path tmp = dst;
     tmp += ".tmp";
     {
@@ -231,7 +244,8 @@ private:
                     name << ts << '_' << std::setw(6) << std::setfill('0') << seq << ".mrd";
                     fs::path out_path = mrd_root / name.str();
 
-                    write_atomic(out_path, body.data(), body.size());
+                    // Atomic write helper
+write_atomic(out_path, body.data(), body.size());
 
                     std::error_code ec;
                     auto size_bytes = fs::file_size(out_path, ec);
@@ -243,7 +257,8 @@ private:
                     //fs::path meta_root = fs::path(state.data_dir);
                     append_line(mrd_root / "index.jsonl", entry.dump());
                     const std::string latest_dump = entry.dump();
-                    write_atomic(mrd_root / "latest.json", latest_dump.data(), latest_dump.size());
+                    // Atomic write helper
+write_atomic(mrd_root / "latest.json", latest_dump.data(), latest_dump.size());
 
                     http::response<http::string_body> res{http::status::created, req.version()};
                     res.set(http::field::content_type, "application/json");

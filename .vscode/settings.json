@@ -1,6 +1,0 @@
-{
-    "editor.formatOnPaste": true,
-    "files.associations": {
-        "chrono": "cpp"
-    }
-}

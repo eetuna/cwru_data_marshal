@@ -1,3 +1,15 @@
+/*
+ * File: services/dumpbox/dumpbox_main.cpp
+ * Project: CWRU Data Marshal
+ * Purpose: WS subscriber writing MRD files to /data
+ * Notes:
+ *  - See docs/PURPOSE.md and docs/ARCHITECTURE.md
+ *  - Atomic file writes via include/atomic_write.hpp
+ *  - /health returns constant JSON; no shared state
+ *  - WebSocket ping/pong keepalive recommended
+ * Last updated: 2025-09-15
+ */
+
 #include <iostream>
 #include <filesystem>
 #include <fstream>
