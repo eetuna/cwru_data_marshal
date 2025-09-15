@@ -1,0 +1,58 @@
+version: "3.9"
+services:
+marshal:
+build:
+context: .
+dockerfile: docker/marshal.Dockerfile
+image: marshal:dev
+command: ["/app/marshal", "--http", "0.0.0.0:8080", "--ws", "0.0.0.0:8090", "--data", "/data"]
+ports: ["8080:8080", "8090:8090"]
+volumes:
+- ./data:/data
+healthcheck:
+test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+interval: 5s
+timeout: 2s
+retries: 10
+
+
+dumpbox:
+build:
+context: .
+dockerfile: docker/dumpbox.Dockerfile
+image: dumpbox:dev
+depends_on: [marshal]
+command: ["/app/dumpbox", "--ws", "ws://marshal:8090/ws", "--data", "/data"]
+volumes:
+- ./data:/data
+
+
+playback:
+build:
+context: .
+dockerfile: docker/playback.Dockerfile
+image: playback:dev
+depends_on: [marshal]
+command: ["/app/playback", "--http", "http://marshal:8080", "--ws", "ws://marshal:8090/ws", "--data", "/data"]
+volumes:
+- ./data:/data
+
+
+fk_client:
+build:
+context: .
+dockerfile: docker/clients.Dockerfile
+image: clients:dev
+depends_on: [marshal]
+command: ["/app/fk_client", "--http", "http://marshal:8080"]
+
+
+viz_client:
+build:
+context: .
+dockerfile: docker/clients.Dockerfile
+image: clients:dev
+depends_on: [marshal]
+command: ["/app/viz_client", "--ws", "ws://marshal:8090/ws", "--data", "/data"]
+volumes:
+- ./data:/data

@@ -1,0 +1,9 @@
+# docker/dumpbox.Dockerfile
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \
+libstdc++6 libboost-system1.74.0 libhdf5-103-1 libismrmrd2 \
+&& rm -rf /var/lib/apt/lists/*
+COPY --from=builder /build/dumpbox /app/dumpbox
+WORKDIR /app
+CMD ["/app/dumpbox", "--ws", "ws://marshal:8090/ws", "--data", "/data"]

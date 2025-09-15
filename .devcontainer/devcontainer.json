@@ -1,0 +1,28 @@
+{
+    "name": "data-marshal-beast",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": ".."
+    },
+    "settings": {
+        "terminal.integrated.shell.linux": "/bin/bash"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools",
+                "ms-vscode.cmake-tools",
+                "twxs.cmake",
+                "ms-vscode.test-adapter-converter"
+            ]
+        }
+    },
+    "mounts": [
+        "source=${localWorkspaceFolder},target=/src,type=bind,consistency=cached",
+        "source=${localWorkspaceFolder}/data,target=/data,type=bind"
+        //"source=cwru_data_marshal_data,target=/data,type=volume"
+    ],
+    "workspaceFolder": "/src",
+    "remoteUser": "root",
+    //"postCreateCommand": "mkdir -p /data && cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Debug && cmake --build /build -j"
+}
