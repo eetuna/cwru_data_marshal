@@ -1,7 +1,7 @@
 {
     "name": "cwru_data_marshal",
     "build": {
-        "context": ".",
+        "context": "..",
         "dockerfile": "docker/Dockerfile",
         "target": "dev",
         "args": {
