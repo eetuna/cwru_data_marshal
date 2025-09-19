@@ -1,0 +1,27 @@
+# Ignore VCS
+.git
+.gitignore
+
+# Ignore local configs
+.vscode
+.idea
+
+# Ignore build artifacts
+build
+out
+bin
+lib
+dist
+CMakeFiles
+CMakeCache.txt
+compile_commands.json
+
+# Ignore data
+data/mrd/*.h5
+data/mrd/*.json
+data/mrd/*.jsonl
+data/mrd/latest.json
+
+# Ignore OS clutter
+.DS_Store
+Thumbs.db

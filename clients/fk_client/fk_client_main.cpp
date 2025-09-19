@@ -13,8 +13,8 @@
 #include <iostream>
 #include <boost/asio.hpp>
 #include <boost/beast/http.hpp>
-#include <boost/beast/core/flat_buffer.hpp>          // for flat_buffer
-#include <boost/beast/core/buffers_to_string.hpp>    // if you use buffers_to_string
+#include <boost/beast/core/flat_buffer.hpp>       // for flat_buffer
+#include <boost/beast/core/buffers_to_string.hpp> // if you use buffers_to_string
 
 #include <nlohmann/json.hpp>
 #include <chrono>
@@ -24,12 +24,17 @@ using json = nlohmann::json;
 
 int main(int argc, char **argv)
 {
+    bool pretty = false;
     std::string base = "http://localhost:8080";
     for (int i = 1; i < argc; ++i)
     {
         std::string a = argv[i];
         if (a == "--http" && i + 1 < argc)
             base = argv[++i];
+        else if (std::string(argv[i]) == "--pretty")
+        {
+            pretty = true;
+        }
     }
     // POST /v1/pose/update periodically
     boost::asio::io_context ioc;
@@ -53,6 +58,27 @@ int main(int argc, char **argv)
         boost::beast::flat_buffer buf;
         http::response<http::string_body> res;
         http::read(sock, buf, res);
+
+        try
+        {
+            auto j = nlohmann::json::parse(res.body());
+            std::cout << "[fk_client] status=" << res.result_int() << " body:\n";
+            if (pretty)
+            {
+                std::cout << j.dump(2) << std::endl; // pretty JSON
+            }
+            else
+            {
+                std::cout << j.dump() << std::endl; // compact JSON
+            }
+        }
+        catch (const std::exception &e)
+        {
+            std::cout << "[fk_client] status=" << res.result_int()
+                      << " raw body=" << res.body()
+                      << " (failed to parse JSON: " << e.what() << ")" << std::endl;
+        }
+
         sock.shutdown(boost::asio::ip::tcp::socket::shutdown_both);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }

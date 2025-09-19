@@ -46,7 +46,30 @@ int main(int argc, char **argv)
     HttpServer http{ioc, http_ep, state};
     WsServer ws{ioc, ws_ep, state};
 
-    std::cout << "marshal listening http=" << http_bind << " ws=" << ws_bind << "\n";
+    // Default root is /data (set in MarshalState)
+    std::string data_root = state.data_dir;
+    // Simple override: if --data is provided, grab its argument
+    for (int i = 1; i + 1 < argc; ++i)
+    {
+        if (std::string(argv[i]) == "--data")
+        {
+            data_dir = argv[i + 1];
+            break;
+        }
+    }
+
+    // Ensure mrd subfolder under data_dir exists
+    std::error_code ec;
+    std::filesystem::create_directories(
+        std::filesystem::path(data_root) / "mrd", ec);
+    if (ec)
+    {
+        std::cerr << "WARN: failed to ensure " << data_root << "/mrd : " << ec.message() << "\n";
+    }
+    // Pass into state
+    state.data_dir = data_root;
+    std::cout << "marshal listening http=" << http_bind << " ws=" << ws_bind << " data=" << state.data_dir << "\n";
+
     ioc.run();
     return 0;
 }
