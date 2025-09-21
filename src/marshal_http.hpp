@@ -342,23 +342,46 @@ private:
                     const uint64_t seq = g_seq.fetch_add(1);
                     std::ostringstream name;
                     name << ts << '_' << std::setw(6) << std::setfill('0') << seq << ".mrd";
-                    fs::path out_path = mrd_root / name.str();
+                    
+// Choose sink root based on mode
+fs::path sink_root;
+fs::path index_root;
+if (state.sink_mode == SinkMode::MRD) {
+    sink_root = mrd_root;
+    index_root = mrd_root;
+} else {
+    std::string session = state.dumpbox_session.empty() ? iso8601_now_ms() : state.dumpbox_session;
+    fs::path session_dir = fs::path(state.dumpbox_root) / session;
+    index_root = session_dir;
+    sink_root = session_dir / "files";
+    std::error_code ec_mk;
+    fs::create_directories(sink_root, ec_mk);
+    state.dumpbox_session = session; // persist
+}
 
-                    // Atomic write helper
-                    write_atomic(out_path, body.data(), body.size());
+fs::path out_path = sink_root / name.str();
 
-                    std::error_code ec;
-                    auto size_bytes = fs::file_size(out_path, ec);
-                    if (ec)
-                        size_bytes = body.size();
+// Atomic write helper
+write_atomic(out_path, body.data(), body.size());
 
-                    json entry = {{"path", out_path.string()}, {"ts", ts}, {"size_bytes", size_bytes}, {"type", "acq"}, {"seq", seq}};
+std::error_code ec;
+auto size_bytes = fs::file_size(out_path, ec);
+if (ec)
+    size_bytes = body.size();
 
-                    // fs::path meta_root = fs::path(state.data_dir);
-                    append_line(mrd_root / "index.jsonl", entry.dump());
-                    const std::string latest_dump = entry.dump();
-                    // Atomic write helper
-                    write_atomic(mrd_root / "latest.json", latest_dump.data(), latest_dump.size());
+json entry = {
+    {"path", out_path.string()},
+    {"ts", ts},
+    {"size_bytes", size_bytes},
+    {"type", "mrd"},
+    {"seq", seq}
+};
+
+append_line(index_root / "index.jsonl", entry.dump());
+const std::string latest_dump = entry.dump();
+// Atomic write helper
+write_atomic(index_root / "latest.json", latest_dump.data(), latest_dump.size());
+
 
                     http::response<http::string_body> res{http::status::created, req.version()};
                     res.set(http::field::content_type, "application/json");

@@ -21,6 +21,9 @@ int main(int argc, char **argv)
     std::string http_bind = "0.0.0.0:8080";
     std::string ws_bind = "0.0.0.0:8090";
     std::string data_dir = "/data";
+    std::string sink = "mrd";
+    std::string dumpbox_root = "/data/dumpbox";
+    std::string dumpbox_session = "";
     for (int i = 1; i < argc; ++i)
     {
         std::string a = argv[i];
@@ -30,6 +33,12 @@ int main(int argc, char **argv)
             ws_bind = argv[++i];
         else if (a == "--data" && i + 1 < argc)
             data_dir = argv[++i];
+        else if (a == "--sink" && i + 1 < argc)
+            sink = argv[++i];
+        else if (a == "--dumpbox-root" && i + 1 < argc)
+            dumpbox_root = argv[++i];
+        else if (a == "--dumpbox-session" && i + 1 < argc)
+            dumpbox_session = argv[++i];
     }
     auto split = [](const std::string &s)
     { auto p=s.find(":"); return std::pair{s.substr(0,p), static_cast<unsigned short>(std::stoi(s.substr(p+1)))}; };
@@ -48,6 +57,10 @@ int main(int argc, char **argv)
 
     // Default root is /data (set in MarshalState)
     std::string data_root = state.data_dir;
+
+state.sink_mode = (sink == "dumpbox") ? SinkMode::DUMPBOX : SinkMode::MRD;
+state.dumpbox_root = dumpbox_root;
+state.dumpbox_session = dumpbox_session;
     // Simple override: if --data is provided, grab its argument
     for (int i = 1; i + 1 < argc; ++i)
     {
@@ -58,14 +71,19 @@ int main(int argc, char **argv)
         }
     }
 
-    // Ensure mrd subfolder under data_dir exists
-    std::error_code ec;
-    std::filesystem::create_directories(
-        std::filesystem::path(data_root) / "mrd", ec);
-    if (ec)
-    {
-        std::cerr << "WARN: failed to ensure " << data_root << "/mrd : " << ec.message() << "\n";
-    }
+// Ensure sink directories
+std::error_code ec;
+if (state.sink_mode == SinkMode::MRD) {
+    std::filesystem::create_directories(std::filesystem::path(data_dir) / "mrd", ec);
+    if (ec) { std::cerr << "WARN: failed to ensure " << data_dir << "/mrd : " << ec.message() << "\n"; }
+} else {
+    // DUMPBOX
+    std::string session_name = state.dumpbox_session.empty() ? iso8601_now_ms() : state.dumpbox_session;
+    state.dumpbox_session = session_name;
+    std::filesystem::create_directories(std::filesystem::path(state.dumpbox_root) / session_name / "files", ec);
+    if (ec) { std::cerr << "WARN: failed to ensure dumpbox dirs: " << ec.message() << "\n"; }
+}
+
     // Pass into state
     state.data_dir = data_root;
     std::cout << "marshal listening http=" << http_bind << " ws=" << ws_bind << " data=" << state.data_dir << "\n";

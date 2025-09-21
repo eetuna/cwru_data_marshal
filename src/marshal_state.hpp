@@ -11,6 +11,7 @@
  */
 
 #pragma once
+#include <atomic>
 #include <unordered_set>
 #include <mutex>
 #include <memory>
@@ -19,6 +20,7 @@
 #include <boost/asio.hpp>
 #include <nlohmann/json.hpp>
 #include "common/pose.hpp"
+enum class SinkMode { MRD, DUMPBOX };
 
 
 struct HubClient { std::shared_ptr<void> ws; }; // opaque holder
@@ -33,6 +35,11 @@ std::string type{"acq"};
 
 
 struct MarshalState {
+SinkMode sink_mode{SinkMode::MRD};
+std::string dumpbox_root{"/data/dumpbox"};
+std::string dumpbox_session{};
+std::atomic<uint64_t> seq{0};
+
 PoseStore poses;
 std::string data_dir{"/data"};
 std::mutex ws_mtx;

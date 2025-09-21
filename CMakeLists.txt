@@ -64,8 +64,6 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 add_executable(marshal src/marshal_main.cpp src/marshal_http.hpp src/marshal_ws.hpp src/marshal_state.hpp)
 target_link_libraries(marshal PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json)
 
-add_executable(dumpbox services/dumpbox/dumpbox_main.cpp)
-target_link_libraries(dumpbox PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json ${ismrmrd_target})
 
 add_executable(playback services/playback/playback_main.cpp)
 target_link_libraries(playback PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json ${ismrmrd_target})

@@ -1,143 +1,159 @@
 /*
  * File: services/playback/playback_main.cpp
- * Project: CWRU Data Marshal
- * Purpose: Internal support module
- * Notes:
- *  - See docs/PURPOSE.md and docs/ARCHITECTURE.md
- *  - Atomic file writes via include/atomic_write.hpp
- *  - /health returns constant JSON; no shared state
- *  - WebSocket ping/pong keepalive recommended
- * Last updated: 2025-09-15
+ * Purpose: HTTP-only playback that re-POSTs MRDs from a dumpbox session to /v1/mrd/ingest
  */
 
 #include <iostream>
 #include <filesystem>
-#include <thread>
+#include <fstream>
+#include <vector>
+#include <string>
 #include <stdexcept>
+#include <chrono>
+#include <thread>
+
+#include <nlohmann/json.hpp>
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
-#include <boost/beast/websocket.hpp>
-#include <ismrmrd/dataset.h>
-#include <nlohmann/json.hpp>
-#include <fstream>
+#include <boost/beast/http.hpp>
 
-using json = nlohmann::json;
 namespace fs = std::filesystem;
-namespace websocket = boost::beast::websocket;
+namespace asio = boost::asio;
+namespace beast = boost::beast;
+namespace http = boost::beast::http;
+using json = nlohmann::json;
+using tcp = asio::ip::tcp;
 
-static void ws_send(websocket::stream<boost::asio::ip::tcp::socket> &ws, const json &j)
-{
-    const std::string s = j.dump();
-    ws.text(true);
-    ws.write(boost::asio::buffer(s));
-}
-
-static void parse_ws_url(const std::string &ws_url,
-                         std::string &host, std::string &port, std::string &target)
-{
-    // expect ws://host:port/path
-    auto scheme_pos = ws_url.find("://");
-    auto rest = (scheme_pos == std::string::npos) ? ws_url : ws_url.substr(scheme_pos + 3);
+static void parse_http_url(const std::string& url, std::string& host, std::string& port, std::string& base_target) {
+    if (url.rfind("http://",0)!=0) throw std::runtime_error("only http:// supported");
+    std::string rest = url.substr(7);
     auto slash = rest.find('/');
-    std::string hp = (slash == std::string::npos) ? rest : rest.substr(0, slash);
-    target = (slash == std::string::npos) ? "/" : rest.substr(slash);
-    auto colon = hp.find(':');
-    if (colon == std::string::npos)
-    {
-        host = hp;
-        port = "80"; // default
+    std::string hostport = slash==std::string::npos ? rest : rest.substr(0,slash);
+    base_target = slash==std::string::npos ? "" : rest.substr(slash);
+    auto colon = hostport.find(':');
+    if (colon==std::string::npos) { host = hostport; port = "80"; }
+    else { host = hostport.substr(0,colon); port = hostport.substr(colon+1); }
+}
+
+static void http_post_file(const std::string& http_base, const std::string& file_path) {
+    std::string host, port, base_target;
+    parse_http_url(http_base, host, port, base_target);
+    std::string target = "/v1/mrd/ingest";
+    if (!base_target.empty() && base_target != "/") {
+        // allow a base path (e.g., http://host:8080/api)
+        if (base_target.back() == '/') target = base_target + "v1/mrd/ingest";
+        else target = base_target + "/v1/mrd/ingest";
     }
-    else
-    {
-        host = hp.substr(0, colon);
-        port = hp.substr(colon + 1);
+
+    asio::io_context ioc;
+    tcp::resolver resolver{ioc};
+    auto const results = resolver.resolve(host, port);
+    tcp::socket socket{ioc};
+    asio::connect(socket, results.begin(), results.end());
+
+    std::ifstream ifs(file_path, std::ios::binary);
+    if (!ifs) throw std::runtime_error("open failed: " + file_path);
+    std::string body((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+    http::request<http::string_body> req{http::verb::post, target, 11};
+    req.set(http::field::host, host);
+    req.set(http::field::content_type, "application/octet-stream");
+    req.body() = std::move(body);
+    req.prepare_payload();
+
+    http::response<http::string_body> res;
+    beast::flat_buffer buf;
+    http::write(socket, req);
+    http::read(socket, buf, res);
+    beast::error_code ec;
+    socket.shutdown(tcp::socket::shutdown_both, ec);
+    if (res.result() != http::status::ok && res.result() != http::status::no_content && res.result() != http::status::created) {
+        throw std::runtime_error("HTTP POST failed: " + std::to_string((int)res.result()));
     }
 }
 
-int main(int argc, char **argv)
-{
-    try
-    {
-        std::string http = "http://localhost:8080"; // reserved for future
-        std::string ws_url = "ws://localhost:8090/ws";
-        std::string data = "/data"; // NOTE: if your metadata lives under /data/mrd, pass --data /data/mrd
+static std::chrono::system_clock::time_point parse_iso_loose(const std::string& s) {
+    // expects YYYY-MM-DDThh:mm:ss[.ms]Z
+    std::tm tm{}; long ms = 0;
+    if (s.size() >= 20) {
+        tm.tm_year = std::stoi(s.substr(0,4)) - 1900;
+        tm.tm_mon  = std::stoi(s.substr(5,2)) - 1;
+        tm.tm_mday = std::stoi(s.substr(8,2));
+        tm.tm_hour = std::stoi(s.substr(11,2));
+        tm.tm_min  = std::stoi(s.substr(14,2));
+        tm.tm_sec  = std::stoi(s.substr(17,2));
+        auto dot = s.find('.', 19);
+        if (dot != std::string::npos) ms = std::stol(s.substr(dot+1));
+    }
+    auto tt = timegm(&tm);
+    return std::chrono::system_clock::from_time_t(tt) + std::chrono::milliseconds(ms);
+}
 
-        for (int i = 1; i < argc; ++i)
-        {
+int main(int argc, char** argv) {
+    try {
+        std::string http_base = "http://localhost:8080";
+        fs::path session_dir = "/data/dumpbox";
+        double speed = 0.0; // 0 = as fast as possible
+
+        for (int i=1;i<argc;++i) {
             std::string a = argv[i];
-            if (a == "--http" && i + 1 < argc)
-                http = argv[++i];
-            else if (a == "--ws" && i + 1 < argc)
-                ws_url = argv[++i];
-            else if (a == "--data" && i + 1 < argc)
-                data = argv[++i];
+            if (a=="--http" && i+1<argc) http_base = argv[++i];
+            else if (a=="--data" && i+1<argc) session_dir = argv[++i];
+            else if (a=="--speed" && i+1<argc) speed = std::stod(argv[++i]);
         }
 
-        const fs::path latest = fs::path(data) / "latest.json";
-        if (!fs::exists(latest))
-            std::cerr << "no latest.json; waiting...\n";
-        while (!fs::exists(latest))
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-
-        // parse latest.json
-        json lj;
-        {
-            std::ifstream lf(latest);
-            if (!lf)
-                throw std::runtime_error("failed to open latest.json at " + latest.string());
-            lf >> lj;
+        fs::path index_path = session_dir / "index.jsonl";
+        if (!fs::exists(index_path)) {
+            std::cerr << "index.jsonl not found under --data: " << index_path << "\n";
+            return 1;
         }
 
-        // Use "path" (server writes this); fall back to "file" if present
-        std::string mrd_path = lj.value("path", std::string());
-        if (mrd_path.empty())
-            mrd_path = lj.value("file", std::string());
-        if (mrd_path.empty())
-            throw std::runtime_error("latest.json missing both 'path' and 'file'");
-
-        // (Optional) validate type/seq if you want:
-        // std::string typ = lj.value("type", "");
-        // if (typ.empty()) throw std::runtime_error("latest.json missing 'type'");
-
-        // open MRD dataset
-        ISMRMRD::Dataset d(mrd_path.c_str(), "dataset", false);
-        const uint64_t n = d.getNumberOfAcquisitions();
-        std::cerr << "Acquisitions: " << n << "\n";
-
-        // connect WS once
-        boost::asio::io_context ioc;
-        std::string host, port, target;
-        parse_ws_url(ws_url, host, port, target);
-
-        boost::asio::ip::tcp::resolver res{ioc};
-        auto const results = res.resolve(host, port);
-        boost::asio::ip::tcp::socket sock{ioc};
-        boost::asio::connect(sock, results.begin(), results.end());
-        websocket::stream<boost::asio::ip::tcp::socket> ws{std::move(sock)};
-        ws.handshake(host, target); // Host header is just host (no port) which is fine for local
-        std::cerr << "WebSocket connected to " << ws_url << "\n";
-
-        // naive pacing: one-by-one with small delay
-        for (uint64_t i = 0; i < n; ++i)
+        struct Item { std::chrono::system_clock::time_point ts; fs::path file; };
+        std::vector<Item> items;
         {
-            ISMRMRD::Acquisition acq;
-            d.readAcquisition(i, acq);
-            ws_send(ws, json{
-                            {"topic", "mrd.acq"},
-                            {"payload", {{"idx", i}}}});
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            if (i % 100 == 0 || i + 1 == n)
-            {
-                std::cerr << "Sent " << (i + 1) << "/" << n << "\n";
+            std::ifstream ifs(index_path);
+            std::string line;
+            while (std::getline(ifs, line)) {
+                if (line.empty()) continue;
+                try {
+                    auto j = json::parse(line);
+                    if (!j.contains("file")) continue;
+                    std::string ts = j.value("ts", "");
+                    fs::path fp = session_dir / j["file"].get<std::string>();
+                    items.push_back({ ts.empty()? std::chrono::system_clock::now() : parse_iso_loose(ts), fp });
+                } catch (...) {
+                    // skip malformed
+                }
             }
         }
+        if (items.empty()) {
+            std::cerr << "no items in index.jsonl\n";
+            return 1;
+        }
 
-        // close politely
-        ws.close(websocket::close_code::normal);
+        std::cout << "playback (HTTP): " << items.size() << " files -> " << http_base << "/v1/mrd/ingest\n";
+
+        auto t0 = items.front().ts;
+        auto last_waited = std::chrono::milliseconds(0);
+
+        for (size_t i=0; i<items.size(); ++i) {
+            auto& it = items[i];
+            if (speed > 0.0) {
+                auto dt = std::chrono::duration_cast<std::chrono::milliseconds>((it.ts - t0) / speed);
+                if (dt > last_waited) {
+                    std::this_thread::sleep_for(dt - last_waited);
+                    last_waited = dt;
+                }
+            }
+            if (!fs::exists(it.file)) {
+                std::cerr << "missing file: " << it.file << "\n";
+                continue;
+            }
+            http_post_file(http_base, it.file.string());
+            std::cout << "posted " << it.file.filename().string() << " (" << (i+1) << "/" << items.size() << ")\n";
+        }
         return 0;
-    }
-    catch (const std::exception &e)
-    {
+    } catch (const std::exception& e) {
         std::cerr << "playback error: " << e.what() << "\n";
         return 1;
     }
