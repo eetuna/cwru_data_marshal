@@ -1,27 +1,29 @@
-# Ignore VCS
+# Git
 .git
 .gitignore
 
-# Ignore local configs
+# Local config
 .vscode
 .idea
 
-# Ignore build artifacts
+# Build outputs (we build inside the container)
 build
 out
 bin
-lib
-dist
+obj
 CMakeFiles
 CMakeCache.txt
+cmake_install.cmake
 compile_commands.json
 
-# Ignore data
-data/mrd/*.h5
-data/mrd/*.json
-data/mrd/*.jsonl
-data/mrd/latest.json
+# Local data — don’t bake into image
+data
+src/data
 
-# Ignore OS clutter
+# Logs
+*.log
+*.jsonl
+*.json.tmp
+
+# OS cruft
 .DS_Store
-Thumbs.db

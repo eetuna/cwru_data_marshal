@@ -343,7 +343,7 @@ private:
                     std::ostringstream name;
                     name << ts << '_' << std::setw(6) << std::setfill('0') << seq << ".mrd";
                     
-// Choose sink root based on mode
+// Select sink roots by mode
 fs::path sink_root;
 fs::path index_root;
 if (state.sink_mode == SinkMode::MRD) {
@@ -353,10 +353,10 @@ if (state.sink_mode == SinkMode::MRD) {
     std::string session = state.dumpbox_session.empty() ? iso8601_now_ms() : state.dumpbox_session;
     fs::path session_dir = fs::path(state.dumpbox_root) / session;
     index_root = session_dir;
-    sink_root = session_dir / "files";
+    sink_root  = session_dir / "files";
     std::error_code ec_mk;
     fs::create_directories(sink_root, ec_mk);
-    state.dumpbox_session = session; // persist
+    state.dumpbox_session = session;
 }
 
 fs::path out_path = sink_root / name.str();
@@ -364,10 +364,9 @@ fs::path out_path = sink_root / name.str();
 // Atomic write helper
 write_atomic(out_path, body.data(), body.size());
 
-std::error_code ec;
-auto size_bytes = fs::file_size(out_path, ec);
-if (ec)
-    size_bytes = body.size();
+std::error_code ec2;
+auto size_bytes = fs::file_size(out_path, ec2);
+if (ec2) size_bytes = body.size();
 
 json entry = {
     {"path", out_path.string()},
@@ -379,7 +378,6 @@ json entry = {
 
 append_line(index_root / "index.jsonl", entry.dump());
 const std::string latest_dump = entry.dump();
-// Atomic write helper
 write_atomic(index_root / "latest.json", latest_dump.data(), latest_dump.size());
 
 

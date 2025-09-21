@@ -3,27 +3,38 @@
  * Project: CWRU Data Marshal
  * Purpose: Main server binary: HTTP /v1/mrd/* endpoints, WS broker
  * Notes:
- *  - See docs/PURPOSE.md and docs/ARCHITECTURE.md
  *  - Atomic file writes via include/atomic_write.hpp
  *  - /health returns constant JSON; no shared state
  *  - WebSocket ping/pong keepalive recommended
- * Last updated: 2025-09-15
+ * Last updated: 2025-09-21
  */
 
 #include <iostream>
+#include <filesystem>
+#include <system_error>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 #include <boost/asio.hpp>
+
 #include "marshal_http.hpp"
 #include "marshal_ws.hpp"
 #include "marshal_state.hpp"
 
+namespace fs = std::filesystem;
+
 int main(int argc, char **argv)
 {
+    // Defaults aligned with devcontainer: everything under /src/data (via --data ./data)
     std::string http_bind = "0.0.0.0:8080";
     std::string ws_bind = "0.0.0.0:8090";
-    std::string data_dir = "/data";
-    std::string sink = "mrd";
-    std::string dumpbox_root = "/data/dumpbox";
+    std::string data_dir = "./data";
+    std::string sink = "mrd"; // "mrd" or "dumpbox"
+    std::string dumpbox_root = "./data/dumpbox";
     std::string dumpbox_session = "";
+
+    // Parse CLI
     for (int i = 1; i < argc; ++i)
     {
         std::string a = argv[i];
@@ -40,53 +51,74 @@ int main(int argc, char **argv)
         else if (a == "--dumpbox-session" && i + 1 < argc)
             dumpbox_session = argv[++i];
     }
+
     auto split = [](const std::string &s)
-    { auto p=s.find(":"); return std::pair{s.substr(0,p), static_cast<unsigned short>(std::stoi(s.substr(p+1)))}; };
+    {
+        auto p = s.find(':');
+        return std::pair{s.substr(0, p), static_cast<unsigned short>(std::stoi(s.substr(p + 1)))};
+    };
     auto [http_host, http_port] = split(http_bind);
     auto [ws_host, ws_port] = split(ws_bind);
 
+    // IO + state
     boost::asio::io_context ioc{1};
     MarshalState state;
     state.io = &ioc;
 
-    boost::asio::ip::tcp::endpoint http_ep{boost::asio::ip::make_address(http_host), http_port};
-    boost::asio::ip::tcp::endpoint ws_ep{boost::asio::ip::make_address(ws_host), ws_port};
+    // Apply CLI to state FIRST
+    state.sink_mode = (sink == "dumpbox") ? SinkMode::DUMPBOX : SinkMode::MRD;
+    state.data_dir = data_dir;
+    state.dumpbox_root = dumpbox_root;
+    state.dumpbox_session = dumpbox_session;
 
-    HttpServer http{ioc, http_ep, state};
-    WsServer ws{ioc, ws_ep, state};
-
-    // Default root is /data (set in MarshalState)
-    std::string data_root = state.data_dir;
-
-state.sink_mode = (sink == "dumpbox") ? SinkMode::DUMPBOX : SinkMode::MRD;
-state.dumpbox_root = dumpbox_root;
-state.dumpbox_session = dumpbox_session;
-    // Simple override: if --data is provided, grab its argument
-    for (int i = 1; i + 1 < argc; ++i)
+    // Ensure directories
+    std::error_code ec;
+    if (state.sink_mode == SinkMode::MRD)
     {
-        if (std::string(argv[i]) == "--data")
+        fs::create_directories(fs::path(state.data_dir) / "mrd", ec);
+        if (ec)
         {
-            data_dir = argv[i + 1];
-            break;
+            std::cerr << "WARN: ensure " << (fs::path(state.data_dir) / "mrd")
+                      << " failed: " << ec.message() << "\n";
+        }
+    }
+    else
+    {
+        std::string session_name = state.dumpbox_session.empty()
+                                       ? iso8601_now_ms()
+                                       : state.dumpbox_session;
+        state.dumpbox_session = session_name;
+        fs::create_directories(fs::path(state.dumpbox_root) / session_name / "files", ec);
+        if (ec)
+        {
+            std::cerr << "WARN: ensure "
+                      << (fs::path(state.dumpbox_root) / session_name / "files")
+                      << " failed: " << ec.message() << "\n";
         }
     }
 
-// Ensure sink directories
-std::error_code ec;
-if (state.sink_mode == SinkMode::MRD) {
-    std::filesystem::create_directories(std::filesystem::path(data_dir) / "mrd", ec);
-    if (ec) { std::cerr << "WARN: failed to ensure " << data_dir << "/mrd : " << ec.message() << "\n"; }
-} else {
-    // DUMPBOX
-    std::string session_name = state.dumpbox_session.empty() ? iso8601_now_ms() : state.dumpbox_session;
-    state.dumpbox_session = session_name;
-    std::filesystem::create_directories(std::filesystem::path(state.dumpbox_root) / session_name / "files", ec);
-    if (ec) { std::cerr << "WARN: failed to ensure dumpbox dirs: " << ec.message() << "\n"; }
-}
+    // Networking endpoints
+    boost::asio::ip::tcp::endpoint http_ep{boost::asio::ip::make_address(http_host), http_port};
+    boost::asio::ip::tcp::endpoint ws_ep{boost::asio::ip::make_address(ws_host), ws_port};
 
-    // Pass into state
-    state.data_dir = data_root;
-    std::cout << "marshal listening http=" << http_bind << " ws=" << ws_bind << " data=" << state.data_dir << "\n";
+    // Servers (share state by reference)
+    HttpServer http{ioc, http_ep, state};
+    WsServer ws{ioc, ws_ep, state};
+
+    // Log effective config
+    std::cout << "marshal listening http=" << http_bind
+              << " ws=" << ws_bind
+              << " data=" << state.data_dir;
+    if (state.sink_mode == SinkMode::DUMPBOX)
+    {
+        std::cout << " dumpbox_root=" << state.dumpbox_root
+                  << " session=" << state.dumpbox_session;
+    }
+    else
+    {
+        std::cout << " sink=mrd";
+    }
+    std::cout << "\n";
 
     ioc.run();
     return 0;

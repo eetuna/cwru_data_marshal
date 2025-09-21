@@ -2,40 +2,34 @@
 /build/
 /out/
 /bin/
-/lib/
-/dist/
+/obj/
 /CMakeFiles/
 /CMakeCache.txt
-Makefile
-cmake_install.cmake
-compile_commands.json
+/cmake_install.cmake
+/compile_commands.json
 
-# IDE / editor
+# Data & logs
+/data/
+/src/data/
+/*.log
+*.jsonl
+*.json.tmp
+
+# IDE/editor
 .vscode/
 .idea/
 *.swp
 *.swo
-*.sublime-workspace
-*.sublime-project
-
-# OS junk
+*~
 .DS_Store
-Thumbs.db
 
-# Logs
-*.log
+# Python (if you add any scripts)
+/__pycache__/
+/*.pyc
 
-# Generated data
-/data/mrd/*.h5
-/data/mrd/*.json
-/data/mrd/*.jsonl
-/data/mrd/*.tmp
-/data/mrd/latest.json
-/data/
-
-# Python virtualenv (if used for helpers)
-.venv/
-env/
-venv/
-__pycache__/
-*.pyc
+# Compressed files
+*.zip
+*.tar.gz
+*.tar.bz2
+*.rar
+*.7z

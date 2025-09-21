@@ -17,7 +17,7 @@
 
 int main(int argc, char **argv)
 {
-  const char *out = (argc > 1) ? argv[1] : "/data/mrd/minimal.h5";
+  const char *out = (argc > 1) ? argv[1] : "./data/mrd/minimal.h5";
 
   try
   {

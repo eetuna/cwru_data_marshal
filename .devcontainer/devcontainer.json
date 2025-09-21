@@ -31,10 +31,11 @@
     "workspaceFolder": "/src",
     "mounts": [
         "source=${localWorkspaceFolder},target=/src,type=bind",
-        "source=${localWorkspaceFolder}/data,target=/data,type=bind"
+        "source=${localWorkspaceFolder}/data,target=/src/data,type=bind"
+        //"source=${localWorkspaceFolder}/data,target=/data,type=bind"
     ],
     "remoteUser": "root",
     "updateRemoteUserUID": false,
     //"postCreateCommand": "printf 'Devcontainer built using %s\\n' 'docker/Dockerfile'"
-    "postCreateCommand": "printf 'Devcontainer built using %s\\nGenerator=%s LinkParallel=%s\\n' 'docker/Dockerfile' \"$CMAKE_GENERATOR\" \"$CMAKE_LINK_PARALLEL_JOBS\""
+    "postCreateCommand": "mkdir -p /src/data/mrd /src/data/dumpbox && echo 'Data root: /src/data' && printf 'Devcontainer built using %s\\nGenerator=%s LinkParallel=%s\\n' 'docker/Dockerfile' \"$CMAKE_GENERATOR\" \"$CMAKE_LINK_PARALLEL_JOBS\""
 }
