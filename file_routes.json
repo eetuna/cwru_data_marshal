@@ -1,0 +1,16 @@
+{
+    "client-a": {
+      "read_from": "file1.json",
+      "write_to1": "file2.json",
+      "write_to2": "file3.json"
+    },
+    "client-b": {
+      "read_from": "file2.json",
+      "write_to": "file3.json"
+    },
+    "client-c": {
+      "read_from": "file3.json",
+      "write_to": "file1.json"
+    }
+  }
+  

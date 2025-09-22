@@ -1,0 +1,89 @@
+Step 1/6 : FROM gcc:latest
+ ---> 145e589f3f24
+Step 2/6 : WORKDIR /app
+ ---> Using cache
+ ---> 0618026a75e8
+Step 3/6 : COPY server.cpp files.json file1.json file2.json file3.json httplib.h json.hpp ./
+ ---> dd04283f76b7
+Step 4/6 : RUN g++ server.cpp -o server -pthread
+ ---> Running in 54f6232a6f44
+ ---> Removed intermediate container 54f6232a6f44
+ ---> 9dac7a0078f9
+Step 5/6 : EXPOSE 8080
+ ---> Running in 6cee7bbc61a5
+ ---> Removed intermediate container 6cee7bbc61a5
+ ---> 11c00be14cb6
+Step 6/6 : CMD ["./server"]
+ ---> Running in bcfac5ebc561
+ ---> Removed intermediate container bcfac5ebc561
+ ---> 02c2271dc26a
+
+Successfully built 02c2271dc26a
+Successfully tagged src_server:latest
+Step 1/6 : FROM gcc:latest
+ ---> 145e589f3f24
+Step 2/6 : WORKDIR /app
+ ---> Using cache
+ ---> 0618026a75e8
+Step 3/6 : COPY client-a.cpp file_routes.json httplib.h json.hpp ./
+ ---> Using cache
+ ---> 0e3f037dc2fe
+Step 4/6 : RUN g++ client-a.cpp -o client-a -pthread
+ ---> Using cache
+ ---> 65eccbf8da3b
+Step 5/6 : COPY entrypoint-a.sh ./
+ ---> Using cache
+ ---> 8ba8fe4dfcc0
+Step 6/6 : CMD ["./entrypoint-a.sh"]
+ ---> Using cache
+ ---> 86822e677437
+
+Successfully built 86822e677437
+Successfully tagged src_client-a:latest
+Step 1/6 : FROM gcc:latest
+ ---> 145e589f3f24
+Step 2/6 : WORKDIR /app
+ ---> Using cache
+ ---> 0618026a75e8
+Step 3/6 : COPY client-b.cpp file_routes.json httplib.h json.hpp ./
+ ---> Using cache
+ ---> cf0a7bb932bb
+Step 4/6 : RUN g++ client-b.cpp -o client-b -pthread
+ ---> Using cache
+ ---> 479bd8868e75
+Step 5/6 : COPY entrypoint-b.sh ./
+ ---> Using cache
+ ---> b9c0f6241459
+Step 6/6 : CMD ["./entrypoint-b.sh"]
+ ---> Using cache
+ ---> 0d8c4f5c269c
+
+Successfully built 0d8c4f5c269c
+Successfully tagged src_client-b:latest
+Step 1/6 : FROM gcc:latest
+ ---> 145e589f3f24
+Step 2/6 : WORKDIR /app
+ ---> Using cache
+ ---> 0618026a75e8
+Step 3/6 : COPY client-c.cpp file_routes.json httplib.h json.hpp ./
+ ---> Using cache
+ ---> 229c7223033e
+Step 4/6 : RUN g++ client-c.cpp -o client-c -pthread
+ ---> Using cache
+ ---> 0e0914d87138
+Step 5/6 : COPY entrypoint-c.sh ./
+ ---> Using cache
+ ---> 1868a694fa88
+Step 6/6 : CMD ["./entrypoint-c.sh"]
+ ---> Using cache
+ ---> 4d7252525a6c
+
+Successfully built 4d7252525a6c
+Successfully tagged src_client-c:latest
+Attaching to cpp_server, cpp_client-b, cpp_client-c, cpp_client-a
+cpp_client-c | Failed to read from server file: file3.json
+cpp_client-a | Failed to read from server file: file1.json
+cpp_client-c exited with code 1
+cpp_client-a exited with code 1
+cpp_client-b | Failed to read from server file: file2.json
+cpp_client-b exited with code 1

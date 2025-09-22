@@ -1,0 +1,16 @@
+FROM gcc:latest
+
+# Create app directory
+WORKDIR /app
+
+# Copy all necessary files
+COPY client-b.cpp file_routes.json httplib.h json.hpp ./
+
+# Build client
+RUN g++ client-b.cpp -o client-b -pthread
+
+# Set default command (optional)
+#CMD ["./client"]
+
+COPY entrypoint-b.sh ./
+CMD ["./entrypoint-b.sh"]
