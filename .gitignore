@@ -9,9 +9,7 @@
 /compile_commands.json
 
 # Data & logs
-/data/
-/data/mrd/
-/src/data/
+data/
 /*.log
 *.jsonl
 *.json.tmp
