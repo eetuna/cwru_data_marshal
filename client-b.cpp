@@ -15,7 +15,7 @@ int64_t current_time_ns() {
 }
 
 int main() {
-    httplib::Client cli("server", 8080);
+    httplib::Client cli("172.28.1.10", 8080);
     while(true){
     std::string client_id = "client-b";
 

@@ -8,7 +8,9 @@ services:
     container_name: cpp_server
     ports:
       - "8080:8080"
-
+    networks:
+      cppnet:
+        ipv4_address: 172.28.1.10
   client-a:
     build:
       context: .
@@ -16,6 +18,9 @@ services:
     container_name: cpp_client-a
     depends_on:
       - server
+    networks:
+      cppnet:
+        ipv4_address: 172.28.1.11
 
   client-b:
     build:
@@ -23,7 +28,10 @@ services:
       dockerfile: Dockerfile.client-b
     container_name: cpp_client-b
     depends_on:
-      - server
+      - server   
+    networks:
+      cppnet:
+        ipv4_address: 172.28.1.12
 
   client-c:
     build:
@@ -32,3 +40,12 @@ services:
     container_name: cpp_client-c
     depends_on:
       - server
+    networks:
+      cppnet:
+        ipv4_address: 172.28.1.13
+networks:
+  cppnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
