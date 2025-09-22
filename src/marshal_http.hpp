@@ -286,6 +286,21 @@ private:
 
                     state.poses.set(pose);
 
+                    // WS: broadcast pose (non-fatal if WS not set)
+                    try
+                    {
+                        nlohmann::json evt = {
+                            {"type", "pose"},
+                            {"p", {pose.p[0], pose.p[1], pose.p[2]}},
+                            {"R", {pose.R[0], pose.R[1], pose.R[2], pose.R[3], pose.R[4], pose.R[5], pose.R[6], pose.R[7], pose.R[8]}},
+                            {"ts", iso8601_now_ms()}};
+                        state.ws_emit(evt.dump());
+                    }
+                    catch (...)
+                    {
+                        // ignore WS errors
+                    }
+
                     auto jpose = pose_to_json(pose);
                     jpose["ts"] = iso8601_now();
 
@@ -342,44 +357,62 @@ private:
                     const uint64_t seq = g_seq.fetch_add(1);
                     std::ostringstream name;
                     name << ts << '_' << std::setw(6) << std::setfill('0') << seq << ".mrd";
-                    
-// Select sink roots by mode
-fs::path sink_root;
-fs::path index_root;
-if (state.sink_mode == SinkMode::MRD) {
-    sink_root = mrd_root;
-    index_root = mrd_root;
-} else {
-    std::string session = state.dumpbox_session.empty() ? iso8601_now_ms() : state.dumpbox_session;
-    fs::path session_dir = fs::path(state.dumpbox_root) / session;
-    index_root = session_dir;
-    sink_root  = session_dir / "files";
-    std::error_code ec_mk;
-    fs::create_directories(sink_root, ec_mk);
-    state.dumpbox_session = session;
-}
 
-fs::path out_path = sink_root / name.str();
+                    // Select sink roots by mode
+                    fs::path sink_root;
+                    fs::path index_root;
+                    if (state.sink_mode == SinkMode::MRD)
+                    {
+                        sink_root = mrd_root;
+                        index_root = mrd_root;
+                    }
+                    else
+                    {
+                        std::string session = state.dumpbox_session.empty() ? iso8601_now_ms() : state.dumpbox_session;
+                        fs::path session_dir = fs::path(state.dumpbox_root) / session;
+                        index_root = session_dir;
+                        sink_root = session_dir / "files";
+                        std::error_code ec_mk;
+                        fs::create_directories(sink_root, ec_mk);
+                        state.dumpbox_session = session;
+                    }
 
-// Atomic write helper
-write_atomic(out_path, body.data(), body.size());
+                    fs::path out_path = sink_root / name.str();
 
-std::error_code ec2;
-auto size_bytes = fs::file_size(out_path, ec2);
-if (ec2) size_bytes = body.size();
+                    // Atomic write helper
+                    write_atomic(out_path, body.data(), body.size());
 
-json entry = {
-    {"path", out_path.string()},
-    {"ts", ts},
-    {"size_bytes", size_bytes},
-    {"type", "mrd"},
-    {"seq", seq}
-};
+                    std::error_code ec2;
+                    auto size_bytes = fs::file_size(out_path, ec2);
+                    if (ec2)
+                        size_bytes = body.size();
 
-append_line(index_root / "index.jsonl", entry.dump());
-const std::string latest_dump = entry.dump();
-write_atomic(index_root / "latest.json", latest_dump.data(), latest_dump.size());
+                    json entry = {
+                        {"path", out_path.string()},
+                        {"ts", ts},
+                        {"size_bytes", size_bytes},
+                        {"type", "mrd"},
+                        {"seq", seq}};
 
+                    append_line(index_root / "index.jsonl", entry.dump());
+                    const std::string latest_dump = entry.dump();
+                    write_atomic(index_root / "latest.json", latest_dump.data(), latest_dump.size());
+
+                    // WS: broadcast acquisition event (non-fatal if WS not set)
+                    try
+                    {
+                        nlohmann::json evt = {
+                            {"type", "acq"},
+                            {"path", out_path.string()},
+                            {"seq", seq},
+                            {"size_bytes", size_bytes},
+                            {"ts", ts}};
+                        state.ws_emit(evt.dump());
+                    }
+                    catch (...)
+                    {
+                        // ignore WS errors
+                    }
 
                     http::response<http::string_body> res{http::status::created, req.version()};
                     res.set(http::field::content_type, "application/json");

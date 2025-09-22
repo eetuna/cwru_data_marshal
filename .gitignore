@@ -10,6 +10,7 @@
 
 # Data & logs
 /data/
+/data/mrd/
 /src/data/
 /*.log
 *.jsonl

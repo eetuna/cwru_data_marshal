@@ -52,4 +52,7 @@ struct MarshalState
     std::unordered_set<void *> ws_clients; // track raw ptr keys
     boost::asio::io_context *io = nullptr;
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+
+    // WS emit hook (set by WsServer on init). Safe to call from HTTP handlers.
+    std::function<void(const std::string &)> ws_emit = [](const std::string &) {};
 };

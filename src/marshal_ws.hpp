@@ -31,6 +31,11 @@ public:
     WsServer(boost::asio::io_context &ioc, boost::asio::ip::tcp::endpoint ep, MarshalState &s)
         : acceptor_(ioc), socket_(ioc), state_(s)
     {
+        // Set the emit callback so HTTP handlers can push to all WS clients
+        state_.ws_emit = [this](const std::string &msg)
+        {
+            this->broadcast(msg);
+        };
         boost::system::error_code ec;
         acceptor_.open(ep.protocol(), ec);
         acceptor_.set_option(boost::asio::socket_base::reuse_address(true));
