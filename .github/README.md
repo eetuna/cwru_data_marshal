@@ -1,3 +1,0 @@
-# CWRU Data Marshal — Summary
-
-HTTP/WS hub for ISMRMRD ingest with Live and Record→Replay modes.
