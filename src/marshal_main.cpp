@@ -17,10 +17,39 @@
 #include <iomanip>
 #include <sstream>
 #include <boost/asio.hpp>
-
+#include <fcntl.h>
+#include <unistd.h>
 #include "marshal_http.hpp"
 #include "marshal_ws.hpp"
 #include "marshal_state.hpp"
+// === Realtime additions (minimal) ===
+#include "realtime.hpp"
+#include <thread>
+
+FrameQueue *g_queue = nullptr;
+LastValueCache g_lvc;
+static std::thread g_writer;
+static std::atomic<bool> g_run{false};
+
+static void writer_thread(const std::string &session_dir)
+{
+    try
+    {
+        SegmentWriter writer(session_dir);
+        Frame f;
+        while (g_run.load())
+        {
+            if (!g_queue->dequeue(f))
+                break;
+            auto meta = writer.append(f);
+            g_lvc.publish(meta);
+        }
+    }
+    catch (const std::exception &e)
+    {
+        fprintf(stderr, "writer_thread error: %s\n", e.what());
+    }
+}
 
 namespace fs = std::filesystem;
 
@@ -33,7 +62,9 @@ int main(int argc, char **argv)
     std::string sink = "mrd"; // "mrd" or "dumpbox"
     std::string dumpbox_root = "./data/dumpbox";
     std::string dumpbox_session = "";
-
+    std::string segment_root = "";
+    std::string sink_namedpipe = "";
+    size_t rb_capacity = 256;
     // Parse CLI
     for (int i = 1; i < argc; ++i)
     {
@@ -46,6 +77,12 @@ int main(int argc, char **argv)
             data_dir = argv[++i];
         else if (a == "--sink" && i + 1 < argc)
             sink = argv[++i];
+        else if (a == "--segment-root" && i + 1 < argc)
+            segment_root = argv[++i];
+        else if (a == "--sink-namedpipe" && i + 1 < argc)
+            sink_namedpipe = argv[++i];
+        else if (a == "--rb-capacity" && i + 1 < argc)
+            rb_capacity = static_cast<size_t>(std::stoull(argv[++i]));
         else if (a == "--dumpbox-root" && i + 1 < argc)
             dumpbox_root = argv[++i];
         else if (a == "--dumpbox-session" && i + 1 < argc)
@@ -96,6 +133,32 @@ int main(int argc, char **argv)
                       << " failed: " << ec.message() << "\n";
         }
     }
+
+    // Realtime: start queue + writer (under MRD sink root)
+    static FrameQueue queue(rb_capacity);
+    g_queue = &queue;
+    g_run = true;
+    g_writer = std::thread([&]
+                           {
+               std::string root = segment_root.empty()
+                                ? (fs::path(state.data_dir) / "mrd").string()
+                                : segment_root;
+                try {
+                   SegmentWriter writer(root);
+                   int fifo_fd = -1;
+                   if (!sink_namedpipe.empty()) {
+                       fifo_fd = ::open(sink_namedpipe.c_str(), O_WRONLY | O_NONBLOCK);
+                   }
+                   Frame f;
+                   while (g_run.load()) {
+                      if (!g_queue->dequeue(f)) break;
+                       auto meta = writer.append(f);
+                       g_lvc.publish(meta);
+                       if (fifo_fd != -1 && !f.payload.empty()) { (void)::write(fifo_fd, f.payload.data(), (ssize_t)f.payload.size()); }
+                   }
+               } catch (const std::exception &e) {
+                   fprintf(stderr, "writer_thread error: %s\n", e.what());
+               } });
 
     // Networking endpoints
     boost::asio::ip::tcp::endpoint http_ep{boost::asio::ip::make_address(http_host), http_port};

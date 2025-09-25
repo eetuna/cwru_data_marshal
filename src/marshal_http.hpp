@@ -19,6 +19,9 @@
 #include <boost/asio/strand.hpp>
 
 #include <nlohmann/json.hpp>
+#include "realtime.hpp"
+extern FrameQueue *g_queue;
+extern LastValueCache g_lvc;
 
 #include <filesystem>
 #include <fstream>
@@ -515,6 +518,102 @@ private:
                 }
             }
 
+            // POST /v1/realtime/ingest  (enqueue frame; body=bytes; query: series,frame,ts_ns)
+            if (req.method() == http::verb::post && req.target().starts_with("/v1/realtime/ingest"))
+            {
+                auto parse_q = [](const std::string &target) -> std::map<std::string, std::string>
+                {
+                    std::map<std::string, std::string> m;
+                    auto qpos = target.find('?');
+                    if (qpos == std::string::npos)
+                        return m;
+                    auto qs = target.substr(qpos + 1);
+                    std::stringstream ss(qs);
+                    std::string kv;
+                    while (std::getline(ss, kv, '&'))
+                    {
+                        auto eq = kv.find('=');
+                        if (eq == std::string::npos)
+                            continue;
+                        m[kv.substr(0, eq)] = kv.substr(eq + 1);
+                    }
+                    return m;
+                };
+                std::string target = std::string(req.target());
+                auto qp = parse_q(target);
+                std::string series = qp.count("series") ? qp["series"] : "default";
+                uint64_t frame_idx = qp.count("frame") ? std::stoull(qp["frame"]) : 0;
+                uint64_t ts_ns = qp.count("ts_ns") ? std::stoull(qp["ts_ns"]) : 0;
+
+                std::vector<uint8_t> payload(req.body().begin(), req.body().end());
+                Frame f = make_frame(series, frame_idx, ts_ns, std::move(payload));
+                if (g_queue)
+                    g_queue->enqueue(std::move(f));
+
+                http::response<http::string_body> res{http::status::ok, req.version()};
+                res.set(http::field::content_type, "application/json");
+                res.body() = R"({"ok":true})";
+                res.prepare_payload();
+                return respond(std::move(res));
+            }
+
+            // GET /v1/realtime/last?series=...
+            if (req.method() == http::verb::get && req.target().starts_with("/v1/realtime/last"))
+            {
+                auto parse_q = [](const std::string &target) -> std::map<std::string, std::string>
+                {
+                    std::map<std::string, std::string> m;
+                    auto qpos = target.find('?');
+                    if (qpos == std::string::npos)
+                        return m;
+                    auto qs = target.substr(qpos + 1);
+                    std::stringstream ss(qs);
+                    std::string kv;
+                    while (std::getline(ss, kv, '&'))
+                    {
+                        auto eq = kv.find('=');
+                        if (eq == std::string::npos)
+                            continue;
+                        m[kv.substr(0, eq)] = kv.substr(eq + 1);
+                    }
+                    return m;
+                };
+                std::string target = std::string(req.target());
+                auto qp = parse_q(target);
+                std::string series = qp.count("series") ? qp["series"] : "default";
+
+                http::response<http::string_body> res{http::status::ok, req.version()};
+                res.set(http::field::content_type, "application/json");
+                if (!g_queue)
+                {
+                    res.body() = R"({"error":"realtime not initialized"})";
+                }
+                else
+                {
+                    auto meta = g_lvc.get(series);
+                    if (!meta)
+                    {
+                        res.body() = R"({"error":"no data yet"})";
+                    }
+                    else
+                    {
+                        std::string j = std::string("{\"series\":\"") + meta->series + "\","
+                                                                                       "\"frame\":" +
+                                        std::to_string(meta->frame_idx) + ","
+                                                                          "\"ts_ns\":" +
+                                        std::to_string(meta->ts_ns) + ","
+                                                                      "\"path\":\"" +
+                                        meta->path + "\","
+                                                     "\"offset\":" +
+                                        std::to_string(meta->offset) + ","
+                                                                       "\"bytes\":" +
+                                        std::to_string(meta->bytes) + "}";
+                        res.body() = j;
+                    }
+                }
+                res.prepare_payload();
+                return respond(std::move(res));
+            }
             // 404 fallback
             {
                 http::response<http::string_body> res{http::status::not_found, req.version()};
