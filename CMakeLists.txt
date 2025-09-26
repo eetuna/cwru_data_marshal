@@ -100,3 +100,14 @@ if(BUILD_TESTING)
   target_link_libraries(it_ws PRIVATE Catch2::Catch2WithMain Boost::system Threads::Threads nlohmann_json::nlohmann_json)
   add_test(NAME it_ws COMMAND it_ws)
 endif()
+
+add_library(index_writer STATIC src/index_writer.cpp)
+target_include_directories(index_writer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_library(fifo_sink STATIC src/sinks/fifo_sink.cpp)
+target_include_directories(fifo_sink PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(fs_tail_client tools/fs_tail_client.cpp)
+target_link_libraries(fs_tail_client PRIVATE nlohmann_json::nlohmann_json)
+
+add_executable(fifo_reader tools/fifo_reader.cpp)

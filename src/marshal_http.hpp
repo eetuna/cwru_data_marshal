@@ -28,6 +28,9 @@ extern LastValueCache g_lvc;
 #include <memory>
 #include <string>
 #include <thread>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <cstdlib>
 #include <atomic>
 #include <chrono>
@@ -398,7 +401,20 @@ private:
                         {"seq", seq}};
 
                     append_line(index_root / "index.jsonl", entry.dump());
-                    const std::string latest_dump = entry.dump();
+                    
+                    // FIFO notify (optional): send same JSON to named pipe if configured
+                    try {
+                        if (!state.sink_namedpipe.empty()) {
+                            int fd = ::open(state.sink_namedpipe.c_str(), O_WRONLY | O_NONBLOCK);
+                            if (fd >= 0) {
+                                std::string jsonl = entry.dump();
+                                jsonl.push_back('\n');
+                                (void)::write(fd, jsonl.data(), (ssize_t)jsonl.size());
+                                ::close(fd);
+                            }
+                        }
+                    } catch (...) { /* ignore FIFO errors */ }
+const std::string latest_dump = entry.dump();
                     write_atomic(index_root / "latest.json", latest_dump.data(), latest_dump.size());
 
                     // WS: broadcast acquisition event (non-fatal if WS not set)

@@ -38,3 +38,22 @@ services:
     depends_on: ["marshal"]
     volumes: [".:/src"]
     working_dir: /src
+
+  fs_client:
+    build: .
+    command: ./build/fs_tail_client
+    volumes:
+      - ./data:/src/data
+    environment:
+      - DM_INDEX=./data/segments/index.jsonl
+      - DM_TAIL_OFFSET=./data/segments/.fs_tail_offset
+    depends_on: [marshal]
+
+  fifo_reader:
+    build: .
+    command: ./build/fifo_reader
+    volumes:
+      - ./data:/src/data
+    environment:
+      - DM_FIFO=./data/fifos/mrd_events.fifo
+    depends_on: [marshal]

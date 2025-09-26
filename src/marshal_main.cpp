@@ -103,6 +103,8 @@ int main(int argc, char **argv)
     state.io = &ioc;
 
     // Apply CLI to state FIRST
+    // Make FIFO path available to HTTP ingest
+    state.sink_namedpipe = sink_namedpipe;
     state.sink_mode = (sink == "dumpbox") ? SinkMode::DUMPBOX : SinkMode::MRD;
     state.data_dir = data_dir;
     state.dumpbox_root = dumpbox_root;

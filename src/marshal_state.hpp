@@ -47,6 +47,7 @@ struct MarshalState
     std::atomic<uint64_t> seq{0};
 
     PoseStore poses;
+    std::string sink_namedpipe{}; // HTTP ingest FIFO path (optional)
     std::string data_dir{"./data"};
     std::mutex ws_mtx;
     std::unordered_set<void *> ws_clients; // track raw ptr keys
