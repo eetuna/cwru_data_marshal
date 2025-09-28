@@ -17,7 +17,8 @@ namespace fs = std::filesystem;
 //  - fsync tmp
 //  - rename tmp -> dst
 //  - fsync parent dir
-inline void atomic_append_line(const fs::path& dst, const std::string& line) {
+inline void atomic_append_line(const fs::path &dst, const std::string &line)
+{
     fs::create_directories(dst.parent_path());
     const fs::path tmp = dst.string() + ".tmp";
 
@@ -26,7 +27,8 @@ inline void atomic_append_line(const fs::path& dst, const std::string& line) {
     {
         std::error_code ec;
         std::ifstream in(dst, std::ios::in | std::ios::binary);
-        if (in.good()) {
+        if (in.good())
+        {
             previous.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         }
     }
@@ -34,26 +36,37 @@ inline void atomic_append_line(const fs::path& dst, const std::string& line) {
     // Write tmp with previous + new line
     {
         std::ofstream out(tmp, std::ios::out | std::ios::binary | std::ios::trunc);
-        if (!out) throw std::runtime_error("atomic_append: open tmp failed: " + tmp.string());
+        if (!out)
+            throw std::runtime_error("atomic_append: open tmp failed: " + tmp.string());
         out.write(previous.data(), (std::streamsize)previous.size());
         out.write(line.data(), (std::streamsize)line.size());
         out.put('\n');
         out.flush();
 #ifndef _WIN32
         int fd = ::open(tmp.c_str(), O_RDONLY);
-        if (fd >= 0) { ::fsync(fd); ::close(fd); }
+        if (fd >= 0)
+        {
+            ::fsync(fd);
+            ::close(fd);
+        }
 #endif
-        if (!out) throw std::runtime_error("atomic_append: write tmp failed: " + tmp.string());
+        if (!out)
+            throw std::runtime_error("atomic_append: write tmp failed: " + tmp.string());
     }
 
     // Atomic rename
     std::error_code ec;
     fs::rename(tmp, dst, ec);
-    if (ec) throw std::runtime_error("atomic_append: rename failed: " + ec.message());
+    if (ec)
+        throw std::runtime_error("atomic_append: rename failed: " + ec.message());
 
 #ifndef _WIN32
     // fsync parent dir for metadata durability
     int dfd = ::open(dst.parent_path().c_str(), O_RDONLY);
-    if (dfd >= 0) { ::fsync(dfd); ::close(dfd); }
+    if (dfd >= 0)
+    {
+        ::fsync(dfd);
+        ::close(dfd);
+    }
 #endif
 }
