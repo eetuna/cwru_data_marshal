@@ -39,6 +39,11 @@ public:
         {
             this->broadcast(msg);
         };
+        state_.ws_emit_topic = [this](const std::string &msg, const std::string &topic)
+        {
+            this->broadcast_to(msg, topic);
+        };
+
         boost::system::error_code ec;
         acceptor_.open(ep.protocol(), ec);
         acceptor_.set_option(boost::asio::socket_base::reuse_address(true));
@@ -53,6 +58,17 @@ public:
         {
             auto *s = static_cast<Session *>(h);
             s->send(msg);
+        }
+    }
+    void broadcast_to(const std::string &msg, const std::string &topic)
+    {
+        std::scoped_lock lk(state_.ws_mtx);
+        for (auto h : state_.ws_clients)
+        {
+            auto *s = static_cast<Session *>(h);
+            // deliver if the session is subscribed to this topic or to ALL (empty)
+            if (topic.empty() || s->topic.empty() || s->topic == topic)
+                s->send(msg);
         }
     }
 
@@ -71,6 +87,7 @@ do_accept(); });
         MarshalState &state;
         WsServer &server;
         std::mutex send_mtx;
+        std::string topic; // empty = receive ALL broadcasts
         Session(boost::asio::ip::tcp::socket &&s, MarshalState &st, WsServer &sv)
             : ws(std::move(s)), state(st), server(sv) {}
         void run()
@@ -100,9 +117,29 @@ do_accept(); });
             {
                 auto data = boost::beast::buffers_to_string(buffer.data());
                 buffer.consume(buffer.size());
+
+                // Try to parse control JSON: {"subscribe":"<topic>"}
+                try
+                {
+                    nlohmann::json j = nlohmann::json::parse(data);
+                    if (j.contains("subscribe") && j["subscribe"].is_string())
+                    {
+                        topic = j["subscribe"].get<std::string>();
+                        // Ack only to this client (do not broadcast the control)
+                        send(std::string("{\"ok\":true,\"subscribed\":\"") + topic + "\"}");
+                        return;
+                    }
+                }
+                catch (...)
+                {
+                    // not JSON/control; fall through to broadcast as-is
+                }
+
+                // Normal text: echo/broadcast to all sessions (including sender), as before
                 server.broadcast(data);
                 return;
             }
+
             // Binary MRD1: flatten buffer sequence into a byte vector
             auto cb = buffer.data();
             std::vector<uint8_t> b;
@@ -141,7 +178,10 @@ do_accept(); });
         {
             std::scoped_lock lk(send_mtx);
             ws.text(true);
-            ws.write(boost::asio::buffer(s));
+            // Send one text frame that ends with a newline so CLIs and pipes flush immediately
+            std::string line = s;
+            line.push_back('\n');
+            ws.write(boost::asio::buffer(line));
         }
-    };
+        };
 };

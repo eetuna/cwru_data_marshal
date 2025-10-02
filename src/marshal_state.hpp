@@ -56,4 +56,8 @@ struct MarshalState
 
     // WS emit hook (set by WsServer on init). Safe to call from HTTP handlers.
     std::function<void(const std::string &)> ws_emit = [](const std::string &) {};
+
+    // Optional topic-based emit hook (set by WsServer on init).
+    std::function<void(const std::string &, const std::string &topic)> ws_emit_topic =
+        [](const std::string &, const std::string &) {};
 };

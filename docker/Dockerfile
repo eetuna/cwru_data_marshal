@@ -15,9 +15,11 @@ RUN apt-get update && \
   ca-certificates \
   git \
   curl \
+  iproute2 \        
+  net-tools \      
   jq \
   ninja-build \
-  lld \
+  lld \ 
   libpugixml1v5 \
   build-essential \
   cmake \
@@ -74,6 +76,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   bsdmainutils \
   ca-certificates \
   curl \
+  iproute2 \       
+  net-tools \      
   && rm -rf /var/lib/apt/lists/*
 
 # Install websocat (static musl build, works on amd64/arm64)
@@ -106,6 +110,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libboost-system1.83.0 libboost-filesystem1.83.0 libboost-thread1.83.0 libboost-program-options1.83.0 \
   util-linux \
   bsdmainutils \
+  iproute2 \        
+  net-tools \       
   && rm -rf /var/lib/apt/lists/*
 
 # Optional: install websocat in runtime too

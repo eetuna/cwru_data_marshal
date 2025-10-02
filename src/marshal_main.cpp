@@ -25,31 +25,12 @@
 // === Realtime additions (minimal) ===
 #include "realtime.hpp"
 #include <thread>
+#include <nlohmann/json.hpp>
 
 FrameQueue *g_queue = nullptr;
 LastValueCache g_lvc;
 static std::thread g_writer;
 static std::atomic<bool> g_run{false};
-
-static void writer_thread(const std::string &session_dir)
-{
-    try
-    {
-        SegmentWriter writer(session_dir);
-        Frame f;
-        while (g_run.load())
-        {
-            if (!g_queue->dequeue(f))
-                break;
-            auto meta = writer.append(f);
-            g_lvc.publish(meta);
-        }
-    }
-    catch (const std::exception &e)
-    {
-        fprintf(stderr, "writer_thread error: %s\n", e.what());
-    }
-}
 
 namespace fs = std::filesystem;
 
@@ -156,6 +137,35 @@ int main(int argc, char **argv)
                       if (!g_queue->dequeue(f)) break;
                        auto meta = writer.append(f);
                        g_lvc.publish(meta);
+
+                       // ---- WS BROADCAST (ADD THIS BLOCK) ----
+                       // If you already build a JSON record for the index with these same fields,
+                       // you can reuse that. Otherwise construct the minimal event here:
+                       try
+                       {
+                           nlohmann::json evt = {
+                               {"ev", "frame"},
+                               {"series", meta.series}, // adapt field names if different
+                               {"frame", meta.frame_idx},
+                               {"ts_ns", meta.ts_ns}
+                              // {"path", meta.path},     // the segment .mrd path
+                              //  {"offset", meta.offset}, // byte offset within segment before this frame
+                              // {"bytes", meta.bytes}    // size of this frame’s payload
+                           };
+
+                           // Broadcast to all /ws subscribers
+                           state.ws_emit(evt.dump());
+
+                           // Optional topic-based broadcasts
+                           state.ws_emit_topic(evt.dump(), "frames");                             // general frames topic
+                           state.ws_emit_topic(evt.dump(), std::string("series:") + meta.series); // per-series
+                       }
+                       catch (...)
+                       {
+                           // keep realtime loop robust; ignore WS errors
+                       }
+                       // ---- END WS BROADCAST ----
+
                        if (fifo_fd != -1 && !f.payload.empty()) { (void)::write(fifo_fd, f.payload.data(), (ssize_t)f.payload.size()); }
                    }
                } catch (const std::exception &e) {

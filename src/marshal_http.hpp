@@ -401,20 +401,41 @@ private:
                         {"seq", seq}};
 
                     append_line(index_root / "index.jsonl", entry.dump());
-                    
+
+                    // Broadcast MRD ingest event to all
+                    try
+                    {
+                        state.ws_emit(entry.dump());
+                        // And to a topic, e.g., "mrd.ingest"
+                        state.ws_emit_topic(entry.dump(), "mrd.ingest");
+                        // Optional: per-series topic
+                        state.ws_emit_topic(entry.dump(),
+                                            std::string("series:") + entry.value("series", ""));
+                    }
+                    catch (...)
+                    {
+                        // keep HTTP path robust; ignore WS errors
+                    }
+
                     // FIFO notify (optional): send same JSON to named pipe if configured
-                    try {
-                        if (!state.sink_namedpipe.empty()) {
+                    try
+                    {
+                        if (!state.sink_namedpipe.empty())
+                        {
                             int fd = ::open(state.sink_namedpipe.c_str(), O_WRONLY | O_NONBLOCK);
-                            if (fd >= 0) {
+                            if (fd >= 0)
+                            {
                                 std::string jsonl = entry.dump();
                                 jsonl.push_back('\n');
                                 (void)::write(fd, jsonl.data(), (ssize_t)jsonl.size());
                                 ::close(fd);
                             }
                         }
-                    } catch (...) { /* ignore FIFO errors */ }
-const std::string latest_dump = entry.dump();
+                    }
+                    catch (...)
+                    { /* ignore FIFO errors */
+                    }
+                    const std::string latest_dump = entry.dump();
                     write_atomic(index_root / "latest.json", latest_dump.data(), latest_dump.size());
 
                     // WS: broadcast acquisition event (non-fatal if WS not set)
