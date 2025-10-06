@@ -59,7 +59,7 @@ else()
   message(FATAL_ERROR "ISMRMRD found, but no usable CMake target or library variable was exported.")
 endif()
 
-include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
 
 add_executable(marshal src/marshal_main.cpp src/marshal_http.hpp src/marshal_ws.hpp src/marshal_state.hpp)
 target_link_libraries(marshal PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json)
@@ -85,6 +85,7 @@ add_executable(ws_producer
 target_link_libraries(ws_producer PRIVATE Boost::system Threads::Threads)
 
 if(BUILD_TESTING)
+  find_package(Catch2 3 REQUIRED)
   enable_testing()
   add_executable(unit_pose tests/test_pose_store.cpp src/marshal_state.hpp)
   target_link_libraries(unit_pose PRIVATE Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
