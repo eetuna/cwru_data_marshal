@@ -59,9 +59,9 @@ else()
   message(FATAL_ERROR "ISMRMRD found, but no usable CMake target or library variable was exported.")
 endif()
 
-include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
 
-add_executable(marshal src/marshal_main.cpp src/marshal_http.hpp src/marshal_ws.hpp src/marshal_state.hpp src/realtime.cpp)
+add_executable(marshal src/marshal_main.cpp src/marshal_http.hpp src/marshal_ws.hpp src/marshal_state.hpp)
 target_link_libraries(marshal PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json)
 
 
@@ -85,6 +85,7 @@ add_executable(ws_producer
 target_link_libraries(ws_producer PRIVATE Boost::system Threads::Threads)
 
 if(BUILD_TESTING)
+  find_package(Catch2 3 REQUIRED)
   enable_testing()
   add_executable(unit_pose tests/test_pose_store.cpp src/marshal_state.hpp)
   target_link_libraries(unit_pose PRIVATE Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
@@ -104,10 +105,5 @@ endif()
 add_library(index_writer STATIC src/index_writer.cpp)
 target_include_directories(index_writer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-add_library(fifo_sink STATIC src/sinks/fifo_sink.cpp)
-target_include_directories(fifo_sink PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/include)
-
 add_executable(fs_tail_client tools/fs_tail_client.cpp)
 target_link_libraries(fs_tail_client PRIVATE nlohmann_json::nlohmann_json)
-
-add_executable(fifo_reader tools/fifo_reader.cpp)
