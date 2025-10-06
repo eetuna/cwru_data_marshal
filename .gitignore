@@ -35,3 +35,4 @@ data/
 
 # Docs
 /docs/*
+!/docs/USAGE_WITH_CLIENTS.md

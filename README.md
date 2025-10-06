@@ -183,5 +183,7 @@ docs/
 
 ## Usage runbooks
 
-- See `README_MODE_A.md` for Live (copy-pasteable).  
+- See `README_MODE_A.md` for Live (copy-pasteable).
 - See `README_MODE_B.md` for Record→Replay (copy-pasteable).
+- See `docs/USAGE_WITH_CLIENTS.md` for end-to-end walkthroughs that include the
+  sample clients (`fk_client`, `viz_client`, `ws_producer`).
