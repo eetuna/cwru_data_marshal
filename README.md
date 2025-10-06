@@ -91,6 +91,18 @@ tail -n 5 ./data/mrd/index.jsonl || true
 cat ./data/mrd/latest.json
 ```
 
+---
+
+## Developer note: MRD ingestion helper
+
+Both the HTTP (`POST /v1/mrd/ingest`) and WebSocket binary ingest paths share
+`include/mrd_io.hpp`.  The helper writes the payload to a temporary file,
+`fsync`s it, and atomically renames it into place before appending to
+`index.jsonl` and rewriting `latest.json`.  It then emits the corresponding
+metadata JSON over the WebSocket fan-out.  Reusing this helper keeps the HTTP
+and WebSocket behaviours identical and guarantees clients only ever see fully
+flushed MRD artifacts.
+
 ### Record→Replay (Mode B)
 ```bash
 # RECORD: start server in dumpbox sink; session auto-named

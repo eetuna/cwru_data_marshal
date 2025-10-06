@@ -19,8 +19,8 @@ static std::string envs(const char *k, const std::string &def)
 
 int main()
 {
-    const std::string index_path = envs("DM_INDEX", "./data/segments/index.jsonl");
-    const std::string offset_path = envs("DM_TAIL_OFFSET", "./data/segments/.fs_tail_offset");
+    const std::string index_path = envs("DM_INDEX", "./data/mrd/index.jsonl");
+    const std::string offset_path = envs("DM_TAIL_OFFSET", "./data/mrd/.fs_tail_offset");
 
     fs::create_directories(fs::path(index_path).parent_path());
     if (!fs::exists(index_path))

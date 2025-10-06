@@ -19,20 +19,12 @@
 #include <boost/asio/strand.hpp>
 
 #include <nlohmann/json.hpp>
-#include "realtime.hpp"
-extern FrameQueue *g_queue;
-extern LastValueCache g_lvc;
+#include "mrd_io.hpp"
 
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
-#include <thread>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <cstdlib>
-#include <atomic>
 #include <chrono>
 #include <iomanip>
 #include <sstream>
@@ -42,25 +34,6 @@ extern LastValueCache g_lvc;
 
 namespace http = boost::beast::http;
 namespace fs = std::filesystem;
-
-// -------- time / fs helpers --------
-
-// RFC3339 UTC with milliseconds (e.g., 2025-09-12T14:59:01.234Z)
-inline std::string iso8601_now_ms()
-{
-    using namespace std::chrono;
-    auto now = time_point_cast<milliseconds>(system_clock::now());
-    auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
-    std::time_t tt = system_clock::to_time_t(now);
-    std::tm tm = *std::gmtime(&tt);
-
-    char base[32];
-    std::strftime(base, sizeof(base), "%Y-%m-%dT%H:%M:%S", &tm);
-
-    std::ostringstream oss;
-    oss << base << '.' << std::setw(3) << std::setfill('0') << ms.count() << 'Z';
-    return oss.str();
-}
 
 // Seconds-precision ISO8601 for pose endpoint (keeps your original behavior)
 inline std::string iso8601_now()
@@ -73,49 +46,6 @@ inline std::string iso8601_now()
     return buf;
 }
 
-inline void ensure_dir(const fs::path &p)
-{
-    std::error_code ec;
-    if (!fs::exists(p, ec))
-    {
-        fs::create_directories(p, ec);
-        if (ec)
-            throw std::runtime_error("create_directories failed: " + ec.message());
-    }
-}
-
-// atomic file write: write to .tmp then rename
-inline void // Atomic write helper
-write_atomic(const fs::path &dst, const void *data, size_t n)
-{
-    fs::path tmp = dst;
-    tmp += ".tmp";
-    {
-        std::ofstream f(tmp, std::ios::binary);
-        if (!f)
-            throw std::runtime_error("open tmp failed: " + tmp.string());
-        f.write(reinterpret_cast<const char *>(data), static_cast<std::streamsize>(n));
-        if (!f)
-            throw std::runtime_error("write tmp failed: " + tmp.string());
-        f.flush();
-        f.close();
-    }
-    std::error_code ec;
-    fs::rename(tmp, dst, ec);
-    if (ec)
-        throw std::runtime_error("rename tmp->dst failed: " + ec.message());
-}
-
-inline void append_line(const fs::path &dst, const std::string &line)
-{
-    std::ofstream f(dst, std::ios::app);
-    if (!f)
-        throw std::runtime_error("open index for append failed: " + dst.string());
-    f << line << '\n';
-    if (!f)
-        throw std::runtime_error("append index failed: " + dst.string());
-}
-
 inline bool read_file_all(const fs::path &p, std::string &out)
 {
     std::ifstream f(p);
@@ -126,8 +56,6 @@ inline bool read_file_all(const fs::path &p, std::string &out)
     out = ss.str();
     return true;
 }
-
-static std::atomic<uint64_t> g_seq{1}; // per-process sequence for filenames
 
 // -------- HTTP server --------
 
@@ -299,7 +227,7 @@ private:
                             {"type", "pose"},
                             {"p", {pose.p[0], pose.p[1], pose.p[2]}},
                             {"R", {pose.R[0], pose.R[1], pose.R[2], pose.R[3], pose.R[4], pose.R[5], pose.R[6], pose.R[7], pose.R[8]}},
-                            {"ts", iso8601_now_ms()}};
+                            {"ts", mrd::iso8601_now_ms()}};
                         state.ws_emit(evt.dump());
                     }
                     catch (...)
@@ -356,104 +284,7 @@ private:
                         return respond(std::move(res));
                     }
 
-                    fs::path mrd_root = fs::path(state.data_dir) / "mrd";
-                    ensure_dir(mrd_root);
-
-                    const std::string ts = iso8601_now_ms();
-                    const uint64_t seq = g_seq.fetch_add(1);
-                    std::ostringstream name;
-                    name << ts << '_' << std::setw(6) << std::setfill('0') << seq << ".mrd";
-
-                    // Select sink roots by mode
-                    fs::path sink_root;
-                    fs::path index_root;
-                    if (state.sink_mode == SinkMode::MRD)
-                    {
-                        sink_root = mrd_root;
-                        index_root = mrd_root;
-                    }
-                    else
-                    {
-                        std::string session = state.dumpbox_session.empty() ? iso8601_now_ms() : state.dumpbox_session;
-                        fs::path session_dir = fs::path(state.dumpbox_root) / session;
-                        index_root = session_dir;
-                        sink_root = session_dir / "files";
-                        std::error_code ec_mk;
-                        fs::create_directories(sink_root, ec_mk);
-                        state.dumpbox_session = session;
-                    }
-
-                    fs::path out_path = sink_root / name.str();
-
-                    // Atomic write helper
-                    write_atomic(out_path, body.data(), body.size());
-
-                    std::error_code ec2;
-                    auto size_bytes = fs::file_size(out_path, ec2);
-                    if (ec2)
-                        size_bytes = body.size();
-
-                    json entry = {
-                        {"path", out_path.string()},
-                        {"ts", ts},
-                        {"size_bytes", size_bytes},
-                        {"type", "mrd"},
-                        {"seq", seq}};
-
-                    append_line(index_root / "index.jsonl", entry.dump());
-
-                    // Broadcast MRD ingest event to all
-                    try
-                    {
-                        state.ws_emit(entry.dump());
-                        // And to a topic, e.g., "mrd.ingest"
-                        state.ws_emit_topic(entry.dump(), "mrd.ingest");
-                        // Optional: per-series topic
-                        state.ws_emit_topic(entry.dump(),
-                                            std::string("series:") + entry.value("series", ""));
-                    }
-                    catch (...)
-                    {
-                        // keep HTTP path robust; ignore WS errors
-                    }
-
-                    // FIFO notify (optional): send same JSON to named pipe if configured
-                    try
-                    {
-                        if (!state.sink_namedpipe.empty())
-                        {
-                            int fd = ::open(state.sink_namedpipe.c_str(), O_WRONLY | O_NONBLOCK);
-                            if (fd >= 0)
-                            {
-                                std::string jsonl = entry.dump();
-                                jsonl.push_back('\n');
-                                (void)::write(fd, jsonl.data(), (ssize_t)jsonl.size());
-                                ::close(fd);
-                            }
-                        }
-                    }
-                    catch (...)
-                    { /* ignore FIFO errors */
-                    }
-                    const std::string latest_dump = entry.dump();
-                    write_atomic(index_root / "latest.json", latest_dump.data(), latest_dump.size());
-
-                    // WS: broadcast acquisition event (non-fatal if WS not set)
-                    try
-                    {
-                        nlohmann::json evt = {
-                            {"type", "acq"},
-                            {"path", out_path.string()},
-                            {"seq", seq},
-                            {"size_bytes", size_bytes},
-                            {"ts", ts}};
-                        state.ws_emit(evt.dump());
-                    }
-                    catch (...)
-                    {
-                        // ignore WS errors
-                    }
-
+                    auto entry = mrd::ingest_payload(state, body.data(), body.size(), "http");
                     http::response<http::string_body> res{http::status::created, req.version()};
                     res.set(http::field::content_type, "application/json");
                     res.body() = entry.dump();
@@ -555,102 +386,6 @@ private:
                 }
             }
 
-            // POST /v1/realtime/ingest  (enqueue frame; body=bytes; query: series,frame,ts_ns)
-            if (req.method() == http::verb::post && req.target().starts_with("/v1/realtime/ingest"))
-            {
-                auto parse_q = [](const std::string &target) -> std::map<std::string, std::string>
-                {
-                    std::map<std::string, std::string> m;
-                    auto qpos = target.find('?');
-                    if (qpos == std::string::npos)
-                        return m;
-                    auto qs = target.substr(qpos + 1);
-                    std::stringstream ss(qs);
-                    std::string kv;
-                    while (std::getline(ss, kv, '&'))
-                    {
-                        auto eq = kv.find('=');
-                        if (eq == std::string::npos)
-                            continue;
-                        m[kv.substr(0, eq)] = kv.substr(eq + 1);
-                    }
-                    return m;
-                };
-                std::string target = std::string(req.target());
-                auto qp = parse_q(target);
-                std::string series = qp.count("series") ? qp["series"] : "default";
-                uint64_t frame_idx = qp.count("frame") ? std::stoull(qp["frame"]) : 0;
-                uint64_t ts_ns = qp.count("ts_ns") ? std::stoull(qp["ts_ns"]) : 0;
-
-                std::vector<uint8_t> payload(req.body().begin(), req.body().end());
-                Frame f = make_frame(series, frame_idx, ts_ns, std::move(payload));
-                if (g_queue)
-                    g_queue->enqueue(std::move(f));
-
-                http::response<http::string_body> res{http::status::ok, req.version()};
-                res.set(http::field::content_type, "application/json");
-                res.body() = R"({"ok":true})";
-                res.prepare_payload();
-                return respond(std::move(res));
-            }
-
-            // GET /v1/realtime/last?series=...
-            if (req.method() == http::verb::get && req.target().starts_with("/v1/realtime/last"))
-            {
-                auto parse_q = [](const std::string &target) -> std::map<std::string, std::string>
-                {
-                    std::map<std::string, std::string> m;
-                    auto qpos = target.find('?');
-                    if (qpos == std::string::npos)
-                        return m;
-                    auto qs = target.substr(qpos + 1);
-                    std::stringstream ss(qs);
-                    std::string kv;
-                    while (std::getline(ss, kv, '&'))
-                    {
-                        auto eq = kv.find('=');
-                        if (eq == std::string::npos)
-                            continue;
-                        m[kv.substr(0, eq)] = kv.substr(eq + 1);
-                    }
-                    return m;
-                };
-                std::string target = std::string(req.target());
-                auto qp = parse_q(target);
-                std::string series = qp.count("series") ? qp["series"] : "default";
-
-                http::response<http::string_body> res{http::status::ok, req.version()};
-                res.set(http::field::content_type, "application/json");
-                if (!g_queue)
-                {
-                    res.body() = R"({"error":"realtime not initialized"})";
-                }
-                else
-                {
-                    auto meta = g_lvc.get(series);
-                    if (!meta)
-                    {
-                        res.body() = R"({"error":"no data yet"})";
-                    }
-                    else
-                    {
-                        std::string j = std::string("{\"series\":\"") + meta->series + "\","
-                                                                                       "\"frame\":" +
-                                        std::to_string(meta->frame_idx) + ","
-                                                                          "\"ts_ns\":" +
-                                        std::to_string(meta->ts_ns) + ","
-                                                                      "\"path\":\"" +
-                                        meta->path + "\","
-                                                     "\"offset\":" +
-                                        std::to_string(meta->offset) + ","
-                                                                       "\"bytes\":" +
-                                        std::to_string(meta->bytes) + "}";
-                        res.body() = j;
-                    }
-                }
-                res.prepare_payload();
-                return respond(std::move(res));
-            }
             // 404 fallback
             {
                 http::response<http::string_body> res{http::status::not_found, req.version()};

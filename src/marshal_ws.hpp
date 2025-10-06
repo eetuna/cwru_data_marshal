@@ -19,8 +19,8 @@
 #include <mutex>
 #include "marshal_state.hpp"
 #include <boost/asio/buffer.hpp>
-#include "realtime.hpp"
-extern FrameQueue *g_queue;
+#include <nlohmann/json.hpp>
+#include "mrd_io.hpp"
 
 namespace websocket = boost::beast::websocket;
 
@@ -140,39 +140,32 @@ do_accept(); });
                 return;
             }
 
-            // Binary MRD1: flatten buffer sequence into a byte vector
             auto cb = buffer.data();
-            std::vector<uint8_t> b;
-            b.reserve(buffer.size());
+            std::vector<uint8_t> payload;
+            payload.reserve(buffer.size());
             for (auto it = boost::asio::buffer_sequence_begin(cb);
                  it != boost::asio::buffer_sequence_end(cb); ++it)
             {
                 auto seg = *it;
                 auto p = static_cast<const uint8_t *>(seg.data());
-                b.insert(b.end(), p, p + seg.size());
+                payload.insert(payload.end(), p, p + seg.size());
             }
             buffer.consume(buffer.size());
-            if (b.size() < 36)
+            if (payload.empty())
+            {
+                send("{\"error\":\"empty payload\"}");
                 return;
-            if (!(b[0] == 'M' && b[1] == 'R' && b[2] == 'D' && b[3] == '1'))
-                return;
-            auto rd16 = [&](size_t o)
-            { return (uint16_t)b[o] | ((uint16_t)b[o + 1] << 8); };
-            auto rd64 = [&](size_t o)
-            { uint64_t x=0; for(int i=0;i<8;i++) x|=((uint64_t)b[o+i])<<(8*i); return x; };
-            uint16_t series_len = rd16(8);
-            uint64_t frame_idx = rd64(12);
-            uint64_t ts_ns = rd64(20);
-            uint64_t payload_n = rd64(28);
-            size_t header_len = 36 + series_len;
-            if (b.size() < header_len + payload_n)
-                return;
-            std::string series(reinterpret_cast<const char *>(b.data() + 36), series_len);
-            std::vector<uint8_t> payload(b.begin() + header_len, b.begin() + header_len + payload_n);
-            if (g_queue)
-                g_queue->enqueue(make_frame(series, frame_idx, ts_ns, std::move(payload)));
-            // ack
-            send(std::string("{\"ack\":") + std::to_string(frame_idx) + "}");
+            }
+            try
+            {
+                auto entry = mrd::ingest_payload(state, payload.data(), payload.size(), "ws");
+                send(entry.dump());
+            }
+            catch (const std::exception &e)
+            {
+                nlohmann::json err = {{"error", "ws ingest failed"}, {"what", e.what()}};
+                send(err.dump());
+            }
         }
         void send(const std::string &s)
         {
