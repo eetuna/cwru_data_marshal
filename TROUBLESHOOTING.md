@@ -11,4 +11,6 @@
   prefix, set `OpenCV_DIR` to the folder containing `OpenCVConfig.cmake`. The `libopencv-dev`
   meta package is what provides `OpenCVConfig.cmake`; the devcontainer/Docker images still add the
   split `libopencv-*-dev` packages so we get the viz GUI bits without pulling in every optional
-  OpenCV module via `Recommends`.
+  OpenCV module via `Recommends`. A healthy configure run prints
+  `Found OpenCV: <version> (linking via targets .../libraries ...)` and the deduplicated include
+  directories so you can confirm CMake located the viz component.
