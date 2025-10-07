@@ -26,10 +26,14 @@ RUN apt-get update && \
   libboost-program-options-dev \
   libboost-system-dev \
   libboost-thread-dev \
+  # libopencv-dev ships OpenCVConfig.cmake, the split packages pull in viz + GUI bits without
+  # dragging every optional OpenCV module via Recommends.
+  libopencv-dev \
   libopencv-core-dev \
   libopencv-highgui-dev \
   libopencv-imgcodecs-dev \
   libopencv-imgproc-dev \
+  libopencv-viz-dev \
   libpugixml-dev \
   python3 \
   python3-pip \
@@ -112,10 +116,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libboost-filesystem1.74.0 \
   libboost-thread1.74.0 \
   libboost-program-options1.74.0 \
-  libopencv-core406t64 \
-  libopencv-highgui406t64 \
-  libopencv-imgcodecs406t64 \
-  libopencv-imgproc406t64 \
+  # Jammy (22.04) ships OpenCV 4.5 runtimes under the "4.5d" suffix.
+  libopencv-core4.5d \
+  libopencv-highgui4.5d \
+  libopencv-imgcodecs4.5d \
+  libopencv-imgproc4.5d \
+  libopencv-viz4.5d \
   python3 \
   python3-pip \
   && rm -rf /var/lib/apt/lists/*
