@@ -53,6 +53,7 @@ mkdir -p ./data/mrd
   --data ./data \
   --sink mrd \
   > ./data/marshal_live.log 2>&1 &
+  
 MARSHAL_PID=$!
 sleep 1
 ```
@@ -117,11 +118,14 @@ immediately. You can re-run `fk_client` any time to emulate the scanner pose
 stream.
 
 ### 5b. Stream reconstructed frames via SWMR
-
 The marshal can now append ISMRMRD Image messages into a live MRD file while
 `viz_client` observes the growth. Once you have a packed message saved as
 `viz_image_message.bin` (see
 [`docs/API_REFERENCE.md`](API_REFERENCE.md#post-v1ismrmrdframe) for a helper):
+
+# Creates ./viz_image_message.bin in CWD
+./build/make_image_message --out viz_image_message.bin
+ls -l viz_image_message.bin
 
 ```bash
 curl -fsS \

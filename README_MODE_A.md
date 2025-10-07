@@ -67,11 +67,14 @@ curl -fsS -H "Content-Type: application/octet-stream" \
 ```
 
 ## 6. (Optional) Append streaming frames via SWMR
-
 Capture or synthesize an ISMRMRD Image message (header + voxels) and save it as
 `image_message.bin`, then stream it into a live MRD file identified by
 `live_demo`. See [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md#post-v1ismrmrdframe)
 for a Python helper snippet:
+
+# Creates ./image_message.bin in CWD
+./build/make_image_message --out image_message.bin
+ls -l image_message.bin
 
 ```bash
 curl -fsS \

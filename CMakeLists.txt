@@ -84,6 +84,10 @@ add_executable(ws_producer
 )
 target_link_libraries(ws_producer PRIVATE Boost::system Threads::Threads)
 
+# tools/make_image_message
+add_executable(make_image_message tools/make_image_message.cpp)
+target_link_libraries(make_image_message PRIVATE ismrmrd)
+
 if(BUILD_TESTING)
   find_package(Catch2 3 REQUIRED)
   enable_testing()
