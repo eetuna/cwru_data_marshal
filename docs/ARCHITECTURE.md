@@ -11,9 +11,9 @@ out to connected clients. The core components are:
 - **Storage helpers (`mrd_io.hpp`)** — Provide atomic file writes, index and
   metadata maintenance, and sink selection logic for MRD vs. dumpbox modes.
 - **MRD sink (`MrdSink`)** — Manages the single extendible HDF5 dataset per
-  scan that stays open while new frames arrive. The earlier experimental
-  `swmr_writer.*` scaffolding has been retired, so `MrdSink` is now the lone
-  code path responsible for SWMR MRD creation.
+  scan that stays open while new frames arrive. Earlier experimental SWMR
+  scaffolding has been removed, so `MrdSink` is now the lone code path
+  responsible for SWMR MRD creation.
 
 ## Request flow
 
