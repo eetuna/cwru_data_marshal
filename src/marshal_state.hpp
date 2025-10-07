@@ -23,7 +23,7 @@
 
 namespace mrd
 {
-class SwmrManager;
+class MrdSink;
 }
 enum class SinkMode
 {
@@ -65,5 +65,5 @@ struct MarshalState
     std::function<void(const std::string &, const std::string &topic)> ws_emit_topic =
         [](const std::string &, const std::string &) {};
 
-    std::shared_ptr<mrd::SwmrManager> swmr;
+    std::shared_ptr<mrd::MrdSink> mrd_sink;
 };

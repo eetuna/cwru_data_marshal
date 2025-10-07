@@ -10,8 +10,8 @@ out to connected clients. The core components are:
   subscribed clients.
 - **Storage helpers (`mrd_io.hpp`)** — Provide atomic file writes, index and
   metadata maintenance, and sink selection logic for MRD vs. dumpbox modes.
-- **SWMR manager (`SwmrManager`)** — Manages extendible HDF5 datasets that stay
-  open while new frames arrive.
+- **MRD sink (`MrdSink`)** — Manages the single extendible HDF5 dataset per
+  scan that stays open while new frames arrive.
 
 ## Request flow
 
@@ -22,9 +22,9 @@ out to connected clients. The core components are:
      notification.
 2. **Streaming frames** (`POST /v1/ismrmrd/frame`)
    - The handler parses the ISMRMRD image header from the request body, derives
-     geometry + datatype, and asks `SwmrManager` to append the payload into the
-     scan's MRD. `SwmrManager` ensures one open file per stream and uses
-     `SwmrFile` to extend `/dataset/images/data` via HDF5 SWMR APIs.
+    geometry + datatype, and asks `MrdSink` to append the payload into the
+    scan's MRD. `MrdSink` ensures one open file per stream and extends
+    `/images/data` via HDF5 SWMR APIs.
    - Each append logs into the same index files as full MRD ingests so clients
      have a unified view of activity.
 3. **Poses and telemetry**
@@ -32,14 +32,13 @@ out to connected clients. The core components are:
 
 ## SWMR file layout
 
-Each SWMR stream creates a file named
-`<timestamp>_<sanitized-stream>.mrd` inside the active sink. The file contains
-standard ISMRMRD structure:
+Each stream creates a canonical file named `<sanitized-stream>.mrd` inside the
+active sink. The file contains standard ISMRMRD structure:
 
-- `/dataset/header` — scalar string dataset with a minimal XML header tailored
-  to the stream geometry.
-- `/dataset/images/data` — extendible dataset with shape
-  `[frames, channels, z, y, x]` storing voxel payloads.
+- `/header` — scalar string dataset with a minimal XML header tailored to the
+  stream geometry.
+- `/images/data` — extendible dataset with shape `[frames, channels, z, y, x]`
+  storing voxel payloads.
 
 Writers call `H5Fstart_swmr_write` once at creation and `H5Dflush`/`H5Fflush`
 after each frame so SWMR readers can see consistent snapshots without waiting

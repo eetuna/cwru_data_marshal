@@ -26,13 +26,15 @@ failure handling much easier.
 
 ## First-time setup (10 minutes)
 
-1. **Install build tools** (Ubuntu/Debian):
+1. **Install build tools and SDKs** (Ubuntu/Debian):
    ```bash
    sudo apt-get update
-   sudo apt-get install -y build-essential cmake ninja-build pkg-config libboost-system-dev
+   sudo apt-get install -y \
+     build-essential cmake ninja-build pkg-config \
+     libboost-all-dev libhdf5-dev libismrmrd-dev
    ```
-   Docker images built from `docker/Dockerfile` already contain the runtime pieces
-   required for HDF5 SWMR.
+   These match the toolchain baked into `docker/Dockerfile` so local builds
+   have the HDF5, Boost, and ISMRMRD headers needed for SWMR support.
 2. **Configure + build** the binaries:
    ```bash
    mkdir -p build
@@ -55,6 +57,10 @@ The step-by-step runbooks in [`README_MODE_A.md`](README_MODE_A.md) and
 [`README_MODE_B.md`](README_MODE_B.md) expand on these steps with copy/paste-able
 commands, cleanup instructions, and verification tips.
 
+Prefer containerized workflows? See [`docs/CONTAINERS.md`](docs/CONTAINERS.md) for
+a deep dive into the devcontainer image, the multi-stage Dockerfile, and the
+`docker compose` demo stack that spins up the marshal alongside example clients.
+
 ---
 
 ## Storage layout
@@ -62,8 +68,8 @@ commands, cleanup instructions, and verification tips.
 **Live (MRD sink)**
 ```
 /data/mrd/
-├─ 2025-09-20T01:23:45.123Z_000001.mrd
-├─ 2025-09-20T01:23:47.045Z_000002.mrd
+├─ streamA.mrd
+├─ streamB.mrd
 ├─ index.jsonl
 └─ latest.json
 ```
@@ -72,8 +78,8 @@ commands, cleanup instructions, and verification tips.
 ```
 /data/dumpbox/2025-09-20T01:23:00Z/
 ├─ files/
-│  ├─ 2025-09-20T01:23:45.123Z_000001.mrd
-│  └─ 2025-09-20T01:23:47.045Z_000002.mrd
+│  ├─ streamA.mrd
+│  └─ streamB.mrd
 ├─ index.jsonl
 └─ latest.json
 ```
@@ -183,7 +189,7 @@ flushed MRD artifacts.
   - **Dumpbox mode:** writes to session under `/data/dumpbox/<SESSION>`, updates session `index.jsonl`/`latest.json`.
 - **`POST /v1/ismrmrd/frame`** — Body: ISMRMRD Image header + voxels
   - `X-MRD-Stream`: logical identifier; the marshal will keep a matching `.mrd` file open
-  - Appends into `/dataset/images/data` using HDF5 SWMR so readers can open the file while it grows
+  - Appends into `/images/data` using HDF5 SWMR so readers can open the file while it grows
 - **`GET /health`** — returns `ok`.
 - **(If present) `GET /v1/mrd/since?ts=...&limit=...`** — convenience reader over `index.jsonl`.
 

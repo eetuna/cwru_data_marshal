@@ -61,7 +61,7 @@ endif()
 
 include_directories(${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
 
-add_executable(marshal src/marshal_main.cpp src/marshal_http.hpp src/marshal_ws.hpp src/marshal_state.hpp src/swmr_writer.cpp)
+add_executable(marshal src/marshal_main.cpp src/marshal_http.hpp src/marshal_ws.hpp src/marshal_state.hpp src/mrd_sink.cpp)
 target_link_libraries(marshal PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json ${hdf5_target})
 
 
@@ -101,9 +101,9 @@ if(BUILD_TESTING)
   target_link_libraries(it_ws PRIVATE Catch2::Catch2WithMain Boost::system Threads::Threads nlohmann_json::nlohmann_json)
   add_test(NAME it_ws COMMAND it_ws)
 
-  add_executable(test_swmr tests/test_swmr_writer.cpp src/swmr_writer.cpp)
-  target_link_libraries(test_swmr PRIVATE Catch2::Catch2WithMain nlohmann_json::nlohmann_json ${hdf5_target})
-  add_test(NAME test_swmr COMMAND test_swmr)
+  add_executable(test_mrd_sink tests/test_mrd_sink.cpp src/mrd_sink.cpp)
+  target_link_libraries(test_mrd_sink PRIVATE Catch2::Catch2WithMain nlohmann_json::nlohmann_json ${hdf5_target})
+  add_test(NAME test_mrd_sink COMMAND test_mrd_sink)
 endif()
 
 add_library(index_writer STATIC src/index_writer.cpp)

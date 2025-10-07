@@ -41,7 +41,7 @@ sink (live MRD or dumpbox session) and updates the corresponding metadata files.
 
   ```json
   {
-    "path": "2025-09-20T01:23:45.123Z_000001.mrd",
+    "path": "streamA.mrd",
     "size": 16384,
     "timestamp": "2025-09-20T01:23:45.123Z"
   }
@@ -124,9 +124,8 @@ JSON describing the stream after the append:
 - Readers open the `.mrd` file using `H5F_ACC_SWMR_READ`. The marshal flushes
   dataset + file metadata after every append, so newly written frames become
   visible quickly.
-- Image voxels live in `/dataset/images/data` with shape
-  `[frames, channels, z, y, x]`.
-- A minimal ISMRMRD XML header is stored at `/dataset/header`.
+- Image voxels live in `/images/data` with shape `[frames, channels, z, y, x]`.
+- A minimal ISMRMRD XML header is stored at `/header`.
 
 ---
 

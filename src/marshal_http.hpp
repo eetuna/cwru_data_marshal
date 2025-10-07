@@ -34,7 +34,7 @@
 
 #include "marshal_state.hpp"
 #include "common/pose.hpp" // Pose, PoseStore, pose_to_json
-#include "swmr_writer.hpp"
+#include "mrd_sink.hpp"
 #include <ismrmrd/ismrmrd.h>
 
 namespace http = boost::beast::http;
@@ -279,8 +279,8 @@ private:
                 using namespace std::string_literals;
                 try
                 {
-                    if (!state.swmr)
-                        throw std::runtime_error("SWMR manager unavailable");
+                    if (!state.mrd_sink)
+                        throw std::runtime_error("MRD sink unavailable");
                     auto stream_header = std::string(req["X-MRD-Stream"]);
                     if (stream_header.empty())
                         throw std::runtime_error("missing X-MRD-Stream header");
@@ -291,7 +291,7 @@ private:
                         throw std::runtime_error("body too small for ISMRMRD ImageHeader");
 
                     const auto *img_header = reinterpret_cast<const ISMRMRD::ImageHeader *>(body.data());
-                    mrd::StreamDimensions dims;
+                    mrd::ImageDimensions dims;
                     dims.spatial = {static_cast<hsize_t>(img_header->matrix_size[0]),
                                     static_cast<hsize_t>(img_header->matrix_size[1]),
                                     static_cast<hsize_t>(img_header->matrix_size[2])};
@@ -312,7 +312,7 @@ private:
                     std::string header_xml = mrd::default_ismrmrd_header(dims, element_type, stream_header);
                     const void *payload = body.data() + sizeof(ISMRMRD::ImageHeader);
 
-                    auto result = state.swmr->append_frame(stream_header, dims, element_type, header_xml, payload, payload_bytes);
+                    auto result = state.mrd_sink->append_frame(stream_header, dims, element_type, header_xml, payload, payload_bytes);
 
                     json resp = {
                         {"status", "ok"},

@@ -40,10 +40,10 @@ static void inspect_swmr_file(const std::string &path)
         std::cerr << "viz: unable to open SWMR file " << path << "\n";
         return;
     }
-    hid_t dset = H5Dopen2(file, "/dataset/images/data", H5P_DEFAULT);
+    hid_t dset = H5Dopen2(file, "/images/data", H5P_DEFAULT);
     if (dset < 0)
     {
-        std::cerr << "viz: /dataset/images/data dataset missing in " << path << "\n";
+        std::cerr << "viz: /images/data dataset missing in " << path << "\n";
         H5Fclose(file);
         return;
     }
