@@ -79,6 +79,12 @@ Binary concatenation of:
 1. `ISMRMRD::ImageHeader` (as defined in `ismrmrd/ismrmrd.h`).
 2. Raw voxel payload whose size matches `matrix_size × channels × datatype`.
 
+Supported datatypes are:
+
+- Real `float32`
+- Unsigned `uint16`
+- Complex `complex64` (two `float32` values per voxel)
+
 #### Packing example (Python)
 
 ```bash

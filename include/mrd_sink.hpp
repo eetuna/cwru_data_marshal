@@ -22,7 +22,8 @@ namespace mrd
 enum class ElementType
 {
     Float32,
-    UInt16
+    UInt16,
+    ComplexFloat32
 };
 
 struct ImageDimensions

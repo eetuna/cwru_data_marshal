@@ -22,6 +22,26 @@ hid_t element_hdf_type(ElementType type)
         return H5T_IEEE_F32LE;
     case ElementType::UInt16:
         return H5T_STD_U16LE;
+    case ElementType::ComplexFloat32:
+    {
+        static hid_t complex_type = [] {
+            hid_t t = H5Tcreate(H5T_COMPOUND, sizeof(float) * 2);
+            if (t < 0)
+                throw std::runtime_error("H5Tcreate complex32 failed");
+            if (H5Tinsert(t, "r", 0, H5T_IEEE_F32LE) < 0)
+            {
+                H5Tclose(t);
+                throw std::runtime_error("H5Tinsert complex32 real failed");
+            }
+            if (H5Tinsert(t, "i", sizeof(float), H5T_IEEE_F32LE) < 0)
+            {
+                H5Tclose(t);
+                throw std::runtime_error("H5Tinsert complex32 imag failed");
+            }
+            return t;
+        }();
+        return complex_type;
+    }
     }
     throw std::runtime_error("unsupported element type");
 }
@@ -372,6 +392,8 @@ ElementType parse_element_type(const std::string &value)
         return ElementType::Float32;
     if (value == "uint16" || value == "u16")
         return ElementType::UInt16;
+    if (value == "complex64" || value == "cfloat" || value == "cf32")
+        return ElementType::ComplexFloat32;
     throw std::runtime_error("unsupported element type: " + value);
 }
 
@@ -383,6 +405,8 @@ std::string element_type_to_string(ElementType type)
         return "float32";
     case ElementType::UInt16:
         return "uint16";
+    case ElementType::ComplexFloat32:
+        return "complex64";
     }
     return "unknown";
 }
@@ -395,6 +419,8 @@ size_t element_type_bytes(ElementType type)
         return sizeof(float);
     case ElementType::UInt16:
         return sizeof(uint16_t);
+    case ElementType::ComplexFloat32:
+        return sizeof(float) * 2;
     }
     throw std::runtime_error("unsupported element type");
 }
@@ -407,6 +433,8 @@ ElementType element_type_from_ismrmrd(uint16_t data_type)
         return ElementType::Float32;
     case ISMRMRD::ISMRMRD_DataTypes::ISMRMRD_USHORT:
         return ElementType::UInt16;
+    case ISMRMRD::ISMRMRD_DataTypes::ISMRMRD_CXFLOAT:
+        return ElementType::ComplexFloat32;
     default:
         throw std::runtime_error("unsupported ISMRMRD image data_type");
     }
