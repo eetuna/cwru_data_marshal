@@ -35,6 +35,12 @@ failure handling much easier.
    ```
    These match the toolchain baked into `docker/Dockerfile` so local builds
    have the HDF5, Boost, and ISMRMRD headers needed for SWMR support.
+   Install the lightweight Python runtime used by the helpers:
+   ```bash
+   sudo apt-get install -y python3 python3-pip python3-venv python3-numpy
+   python3 -m pip install --user --upgrade pip
+   python3 -m pip install --user ismrmrd h5py numpy
+   ```
 2. **Configure + build** the binaries:
    ```bash
    mkdir -p build
@@ -92,7 +98,8 @@ a deep dive into the devcontainer image, the multi-stage Dockerfile, and the
 
 - `build/marshal` — HTTP/WebSocket server.
 - `build/playback` — HTTP-only session replayer (feeds dumpbox sessions back to the marshal).
-- `build/viz_client` — simple HDF5 SWMR-aware visualization client.
+- `build/viz_client` — simple HDF5 SWMR-aware visualization client with ASCII slice preview.
+- `build/image_streamer` — synthetic multi-slice generator that posts frames to the marshal.
 - `build/mk_mrd` — utility that creates valid placeholder MRD files for smoke tests.
 
 ---
@@ -127,16 +134,41 @@ cat ./data/mrd/latest.json
 The marshal accepts ISMRMRD Image messages. Each POST body is an
 `ISMRMRD::ImageHeader` immediately followed by the raw voxel payload. See
 [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md#post-v1ismrmrdframe) for the
-exact layout and a Python packing snippet. Once you have a binary message:
+exact layout. Two helper utilities now live in-tree:
+
+- **C++ (`image_streamer`)** — builds with the rest of the project. Generates a
+  multi-slice, single-channel float32 series with subtle temporal wobble.
+- **Python (`tools/stream_image_series.py`)** — mirrors the C++ generator using
+  `numpy`/`ismrmrd`. Both land their temporary `.bin` artifacts under `./data`.
+  Width/height, slice count, and cadence can be overridden with flags such as
+  `--nx 128 --ny 128 --nslices 8 --dt-ms 50`.
+
+Single-frame helpers (handy for testing payloads):
 
 ```bash
+# C++
+./build/make_image_message --out ./data/image_message.bin
+
+# Python (same output path)
+python3 tools/make_image_message.py
+
 curl -fsS \
   -H 'Content-Type: application/octet-stream' \
   -H 'X-MRD-Stream: demo_stream' \
-  --data-binary @image_message.bin \
+  --data-binary @./data/image_message.bin \
   http://localhost:8080/v1/ismrmrd/frame | jq
+```
 
-# Follow the growing dataset (requires HDF5 runtime on the system)
+Continuous generator:
+
+```bash
+# C++ streaming client (Ctrl+C to stop)
+./build/image_streamer --http http://localhost:8080 --stream demo_stream --nx 128 --ny 128 --nslices 8 --dt-ms 200
+
+# Python variant (same CLI flags)
+python3 tools/stream_image_series.py --http http://localhost:8080 --stream demo_stream --nx 128 --ny 128 --nslices 8 --dt-ms 200
+
+# Follow the growing dataset (ASCII preview per slice)
 ./build/viz_client --ws ws://localhost:8090/ws --data ./data/mrd
 ```
 

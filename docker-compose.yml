@@ -38,7 +38,17 @@ services:
 
   fk:
     build: *build-dev
-    command: bash -lc "${BUILD_CMD:-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build} && ./build/fk_client --http http://marshal:8080 --count 5 --step 0.05"
+    command: bash -lc "${BUILD_CMD:-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build} && ./build/fk_client --http http://marshal:8080 --pretty"
+    environment:
+      BUILD_CMD: *build-command
+    depends_on:
+      - marshal
+    volumes: *dev-volumes
+    working_dir: /src
+
+  image_streamer:
+    build: *build-dev
+    command: bash -lc "${BUILD_CMD:-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build} && ./build/image_streamer --http http://marshal:8080 --stream compose_demo --nx 128 --ny 128 --nslices 8 --dt-ms 500"
     environment:
       BUILD_CMD: *build-command
     depends_on:

@@ -70,20 +70,30 @@ curl -fsS -H "Content-Type: application/octet-stream" \
 ```
 
 (Optional) append SWMR frames to the active session by capturing an ISMRMRD
-Image message (header + voxels) and saving it as `dumpbox_image_message.bin`.
-Refer to [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md#post-v1ismrmrdframe)
-for a packing helper:
-
-# Creates ./dumpbox_image_message.bin in CWD
-./build/make_image_message --out dumpbox_image_message.bin
-ls -l dumpbox_image_message.bin
+Image message (header + voxels) and saving it as `./data/dumpbox_image_message.bin`.
+You can use the built-in helpers:
 
 ```bash
+# Single frame (C++)
+./build/make_image_message --out ./data/dumpbox_image_message.bin
+
+# Single frame (Python)
+python3 tools/make_image_message.py ./data/dumpbox_image_message.bin
+
 curl -fsS \
   -H 'Content-Type: application/octet-stream' \
   -H 'X-MRD-Stream: dumpbox_demo' \
-  --data-binary @dumpbox_image_message.bin \
+  --data-binary @./data/dumpbox_image_message.bin \
   http://localhost:8080/v1/ismrmrd/frame | tee /dev/stderr
+```
+
+To continuously stream frames while recording the session, optionally override
+the generated geometry or cadence (for example `--nx 128 --ny 128 --nslices 8 --dt-ms 200`):
+
+```bash
+./build/image_streamer --http http://localhost:8080 --stream dumpbox_demo --nx 128 --ny 128 --nslices 8 --dt-ms 200
+# or
+python3 tools/stream_image_series.py --http http://localhost:8080 --stream dumpbox_demo --nx 128 --ny 128 --nslices 8 --dt-ms 200
 ```
 
 ### 6. Locate the newest session

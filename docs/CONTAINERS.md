@@ -9,7 +9,7 @@ The repository maintains a single multi-stage Dockerfile with three stages:
 
 | Stage       | Purpose                                                                      |
 |-------------|------------------------------------------------------------------------------|
-| `build-base`| Full toolchain with compilers, Ninja, Boost, HDF5, and ISMRMRD headers.      |
+| `build-base`| Full toolchain with compilers, Ninja, Boost, HDF5, ISMRMRD headers, and Python libs for streaming helpers. |
 | `dev`       | Extends `build-base` with debugging/diagnostics tools and the `websocat` CLI.|
 | `runtime`   | Minimal runtime dependencies for packaging a release image.                  |
 
@@ -22,6 +22,9 @@ Key notes:
   so container builds behave the same way as local builds.
 - Runtime images copy the `/usr/local` install tree from the build stage so the marshal and
   clients can run without re-compiling inside the container.
+- Python 3, `numpy`, `h5py`, and the `ismrmrd` wheel ship in all stages so the lightweight
+  streaming helpers (`tools/make_image_message.py`, `tools/stream_image_series.py`) work out
+  of the box.
 
 ## Dev container (`.devcontainer/devcontainer.json`)
 
@@ -49,7 +52,7 @@ binary:
 
 - `marshal` — exposes HTTP (8080) and WebSocket (8090) endpoints to the host.
 - `viz` — live SWMR reader that trails MRD files produced by the marshal.
-- `fk` — synthetic frame generator that exercises the HTTP ingest path.
+- `image_streamer` — continuous multi-slice generator that exercises the HTTP ingest path.
 - `fs_tail` — tail-style reader for the MRD index JSON log.
 
 All services share the same bind mounts:

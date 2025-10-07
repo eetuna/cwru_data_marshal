@@ -9,6 +9,8 @@
 #include <boost/beast/core/buffers_to_string.hpp>
 #include <hdf5.h>
 #include <vector>
+#include <algorithm>
+#include <limits>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -22,6 +24,42 @@ static std::time_t file_time_to_time_t(std::filesystem::file_time_type t)
     const auto sctp = time_point_cast<system_clock::duration>(
         t - std::filesystem::file_time_type::clock::now() + system_clock::now());
     return system_clock::to_time_t(sctp);
+}
+
+static void render_ascii(const std::vector<float> &voxels,
+                         size_t nx,
+                         size_t ny,
+                         size_t nz,
+                         size_t frame_idx)
+{
+    static const std::string palette = " .:-=+*#%@";
+    auto [min_it, max_it] = std::minmax_element(voxels.begin(), voxels.end());
+    float min_v = (min_it != voxels.end()) ? *min_it : 0.f;
+    float max_v = (max_it != voxels.end()) ? *max_it : 1.f;
+    float span = std::max(1e-6f, max_v - min_v);
+
+    std::cout << "\n=== Frame " << frame_idx + 1 << " (" << nz << " slices) ===\n";
+    for (size_t z = 0; z < nz; ++z)
+    {
+        std::cout << "Slice " << (z + 1) << "/" << nz << "\n";
+        for (size_t y = 0; y < ny; ++y)
+        {
+            std::string line;
+            line.reserve(nx);
+            for (size_t x = 0; x < nx; ++x)
+            {
+                size_t idx = z * ny * nx + y * nx + x;
+                float norm = (voxels[idx] - min_v) / span;
+                size_t palette_idx = static_cast<size_t>(norm * (palette.size() - 1));
+                if (palette_idx >= palette.size())
+                    palette_idx = palette.size() - 1;
+                line.push_back(palette[palette_idx]);
+            }
+            std::cout << line << '\n';
+        }
+        std::cout << '\n';
+    }
+    std::cout.flush();
 }
 
 static void inspect_swmr_file(const std::string &path)
@@ -63,17 +101,48 @@ static void inspect_swmr_file(const std::string &path)
     std::vector<hsize_t> dims(rank, 0);
     if (rank > 0)
         H5Sget_simple_extent_dims(space, dims.data(), nullptr);
+
+    if (dims.size() == 5 && dims[0] > 0)
+    {
+        const hsize_t frames = dims[0];
+        const hsize_t channels = dims[1];
+        const hsize_t nz = dims[2];
+        const hsize_t ny = dims[3];
+        const hsize_t nx = dims[4];
+
+        hsize_t mem_dims[5] = {1, 1, nz, ny, nx};
+        hid_t memspace = H5Screate_simple(5, mem_dims, nullptr);
+        if (memspace >= 0)
+        {
+            std::vector<float> voxels(static_cast<size_t>(nz * ny * nx));
+            hsize_t start[5] = {frames - 1, 0, 0, 0, 0};
+            hsize_t count[5] = {1, 1, nz, ny, nx};
+            if (H5Sselect_hyperslab(space, H5S_SELECT_SET, start, nullptr, count, nullptr) >= 0)
+            {
+                if (channels > 1)
+                {
+                    std::cerr << "viz: only first channel rendered (" << channels << " available)\n";
+                }
+                if (H5Dread(dset, H5T_NATIVE_FLOAT, memspace, space, H5P_DEFAULT, voxels.data()) >= 0)
+                {
+                    render_ascii(voxels, nx, ny, nz, frames - 1);
+                }
+                else
+                {
+                    std::cerr << "viz: H5Dread failed for " << path << "\n";
+                }
+            }
+            H5Sclose(memspace);
+        }
+        std::cout << "viz swmr: frames=" << frames
+                  << " channels=" << channels
+                  << " shape=" << nx << "x" << ny << "x" << nz
+                  << "\n";
+    }
+
     H5Sclose(space);
     H5Dclose(dset);
     H5Fclose(file);
-
-    if (dims.size() == 5)
-    {
-        std::cout << "viz swmr: frames=" << dims[0]
-                  << " channels=" << dims[1]
-                  << " shape=" << dims[4] << "x" << dims[3] << "x" << dims[2]
-                  << "\n";
-    }
 }
 
 int main(int argc, char **argv)
