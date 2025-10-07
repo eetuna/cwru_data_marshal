@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstdint>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -20,6 +21,8 @@ hid_t element_hdf_type(ElementType type)
     {
     case ElementType::Float32:
         return H5T_IEEE_F32LE;
+    case ElementType::Int16:
+        return H5T_STD_I16LE;
     case ElementType::UInt16:
         return H5T_STD_U16LE;
     case ElementType::ComplexFloat32:
@@ -390,6 +393,8 @@ ElementType parse_element_type(const std::string &value)
 {
     if (value == "float32" || value == "float" || value == "f32")
         return ElementType::Float32;
+    if (value == "int16" || value == "i16" || value == "short")
+        return ElementType::Int16;
     if (value == "uint16" || value == "u16")
         return ElementType::UInt16;
     if (value == "complex64" || value == "cfloat" || value == "cf32")
@@ -403,6 +408,8 @@ std::string element_type_to_string(ElementType type)
     {
     case ElementType::Float32:
         return "float32";
+    case ElementType::Int16:
+        return "int16";
     case ElementType::UInt16:
         return "uint16";
     case ElementType::ComplexFloat32:
@@ -417,6 +424,8 @@ size_t element_type_bytes(ElementType type)
     {
     case ElementType::Float32:
         return sizeof(float);
+    case ElementType::Int16:
+        return sizeof(int16_t);
     case ElementType::UInt16:
         return sizeof(uint16_t);
     case ElementType::ComplexFloat32:
@@ -431,6 +440,8 @@ ElementType element_type_from_ismrmrd(uint16_t data_type)
     {
     case ISMRMRD::ISMRMRD_DataTypes::ISMRMRD_FLOAT:
         return ElementType::Float32;
+    case ISMRMRD::ISMRMRD_DataTypes::ISMRMRD_SHORT:
+        return ElementType::Int16;
     case ISMRMRD::ISMRMRD_DataTypes::ISMRMRD_USHORT:
         return ElementType::UInt16;
     case ISMRMRD::ISMRMRD_DataTypes::ISMRMRD_CXFLOAT:

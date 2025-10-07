@@ -4,6 +4,7 @@
 #include <vector>
 #include <random>
 #include <string>
+#include <cstdint>
 #include <hdf5.h>
 
 #include "mrd_sink.hpp"
@@ -175,4 +176,65 @@ TEST_CASE("MRD sink handles complex64 payloads", "[mrd][complex]")
         CHECK(readback[i].r == Catch::Approx(frame[i].r));
         CHECK(readback[i].i == Catch::Approx(frame[i].i));
     }
+}
+
+TEST_CASE("MRD sink handles int16 payloads", "[mrd][int16]")
+{
+    std::string temp = unique_temp_dir();
+    fs::path data_dir = fs::path(temp) / "data";
+    fs::create_directories(data_dir / "mrd");
+
+    MarshalState state;
+    state.data_dir = data_dir.string();
+    state.sink_mode = SinkMode::MRD;
+    state.ws_emit = [](const std::string &) {};
+    state.ws_emit_topic = [](const std::string &, const std::string &) {};
+
+    mrd::MrdSink sink(state);
+
+    mrd::ImageDimensions dims;
+    dims.spatial = {3, 2, 1};
+    dims.channels = 1;
+
+    const size_t elements = static_cast<size_t>(dims.spatial[0]) * dims.spatial[1] * dims.channels;
+    std::vector<int16_t> frame(elements);
+    for (size_t i = 0; i < elements; ++i)
+        frame[i] = static_cast<int16_t>(i * 7 - 3);
+
+    auto header_xml = mrd::default_ismrmrd_header(dims, mrd::ElementType::Int16, "streamI16");
+    auto result = sink.append_frame("streamI16", dims, mrd::ElementType::Int16, header_xml, frame.data(), frame.size() * sizeof(int16_t));
+    REQUIRE(result.frame_index == 0);
+
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    REQUIRE(fapl >= 0);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
+    H5Pset_fclose_degree(fapl, H5F_CLOSE_SEMI);
+    hid_t file = H5Fopen(result.file_path.c_str(), H5F_ACC_RDONLY | H5F_ACC_SWMR_READ, fapl);
+    H5Pclose(fapl);
+    REQUIRE(file >= 0);
+
+    hid_t dset = H5Dopen2(file, "/images/data", H5P_DEFAULT);
+    REQUIRE(dset >= 0);
+    REQUIRE(H5Drefresh(dset) >= 0);
+
+    hid_t space = H5Dget_space(dset);
+    REQUIRE(space >= 0);
+    hsize_t dims_out[5] = {0};
+    H5Sget_simple_extent_dims(space, dims_out, nullptr);
+    CHECK(dims_out[0] == 1);
+    CHECK(dims_out[1] == dims.channels);
+    CHECK(dims_out[3] == dims.spatial[1]);
+    CHECK(dims_out[4] == dims.spatial[0]);
+
+    std::vector<int16_t> readback(elements);
+    hid_t memspace = H5Screate_simple(5, dims_out, nullptr);
+    REQUIRE(memspace >= 0);
+    REQUIRE(H5Dread(dset, H5T_STD_I16LE, memspace, space, H5P_DEFAULT, readback.data()) >= 0);
+    H5Sclose(memspace);
+    H5Sclose(space);
+    H5Dclose(dset);
+    H5Fclose(file);
+
+    for (size_t i = 0; i < elements; ++i)
+        CHECK(readback[i] == frame[i]);
 }
