@@ -15,23 +15,24 @@ RUN apt-get update && \
   ca-certificates \
   git \
   curl \
-  iproute2 \        
-  net-tools \      
-  jq \
   ninja-build \
-  lld \ 
-  libpugixml1v5 \
+  lld \
   build-essential \
   cmake \
   pkg-config \
   libssl-dev \
   libhdf5-dev \
-  libboost-all-dev \
+  libboost-filesystem-dev \
+  libboost-program-options-dev \
+  libboost-system-dev \
+  libboost-thread-dev \
+  libopencv-core-dev \
+  libopencv-highgui-dev \
+  libopencv-imgcodecs-dev \
+  libopencv-imgproc-dev \
   libpugixml-dev \
   python3 \
   python3-pip \
-  python3-venv \
-  python3-numpy \
   && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
@@ -78,13 +79,8 @@ ENV CMAKE_PREFIX_PATH=/usr/local
 FROM build-base AS dev
 RUN apt-get update && apt-get install -y --no-install-recommends \
   gdb \
-  vim \
-  util-linux \
-  bsdmainutils \
-  ca-certificates \
-  curl \
-  iproute2 \       
-  net-tools \      
+  less \
+  vim-tiny \
   && rm -rf /var/lib/apt/lists/*
 
 # Install websocat (static musl build, works on amd64/arm64)
@@ -109,9 +105,6 @@ FROM ubuntu:${UBUNTU_VERSION} AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
   curl \
-  jq \
-  ninja-build \
-  lld \
   libpugixml1v5 \
   libhdf5-103-1 \
   libhdf5-hl-200 \
@@ -119,13 +112,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libboost-filesystem1.74.0 \
   libboost-thread1.74.0 \
   libboost-program-options1.74.0 \
-  util-linux \
-  bsdmainutils \
-  iproute2 \
+  libopencv-core406t64 \
+  libopencv-highgui406t64 \
+  libopencv-imgcodecs406t64 \
+  libopencv-imgproc406t64 \
   python3 \
   python3-pip \
-  python3-numpy \
-  net-tools \
   && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
