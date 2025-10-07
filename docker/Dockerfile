@@ -30,6 +30,7 @@ RUN apt-get update && \
   libopencv-highgui-dev \
   libopencv-imgcodecs-dev \
   libopencv-imgproc-dev \
+  libopencv-viz-dev \
   libpugixml-dev \
   python3 \
   python3-pip \
@@ -116,6 +117,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libopencv-highgui406t64 \
   libopencv-imgcodecs406t64 \
   libopencv-imgproc406t64 \
+  libopencv-viz406t64 \
   python3 \
   python3-pip \
   && rm -rf /var/lib/apt/lists/*
