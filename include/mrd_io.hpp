@@ -68,6 +68,41 @@ inline void ensure_dir(const std::filesystem::path &p)
     }
 }
 
+struct SinkPaths
+{
+    std::filesystem::path sink_root;
+    std::filesystem::path index_root;
+};
+
+inline SinkPaths resolve_sink_paths(MarshalState &state)
+{
+    namespace fs = std::filesystem;
+    SinkPaths paths;
+
+    fs::path mrd_root = fs::path(state.data_dir) / "mrd";
+    ensure_dir(mrd_root);
+
+    if (state.sink_mode == SinkMode::MRD)
+    {
+        paths.sink_root = mrd_root;
+        paths.index_root = mrd_root;
+    }
+    else
+    {
+        std::string session = state.dumpbox_session.empty() ? iso8601_now_ms() : state.dumpbox_session;
+        fs::path session_dir = fs::path(state.dumpbox_root) / session;
+        paths.index_root = session_dir;
+        paths.sink_root = session_dir / "files";
+        std::error_code ec_mk;
+        std::filesystem::create_directories(paths.sink_root, ec_mk);
+        if (ec_mk)
+            throw std::runtime_error("ensure dumpbox sink failed: " + ec_mk.message());
+        state.dumpbox_session = session;
+    }
+
+    return paths;
+}
+
 inline void write_atomic(const std::filesystem::path &dst, const void *data, size_t n)
 {
     namespace fs = std::filesystem;
@@ -163,34 +198,16 @@ inline nlohmann::json ingest_payload(MarshalState &state,
 {
     namespace fs = std::filesystem;
 
-    fs::path mrd_root = fs::path(state.data_dir) / "mrd";
-    ensure_dir(mrd_root);
-
     const std::string ts = iso8601_now_ms();
     const uint64_t seq = ingest_sequence().fetch_add(1);
 
     std::ostringstream name;
     name << ts << '_' << std::setw(6) << std::setfill('0') << seq << ".mrd";
 
-    fs::path sink_root;
-    fs::path index_root;
-    if (state.sink_mode == SinkMode::MRD)
-    {
-        sink_root = mrd_root;
-        index_root = mrd_root;
-    }
-    else
-    {
-        std::string session = state.dumpbox_session.empty() ? iso8601_now_ms() : state.dumpbox_session;
-        fs::path session_dir = fs::path(state.dumpbox_root) / session;
-        index_root = session_dir;
-        sink_root = session_dir / "files";
-        std::error_code ec_mk;
-        std::filesystem::create_directories(sink_root, ec_mk);
-        if (ec_mk)
-            throw std::runtime_error("ensure dumpbox sink failed: " + ec_mk.message());
-        state.dumpbox_session = session;
-    }
+    SinkPaths paths = resolve_sink_paths(state);
+
+    fs::path sink_root = paths.sink_root;
+    fs::path index_root = paths.index_root;
 
     fs::path out_path = sink_root / name.str();
     write_atomic(out_path, data, size);
