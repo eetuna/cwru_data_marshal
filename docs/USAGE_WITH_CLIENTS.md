@@ -116,6 +116,23 @@ The WebSocket fan-out will emit pose notifications that `viz_client` will show
 immediately. You can re-run `fk_client` any time to emulate the scanner pose
 stream.
 
+### 5b. Stream reconstructed frames via SWMR
+
+The marshal can now append ISMRMRD Image messages into a live MRD file while
+`viz_client` observes the growth. Once you have a packed message saved as
+`viz_image_message.bin` (see
+[`docs/API_REFERENCE.md`](API_REFERENCE.md#post-v1ismrmrdframe) for a helper):
+
+```bash
+curl -fsS \
+  -H 'Content-Type: application/octet-stream' \
+  -H 'X-MRD-Stream: viz_demo' \
+  --data-binary @viz_image_message.bin \
+  http://localhost:8080/v1/ismrmrd/frame | tee /dev/stderr
+```
+
+`viz_client` will print the new frame count immediately thanks to HDF5 SWMR.
+
 ### 6. Inspect live-mode outputs
 
 ```bash

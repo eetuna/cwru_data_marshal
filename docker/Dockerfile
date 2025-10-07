@@ -107,6 +107,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   lld \
   libpugixml1v5 \
   libhdf5-103-1 \
+  libhdf5-hl-200 \
   libboost-system1.83.0 libboost-filesystem1.83.0 libboost-thread1.83.0 libboost-program-options1.83.0 \
   util-linux \
   bsdmainutils \

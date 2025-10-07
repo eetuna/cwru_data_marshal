@@ -17,6 +17,7 @@
 #include "marshal_ws.hpp"
 #include "marshal_state.hpp"
 #include "mrd_io.hpp"
+#include "swmr_writer.hpp"
 
 namespace fs = std::filesystem;
 
@@ -91,6 +92,8 @@ int main(int argc, char **argv)
                       << " failed: " << ec.message() << "\n";
         }
     }
+
+    state.swmr = std::make_shared<mrd::SwmrManager>(state);
 
     // Networking endpoints
     boost::asio::ip::tcp::endpoint http_ep{boost::asio::ip::make_address(http_host), http_port};

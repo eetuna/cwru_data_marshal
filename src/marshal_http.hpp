@@ -21,16 +21,21 @@
 #include <nlohmann/json.hpp>
 #include "mrd_io.hpp"
 
+#include <array>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <memory>
-#include <string>
-#include <chrono>
 #include <iomanip>
+#include <memory>
 #include <sstream>
+#include <string>
+#include <vector>
+#include <cctype>
 
 #include "marshal_state.hpp"
 #include "common/pose.hpp" // Pose, PoseStore, pose_to_json
+#include "swmr_writer.hpp"
+#include <ismrmrd/ismrmrd.h>
 
 namespace http = boost::beast::http;
 namespace fs = std::filesystem;
@@ -266,6 +271,74 @@ private:
                                  .dump();
                 res.prepare_payload();
                 return respond(std::move(res));
+            }
+
+            // POST /v1/ismrmrd/frame  (append ISMRMRD Image to SWMR dataset)
+            if (req.method() == http::verb::post && req.target() == "/v1/ismrmrd/frame")
+            {
+                using namespace std::string_literals;
+                try
+                {
+                    if (!state.swmr)
+                        throw std::runtime_error("SWMR manager unavailable");
+                    auto stream_header = std::string(req["X-MRD-Stream"]);
+                    if (stream_header.empty())
+                        throw std::runtime_error("missing X-MRD-Stream header");
+                    const std::string &body = req.body();
+                    if (body.empty())
+                        throw std::runtime_error("empty body");
+                    if (body.size() < sizeof(ISMRMRD::ImageHeader))
+                        throw std::runtime_error("body too small for ISMRMRD ImageHeader");
+
+                    const auto *img_header = reinterpret_cast<const ISMRMRD::ImageHeader *>(body.data());
+                    mrd::StreamDimensions dims;
+                    dims.spatial = {static_cast<hsize_t>(img_header->matrix_size[0]),
+                                    static_cast<hsize_t>(img_header->matrix_size[1]),
+                                    static_cast<hsize_t>(img_header->matrix_size[2])};
+                    dims.channels = img_header->channels ? static_cast<hsize_t>(img_header->channels) : 1;
+                    if (dims.spatial[0] == 0 || dims.spatial[1] == 0)
+                        throw std::runtime_error("invalid matrix size in header");
+
+                    auto element_type = mrd::element_type_from_ismrmrd(img_header->data_type);
+                    const size_t payload_bytes = body.size() - sizeof(ISMRMRD::ImageHeader);
+                    const size_t expected_bytes = mrd::element_type_bytes(element_type) *
+                                                  static_cast<size_t>(dims.spatial[0]) *
+                                                  static_cast<size_t>(dims.spatial[1]) *
+                                                  static_cast<size_t>(dims.spatial[2] ? dims.spatial[2] : 1) *
+                                                  static_cast<size_t>(dims.channels);
+                    if (payload_bytes != expected_bytes)
+                        throw std::runtime_error("payload size does not match header");
+
+                    std::string header_xml = mrd::default_ismrmrd_header(dims, element_type, stream_header);
+                    const void *payload = body.data() + sizeof(ISMRMRD::ImageHeader);
+
+                    auto result = state.swmr->append_frame(stream_header, dims, element_type, header_xml, payload, payload_bytes);
+
+                    json resp = {
+                        {"status", "ok"},
+                        {"path", result.file_path.string()},
+                        {"stream", result.stream_id},
+                        {"frame_index", result.frame_index},
+                        {"ts", result.timestamp},
+                        {"dims", {result.dims.spatial[0], result.dims.spatial[1], result.dims.spatial[2]}},
+                        {"channels", result.dims.channels},
+                        {"datatype", mrd::element_type_to_string(result.element_type)},
+                        {"size_bytes", result.bytes}};
+
+                    http::response<http::string_body> res{http::status::ok, req.version()};
+                    res.set(http::field::content_type, "application/json");
+                    res.body() = resp.dump();
+                    res.prepare_payload();
+                    return respond(std::move(res));
+                }
+                catch (const std::exception &e)
+                {
+                    http::response<http::string_body> res{http::status::bad_request, req.version()};
+                    res.set(http::field::content_type, "application/json");
+                    res.body() = json{{"error", e.what()}}.dump();
+                    res.prepare_payload();
+                    return respond(std::move(res));
+                }
             }
 
             // POST /v1/mrd/ingest  (writes ${data_dir}/mrd/*.mrd and updates index/latest)

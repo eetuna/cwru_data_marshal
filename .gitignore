@@ -35,4 +35,6 @@ data/
 
 # Docs
 /docs/*
+!/docs/ARCHITECTURE.md
 !/docs/USAGE_WITH_CLIENTS.md
+!/docs/API_REFERENCE.md
