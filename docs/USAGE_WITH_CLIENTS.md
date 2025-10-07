@@ -124,13 +124,13 @@ frames (all write to `./data` by default):
 
 ```bash
 # Single frame
-./build/make_image_message --out ./data/viz_image_message.bin
-python3 tools/make_image_message.py ./data/viz_image_message.bin
+./build/make_image_message --out ./data/image_message.bin
+python3 tools/make_image_message.py ./data/image_message.bin
 
 curl -fsS \
   -H 'Content-Type: application/octet-stream' \
   -H 'X-MRD-Stream: viz_demo' \
-  --data-binary @./data/viz_image_message.bin \
+  --data-binary @./data/image_message.bin \
   http://localhost:8080/v1/ismrmrd/frame | tee /dev/stderr
 
 # Continuous wobble (C++ or Python)
@@ -138,7 +138,7 @@ curl -fsS \
 python3 tools/stream_image_series.py --http http://localhost:8080 --stream viz_demo --nx 128 --ny 128 --nslices 8 --dt-ms 200
 ```
 
-`viz_client` now renders a lightweight ASCII view of every slice so changes in
+`viz_client` now renders a view of every slice so changes in
 the incoming volume are obvious.
 
 ### 6. Inspect live-mode outputs

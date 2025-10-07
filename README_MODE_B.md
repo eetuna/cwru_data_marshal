@@ -70,20 +70,20 @@ curl -fsS -H "Content-Type: application/octet-stream" \
 ```
 
 (Optional) append SWMR frames to the active session by capturing an ISMRMRD
-Image message (header + voxels) and saving it as `./data/dumpbox_image_message.bin`.
+Image message (header + voxels) and saving it as `./data/image_message.bin`.
 You can use the built-in helpers:
 
 ```bash
 # Single frame (C++)
-./build/make_image_message --out ./data/dumpbox_image_message.bin
+./build/make_image_message --out ./data/image_message.bin
 
 # Single frame (Python)
-python3 tools/make_image_message.py ./data/dumpbox_image_message.bin
+python3 tools/make_image_message.py ./data/image_message.bin
 
 curl -fsS \
   -H 'Content-Type: application/octet-stream' \
   -H 'X-MRD-Stream: dumpbox_demo' \
-  --data-binary @./data/dumpbox_image_message.bin \
+  --data-binary @./data/image_message.bin \
   http://localhost:8080/v1/ismrmrd/frame | tee /dev/stderr
 ```
 

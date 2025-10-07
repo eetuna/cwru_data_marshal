@@ -35,58 +35,6 @@ endif()
 #message(STATUS "HDF5 library dirs: ${HDF5_LIBRARY_DIRS}")
 message(STATUS "HDF5 libraries: ${HDF5_LIBRARIES}")
 
-# Optional viz client (requires OpenCV)
-set(_viz_client_option_was_cached FALSE)
-if(DEFINED CACHE{ENABLE_VIZ_CLIENT})
-  set(_viz_client_option_was_cached TRUE)
-endif()
-option(ENABLE_VIZ_CLIENT "Build viz_client (requires OpenCV)" ON)
-if(ENABLE_VIZ_CLIENT)
-  unset(_opencv_link_targets)
-  unset(_opencv_link_mode)
-  unset(_opencv_has_viz)
-  find_package(OpenCV 4 QUIET COMPONENTS core imgproc highgui viz)
-  if(NOT OpenCV_FOUND)
-    if(_viz_client_option_was_cached)
-      message(FATAL_ERROR "ENABLE_VIZ_CLIENT is ON but OpenCV was not found. Provide OpenCV or disable the viz client.")
-    else()
-      message(WARNING "OpenCV not found; disabling viz_client. Set ENABLE_VIZ_CLIENT=OFF to skip detection or install OpenCV to build the viz client.")
-      set(ENABLE_VIZ_CLIENT OFF CACHE BOOL "Build viz_client (requires OpenCV)" FORCE)
-      set(ENABLE_VIZ_CLIENT OFF)
-    endif()
-  else()
-    if(TARGET OpenCV::opencv_viz)
-      set(_opencv_link_targets
-        OpenCV::opencv_core
-        OpenCV::opencv_imgproc
-        OpenCV::opencv_highgui
-        OpenCV::opencv_viz)
-      set(_opencv_link_mode "targets")
-      set(_opencv_link_description "targets ${_opencv_link_targets}")
-    elseif(OpenCV_LIBS)
-      set(_opencv_has_viz FALSE)
-      foreach(_opencv_lib IN LISTS OpenCV_LIBS)
-        if(_opencv_lib MATCHES "opencv_viz")
-          set(_opencv_has_viz TRUE)
-          break()
-        endif()
-      endforeach()
-      if(NOT _opencv_has_viz)
-        message(FATAL_ERROR "OpenCV found, but the viz component was not present in OpenCV_LIBS. Check your OpenCV installation.")
-      endif()
-      set(_opencv_link_mode "libraries")
-      set(_opencv_link_description "libraries ${OpenCV_LIBS}")
-    else()
-      message(FATAL_ERROR "OpenCV was found, but no imported targets or library list were exported. Unable to link viz_client.")
-    endif()
-    message(STATUS "Found OpenCV: ${OpenCV_VERSION} (linking via ${_opencv_link_description})")
-    if(OpenCV_INCLUDE_DIRS)
-      list(REMOVE_DUPLICATES OpenCV_INCLUDE_DIRS)
-      message(STATUS "OpenCV include dirs: ${OpenCV_INCLUDE_DIRS}")
-    endif()
-  endif()
-endif()
-
 # JSON
 include(FetchContent)
 FetchContent_Declare(nlohmann_json GIT_REPOSITORY https://github.com/nlohmann/json.git GIT_TAG v3.11.3)
@@ -123,23 +71,28 @@ target_link_libraries(playback PRIVATE Boost::system Threads::Threads nlohmann_j
 add_executable(fk_client clients/fk_client/fk_client_main.cpp)
 target_link_libraries(fk_client PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json)
 
+set(ENABLE_VIZ_CLIENT ON)
 if(ENABLE_VIZ_CLIENT)
-  add_executable(viz_client clients/viz_client/viz_client_main.cpp)
-  if(DEFINED _opencv_link_targets)
-    target_link_libraries(viz_client PRIVATE
-      Boost::system
-      Threads::Threads
-      nlohmann_json::nlohmann_json
-      ${hdf5_target}
-      ${_opencv_link_targets})
+  find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc highgui viz)
+  if(NOT OpenCV_FOUND)
+    message(WARNING "OpenCV (with viz) not found -> disabling viz_client")
   else()
-    target_include_directories(viz_client PRIVATE ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(viz_client PRIVATE
-      Boost::system
-      Threads::Threads
-      nlohmann_json::nlohmann_json
-      ${hdf5_target}
-      ${OpenCV_LIBS})
+    message(STATUS "Found OpenCV: ${OpenCV_VERSION}") 
+    if(OpenCV_INCLUDE_DIRS)
+      list(REMOVE_DUPLICATES OpenCV_INCLUDE_DIRS) 
+      message(STATUS "OpenCV include dirs: ${OpenCV_INCLUDE_DIRS}") 
+    endif()
+    add_executable(viz_client clients/viz_client/viz_client_main.cpp)
+    if(TARGET OpenCV::opencv_core)
+      target_link_libraries(viz_client PRIVATE
+        Boost::system Threads::Threads nlohmann_json::nlohmann_json ${hdf5_target}
+        OpenCV::opencv_core OpenCV::opencv_imgproc OpenCV::opencv_highgui OpenCV::opencv_viz)
+    else()
+      target_include_directories(viz_client PRIVATE ${OpenCV_INCLUDE_DIRS})
+      target_link_libraries(viz_client PRIVATE
+        Boost::system Threads::Threads nlohmann_json::nlohmann_json ${hdf5_target}
+        ${OpenCV_LIBS})
+    endif()
   endif()
 else()
   message(STATUS "viz_client disabled (ENABLE_VIZ_CLIENT=OFF)")

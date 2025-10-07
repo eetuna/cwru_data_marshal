@@ -15,6 +15,9 @@ RUN apt-get update && \
   ca-certificates \
   git \
   curl \
+  jq \
+  iproute2 \
+  net-tools \
   ninja-build \
   lld \
   build-essential \
@@ -109,6 +112,9 @@ FROM ubuntu:${UBUNTU_VERSION} AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
   curl \
+  jq \
+  iproute2 \
+  net-tools \
   libpugixml1v5 \
   libhdf5-103-1 \
   libhdf5-hl-200 \
