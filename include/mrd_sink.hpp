@@ -22,6 +22,7 @@ namespace mrd
 enum class ElementType
 {
     Float32,
+    Int16,
     UInt16,
     ComplexFloat32
 };

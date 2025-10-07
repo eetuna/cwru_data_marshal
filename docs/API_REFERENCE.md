@@ -82,6 +82,7 @@ Binary concatenation of:
 Supported datatypes are:
 
 - Real `float32`
+- Signed `int16`
 - Unsigned `uint16`
 - Complex `complex64` (two `float32` values per voxel)
 
