@@ -39,6 +39,24 @@ curl -fsS -H "Content-Type: application/octet-stream" \
   --data-binary @./data/mrd/sample_live_2.h5 \
   http://localhost:8080/v1/mrd/ingest | tee /dev/stderr
 
+# 5b) Append streaming frames into a live SWMR MRD (float32 4x3x1, 2 channels)
+python - <<'PY'
+import numpy as np
+for i, off in enumerate([0, 100, 200]):
+    (np.arange(24, dtype=np.float32) + off).tofile(f'frame_{i}.bin')
+PY
+
+for f in frame_0.bin frame_1.bin frame_2.bin; do
+  curl -fsS \
+    -H 'Content-Type: application/octet-stream' \
+    -H 'X-MRD-Stream: live_demo' \
+    -H 'X-MRD-Dimensions: 4x3' \
+    -H 'X-MRD-Channels: 2' \
+    -H 'X-MRD-Datatype: float32' \
+    --data-binary @$f \
+    http://localhost:8080/v1/mrd/frame | tee /dev/stderr
+done
+
 # 6) (Optional) WebSocket ingest smoke test (requires websocat)
 # Send the MRD payload as a single binary frame; the server will write a new file
 # and broadcast the ingest metadata back to any subscribers.

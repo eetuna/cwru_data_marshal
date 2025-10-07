@@ -7,6 +7,8 @@
 #include <boost/beast/websocket.hpp>
 #include <nlohmann/json.hpp>
 #include <boost/beast/core/buffers_to_string.hpp>
+#include <hdf5.h>
+#include <vector>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -20,6 +22,58 @@ static std::time_t file_time_to_time_t(std::filesystem::file_time_type t)
     const auto sctp = time_point_cast<system_clock::duration>(
         t - std::filesystem::file_time_type::clock::now() + system_clock::now());
     return system_clock::to_time_t(sctp);
+}
+
+static void inspect_swmr_file(const std::string &path)
+{
+    if (path.empty())
+        return;
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    if (fapl < 0)
+        return;
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
+    H5Pset_fclose_degree(fapl, H5F_CLOSE_SEMI);
+    hid_t file = H5Fopen(path.c_str(), H5F_ACC_RDONLY | H5F_ACC_SWMR_READ, fapl);
+    H5Pclose(fapl);
+    if (file < 0)
+    {
+        std::cerr << "viz: unable to open SWMR file " << path << "\n";
+        return;
+    }
+    hid_t dset = H5Dopen2(file, "/frames", H5P_DEFAULT);
+    if (dset < 0)
+    {
+        std::cerr << "viz: /frames dataset missing in " << path << "\n";
+        H5Fclose(file);
+        return;
+    }
+    if (H5Drefresh(dset) < 0)
+    {
+        std::cerr << "viz: H5Drefresh failed for " << path << "\n";
+    }
+    hid_t space = H5Dget_space(dset);
+    if (space < 0)
+    {
+        std::cerr << "viz: cannot read dataset space" << std::endl;
+        H5Dclose(dset);
+        H5Fclose(file);
+        return;
+    }
+    int rank = H5Sget_simple_extent_ndims(space);
+    std::vector<hsize_t> dims(rank, 0);
+    if (rank > 0)
+        H5Sget_simple_extent_dims(space, dims.data(), nullptr);
+    H5Sclose(space);
+    H5Dclose(dset);
+    H5Fclose(file);
+
+    if (dims.size() == 5)
+    {
+        std::cout << "viz swmr: frames=" << dims[0]
+                  << " channels=" << dims[1]
+                  << " shape=" << dims[4] << "x" << dims[3] << "x" << dims[2]
+                  << "\n";
+    }
 }
 
 int main(int argc, char **argv)
@@ -50,13 +104,23 @@ int main(int argc, char **argv)
         std::time_t last = 0;
         while (true) {
             try {
-                if (fs::exists(latest)) {
+                    if (fs::exists(latest)) {
                    // auto wt = decltype(fs::last_write_time(latest))::clock::to_time_t(fs::last_write_time(latest));
                    auto wt = file_time_to_time_t(fs::last_write_time(latest));
                    if (wt != last) {
                         std::ifstream lf(latest);
                         json lj; lf >> lj;
                         std::cout << "viz latest=" << lj.dump() << "\n";
+                        if (lj.contains("frame_index") && lj.contains("path"))
+                        {
+                            try
+                            {
+                                inspect_swmr_file(lj["path"].get<std::string>());
+                            }
+                            catch (...)
+                            {
+                            }
+                        }
                         last = wt;
                     }
                 }
@@ -97,7 +161,19 @@ int main(int argc, char **argv)
             buf.consume(buf.size());
             auto j = json::parse(s, nullptr, false);
             if (j.is_object())
+            {
                 std::cout << "viz ws: " << j.dump() << "\n";
+                if (j.contains("frame_index") && j.contains("path"))
+                {
+                    try
+                    {
+                        inspect_swmr_file(j["path"].get<std::string>());
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+            }
         }
     }
     catch (const std::exception &e)

@@ -61,8 +61,8 @@ endif()
 
 include_directories(${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
 
-add_executable(marshal src/marshal_main.cpp src/marshal_http.hpp src/marshal_ws.hpp src/marshal_state.hpp)
-target_link_libraries(marshal PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json)
+add_executable(marshal src/marshal_main.cpp src/marshal_http.hpp src/marshal_ws.hpp src/marshal_state.hpp src/swmr_writer.cpp)
+target_link_libraries(marshal PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json ${hdf5_target})
 
 
 add_executable(playback services/playback/playback_main.cpp)
@@ -72,7 +72,7 @@ add_executable(fk_client clients/fk_client/fk_client_main.cpp)
 target_link_libraries(fk_client PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json)
 
 add_executable(viz_client clients/viz_client/viz_client_main.cpp)
-target_link_libraries(viz_client PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json)
+target_link_libraries(viz_client PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json ${hdf5_target})
 
 add_executable(mk_mrd src/mk_mrd.cpp)
 target_link_libraries(mk_mrd PRIVATE ${ismrmrd_target} hdf5_serial)
@@ -100,6 +100,10 @@ if(BUILD_TESTING)
   add_executable(it_ws tests/test_ws_broadcast.cpp src/marshal_state.hpp)
   target_link_libraries(it_ws PRIVATE Catch2::Catch2WithMain Boost::system Threads::Threads nlohmann_json::nlohmann_json)
   add_test(NAME it_ws COMMAND it_ws)
+
+  add_executable(test_swmr tests/test_swmr_writer.cpp src/swmr_writer.cpp)
+  target_link_libraries(test_swmr PRIVATE Catch2::Catch2WithMain nlohmann_json::nlohmann_json ${hdf5_target})
+  add_test(NAME test_swmr COMMAND test_swmr)
 endif()
 
 add_library(index_writer STATIC src/index_writer.cpp)

@@ -21,16 +21,20 @@
 #include <nlohmann/json.hpp>
 #include "mrd_io.hpp"
 
+#include <array>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <memory>
-#include <string>
-#include <chrono>
 #include <iomanip>
+#include <memory>
 #include <sstream>
+#include <string>
+#include <vector>
+#include <cctype>
 
 #include "marshal_state.hpp"
 #include "common/pose.hpp" // Pose, PoseStore, pose_to_json
+#include "swmr_writer.hpp"
 
 namespace http = boost::beast::http;
 namespace fs = std::filesystem;
@@ -266,6 +270,113 @@ private:
                                  .dump();
                 res.prepare_payload();
                 return respond(std::move(res));
+            }
+
+            // POST /v1/mrd/frame  (append streaming frame to SWMR-managed MRD)
+            if (req.method() == http::verb::post && req.target() == "/v1/mrd/frame")
+            {
+                using namespace std::string_literals;
+                auto stream_header = std::string(req["X-MRD-Stream"]);
+                auto dims_header = std::string(req["X-MRD-Dimensions"]);
+                auto dtype_header = std::string(req["X-MRD-Datatype"]);
+                auto channels_header = std::string(req["X-MRD-Channels"]);
+
+                if (!state.swmr)
+                {
+                    http::response<http::string_body> res{http::status::service_unavailable, req.version()};
+                    res.set(http::field::content_type, "application/json");
+                    res.body() = json{{"error", "SWMR not initialised"}}.dump();
+                    res.prepare_payload();
+                    return respond(std::move(res));
+                }
+
+                auto parse_dims = [](const std::string &value) -> std::array<uint64_t, 3>
+                {
+                    std::array<uint64_t, 3> dims{0, 0, 1};
+                    std::vector<std::string> parts;
+                    std::string current;
+                    for (char c : value)
+                    {
+                        if (c == 'x' || c == 'X' || c == ',' || std::isspace(static_cast<unsigned char>(c)))
+                        {
+                            if (!current.empty())
+                            {
+                                parts.push_back(current);
+                                current.clear();
+                            }
+                        }
+                        else
+                        {
+                            current.push_back(c);
+                        }
+                    }
+                    if (!current.empty())
+                        parts.push_back(current);
+                    if (parts.size() < 2 || parts.size() > 3)
+                        throw std::runtime_error("X-MRD-Dimensions must contain 2 or 3 values");
+
+                    dims[0] = std::stoull(parts[0]);
+                    dims[1] = std::stoull(parts[1]);
+                    if (parts.size() == 3)
+                        dims[2] = std::stoull(parts[2]);
+                    if (dims[0] == 0 || dims[1] == 0)
+                        throw std::runtime_error("dimensions must be non-zero");
+                    if (dims[2] == 0)
+                        dims[2] = 1;
+                    return dims;
+                };
+
+                try
+                {
+                    if (stream_header.empty())
+                        throw std::runtime_error("missing X-MRD-Stream header");
+                    if (dims_header.empty())
+                        throw std::runtime_error("missing X-MRD-Dimensions header");
+
+                    auto dims_vec = parse_dims(dims_header);
+                    mrd::StreamDimensions dims;
+                    dims.spatial = {static_cast<hsize_t>(dims_vec[0]), static_cast<hsize_t>(dims_vec[1]), static_cast<hsize_t>(dims_vec[2])};
+                    if (!channels_header.empty())
+                    {
+                        dims.channels = static_cast<hsize_t>(std::stoull(channels_header));
+                        if (dims.channels == 0)
+                            throw std::runtime_error("channels must be >= 1");
+                    }
+
+                    auto dtype = dtype_header.empty() ? "float32"s : dtype_header;
+                    auto element_type = mrd::parse_element_type(dtype);
+
+                    const std::string &body = req.body();
+                    if (body.empty())
+                        throw std::runtime_error("empty body");
+
+                    auto result = state.swmr->append_frame(stream_header, dims, element_type, body.data(), body.size());
+
+                    json resp = {
+                        {"status", "ok"},
+                        {"path", result.file_path.string()},
+                        {"stream", result.stream_id},
+                        {"frame_index", result.frame_index},
+                        {"ts", result.timestamp},
+                        {"dims", {result.dims.spatial[0], result.dims.spatial[1], result.dims.spatial[2]}},
+                        {"channels", result.dims.channels},
+                        {"datatype", mrd::element_type_to_string(result.element_type)},
+                        {"size_bytes", result.bytes}};
+
+                    http::response<http::string_body> res{http::status::ok, req.version()};
+                    res.set(http::field::content_type, "application/json");
+                    res.body() = resp.dump();
+                    res.prepare_payload();
+                    return respond(std::move(res));
+                }
+                catch (const std::exception &e)
+                {
+                    http::response<http::string_body> res{http::status::bad_request, req.version()};
+                    res.set(http::field::content_type, "application/json");
+                    res.body() = json{{"error", e.what()}}.dump();
+                    res.prepare_payload();
+                    return respond(std::move(res));
+                }
             }
 
             // POST /v1/mrd/ingest  (writes ${data_dir}/mrd/*.mrd and updates index/latest)

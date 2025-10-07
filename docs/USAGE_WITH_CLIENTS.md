@@ -116,6 +116,31 @@ The WebSocket fan-out will emit pose notifications that `viz_client` will show
 immediately. You can re-run `fk_client` any time to emulate the scanner pose
 stream.
 
+### 5b. Stream reconstructed frames via SWMR
+
+The marshal can now append raw voxel frames into a live MRD file while
+`viz_client` observes the growth.
+
+```bash
+python - <<'PY'
+import numpy as np
+for i, off in enumerate([0, 32, 64]):
+    (np.linspace(0, 1, 32, dtype=np.float32) + off).tofile(f'stream_frame_{i}.bin')
+PY
+
+for f in stream_frame_0.bin stream_frame_1.bin stream_frame_2.bin; do
+  curl -fsS \
+    -H 'Content-Type: application/octet-stream' \
+    -H 'X-MRD-Stream: viz_demo' \
+    -H 'X-MRD-Dimensions: 8x4' \
+    -H 'X-MRD-Channels: 1' \
+    --data-binary @$f \
+    http://localhost:8080/v1/mrd/frame | tee /dev/stderr
+done
+```
+
+`viz_client` will print the new frame count immediately thanks to HDF5 SWMR.
+
 ### 6. Inspect live-mode outputs
 
 ```bash

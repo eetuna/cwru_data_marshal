@@ -42,6 +42,23 @@ curl -fsS -H "Content-Type: application/octet-stream" \
   --data-binary @./data/mrd/tmp_record_2.h5 \
   http://localhost:8080/v1/mrd/ingest | tee /dev/stderr
 
+# (Optional) Append live SWMR frames to the active dumpbox session
+python - <<'PY'
+import numpy as np
+for i, off in enumerate([0, 40, 80]):
+    (np.arange(24, dtype=np.float32) + off).tofile(f'dumpbox_frame_{i}.bin')
+PY
+
+for f in dumpbox_frame_0.bin dumpbox_frame_1.bin dumpbox_frame_2.bin; do
+  curl -fsS \
+    -H 'Content-Type: application/octet-stream' \
+    -H 'X-MRD-Stream: dumpbox_demo' \
+    -H 'X-MRD-Dimensions: 4x3' \
+    -H 'X-MRD-Channels: 2' \
+    --data-binary @$f \
+    http://localhost:8080/v1/mrd/frame | tee /dev/stderr
+done
+
 # 6) Locate the newest dumpbox session (contains files/ + metadata)
 SESSION_DIR=""
 for _ in $(seq 1 25); do

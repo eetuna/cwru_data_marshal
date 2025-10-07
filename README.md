@@ -17,6 +17,7 @@ This keeps the data sink unambiguous: **one or the other**.
   - **MRD sink** (Live): writes `/data/mrd/<timestamp>_<seq>.mrd`, maintains `index.jsonl`, `latest.json`.
   - **Dumpbox sink** (Record): writes `/data/dumpbox/<SESSION>/files/*.mrd`, with session-scoped `index.jsonl`, `latest.json`.
 - 🔁 **HTTP playback** tool: re-POSTs a dumpbox session back to `/v1/mrd/ingest` to simulate the scanner; `marshal` (in MRD mode) rewrites fresh MRDs for clients.
+- 🔓 **SWMR MRD streaming**: `/v1/mrd/frame` appends reconstructed images into a live HDF5 dataset so readers can follow along via HDF5 Single-Writer-Multiple-Reader semantics.
 - 🧩 **Zero client code changes** between Live and Replay—clients always “read files.”
 - ⚙️ **Tiny footprint**: Boost.Asio/Beast + nlohmann/json; no heavy deps.
 
@@ -91,6 +92,31 @@ tail -n 5 ./data/mrd/index.jsonl || true
 cat ./data/mrd/latest.json
 ```
 
+#### Stream frames with SWMR
+
+```bash
+# Create a trio of demo frames (float32, 2 channels, 4x3 slice)
+python - <<'PY'
+import numpy as np
+for i, offset in enumerate([0, 100, 200]):
+    (np.arange(24, dtype=np.float32) + offset).tofile(f'frame{i}.bin')
+PY
+
+for f in frame0.bin frame1.bin frame2.bin; do
+  curl -fsS \
+    -H 'Content-Type: application/octet-stream' \
+    -H 'X-MRD-Stream: demo_stream' \
+    -H 'X-MRD-Dimensions: 4x3' \
+    -H 'X-MRD-Channels: 2' \
+    -H 'X-MRD-Datatype: float32' \
+    --data-binary @$f \
+    http://localhost:8080/v1/mrd/frame | jq
+done
+
+# The viz client opens the resulting MRD with HDF5 SWMR and prints frame counts
+./build/viz_client --ws ws://localhost:8090/ws --data ./data/mrd
+```
+
 ---
 
 ## Developer note: MRD ingestion helper
@@ -137,9 +163,15 @@ cat ./data/mrd/latest.json
 
 ## HTTP API
 
-- **`POST /v1/mrd/ingest`** — Body: MRD bytes (`application/octet-stream`)  
-  - **MRD mode:** writes to `/data/mrd`, updates global `index.jsonl`/`latest.json`.  
+- **`POST /v1/mrd/ingest`** — Body: MRD bytes (`application/octet-stream`)
+  - **MRD mode:** writes to `/data/mrd`, updates global `index.jsonl`/`latest.json`.
   - **Dumpbox mode:** writes to session under `/data/dumpbox/<SESSION>`, updates session `index.jsonl`/`latest.json`.
+- **`POST /v1/mrd/frame`** — Body: raw voxel bytes (`application/octet-stream`)
+  - `X-MRD-Stream`: logical identifier; the marshal will keep a matching `.mrd` file open
+  - `X-MRD-Dimensions`: spatial size as `XxY` or `XxYxZ`
+  - `X-MRD-Channels`: optional channel count (default `1`)
+  - `X-MRD-Datatype`: `float32` (default) or `uint16`
+  - Appends into the `/frames` dataset using HDF5 SWMR so readers can open the file while it grows
 - **`GET /health`** — returns `ok`.
 - **(If present) `GET /v1/mrd/since?ts=...&limit=...`** — convenience reader over `index.jsonl`.
 
