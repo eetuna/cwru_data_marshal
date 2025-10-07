@@ -101,12 +101,14 @@ import ismrmrd
 
 # Create a 4x3 single-channel float32 image with obvious values
 data = np.arange(12, dtype=np.float32).reshape(3, 4)
-img = ismrmrd.Image.from_array(data)
-img.head.channels = 1
-img.head.data_type = ismrmrd.DATATYPE_FLOAT
+img = ismrmrd.Image.from_array(data, transpose=False)
+head = img.getHead()
+head.channels = 1
+head.data_type = ismrmrd.DATATYPE_FLOAT
+img.setHead(head)
 
 with open('image_message.bin', 'wb') as f:
-    f.write(img.getHead().tobytes())
+    f.write(bytes(head))
     f.write(img.data.tobytes())
 PY
 ```

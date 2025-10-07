@@ -23,15 +23,17 @@ def build_frame(frame_index: int, nx: int, ny: int, nz: int) -> ismrmrd.Image:
         wobble = 0.25 * np.sin(phase + z * 0.35 + grid_x[None, :] * 2.0 + grid_y[:, None] * 1.5)
         stack.append(base + wobble)
     data = np.stack(stack, axis=0).astype(np.float32)
-    img = ismrmrd.Image.from_array(data)
-    img.head.channels = 1
-    img.head.data_type = ismrmrd.DATATYPE_FLOAT
-    img.head.matrix_size[0] = nx
-    img.head.matrix_size[1] = ny
-    img.head.matrix_size[2] = nz
-    img.head.image_index = (frame_index % 65535) + 1
-    img.head.image_series_index = 1
-    img.head.slice = frame_index % max(1, nz)
+    img = ismrmrd.Image.from_array(data, transpose=False)
+    head = img.getHead()
+    head.channels = 1
+    head.data_type = ismrmrd.DATATYPE_FLOAT
+    head.matrix_size[0] = nx
+    head.matrix_size[1] = ny
+    head.matrix_size[2] = nz
+    head.image_index = (frame_index % 65535) + 1
+    head.image_series_index = 1
+    head.slice = frame_index % max(1, nz)
+    img.setHead(head)
     return img
 
 
@@ -73,7 +75,7 @@ def main() -> int:
 
     for frame_index in iter_frames(args.frames):
         img = build_frame(frame_index, nx, ny, nz)
-        body = img.getHead().tobytes() + img.data.tobytes()
+        body = bytes(img.getHead()) + img.data.tobytes()
         headers = {
             "Content-Type": "application/octet-stream",
             "X-MRD-Stream": args.stream,

@@ -117,8 +117,5 @@ if(BUILD_TESTING)
   add_test(NAME test_mrd_sink COMMAND test_mrd_sink)
 endif()
 
-add_library(index_writer STATIC src/index_writer.cpp)
-target_include_directories(index_writer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/include)
-
 add_executable(fs_tail_client tools/fs_tail_client.cpp)
 target_link_libraries(fs_tail_client PRIVATE nlohmann_json::nlohmann_json)
