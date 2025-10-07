@@ -107,11 +107,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   lld \
   libpugixml1v5 \
   libhdf5-103-1 \
-  libboost-system1.83.0 libboost-filesystem1.83.0 libboost-thread1.83.0 libboost-program-options1.83.0 \
+  libhdf5-hl-200 \
+  libboost-system1.74.0 \
+  libboost-filesystem1.74.0 \
+  libboost-thread1.74.0 \
+  libboost-program-options1.74.0 \
   util-linux \
   bsdmainutils \
-  iproute2 \        
-  net-tools \       
+  iproute2 \
+  net-tools \
   && rm -rf /var/lib/apt/lists/*
 
 # Optional: install websocat in runtime too

@@ -1,51 +1,59 @@
-
 version: "3.9"
+
+x-build-dev: &build-dev
+  context: .
+  dockerfile: docker/Dockerfile
+  target: dev
+  args:
+    BUILD_ISMRMRD_FROM_SOURCE: "true"
+    ISMRMRD_TAG: "main"
+
+x-dev-volumes: &dev-volumes
+  - .:/src
+  - ./data:/data
+
+x-build-command: &build-command "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build"
+
 services:
   marshal:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-      target: dev
-      args:
-        BUILD_ISMRMRD_FROM_SOURCE: "true"
-        ISMRMRD_TAG: "main"
-        #BUILD_ISMRMRD_FROM_SOURCE: "false"
-        #ISMRMRD_TAG: "v1.14.0"
-    # command: bash -lc "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j && ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data /data"
-    command: bash -lc "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build && ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data /data"
-    ports: ["8080:8080","8090:8090"]
-    volumes: ["./data:/data", ".:/src"]
+    build: *build-dev
+    command: bash -lc "${BUILD_CMD:-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build} && ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data /data"
+    environment:
+      BUILD_CMD: *build-command
+    ports:
+      - "8080:8080"
+      - "8090:8090"
+    volumes: *dev-volumes
     working_dir: /src
 
   viz:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-      target: dev
-    #command: bash -lc "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j && ./build/viz_client --ws ws://marshal:8090/ws --data /data"
-    command: bash -lc "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build && ./build/viz_client --ws ws://marshal:8090/ws --data /data"
-    depends_on: ["marshal"]
-    volumes: ["./data:/data", ".:/src"]
+    build: *build-dev
+    command: bash -lc "${BUILD_CMD:-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build} && ./build/viz_client --ws ws://marshal:8090/ws --data /data"
+    environment:
+      BUILD_CMD: *build-command
+    depends_on:
+      - marshal
+    volumes: *dev-volumes
     working_dir: /src
 
   fk:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-      target: dev
-    #command: bash -lc "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j && ./build/fk_client --http http://marshal:8080 --count 5 --step 0.05"
-    command: bash -lc "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build && ./build/fk_client --http http://marshal:8080 --count 5 --step 0.05"
-    depends_on: ["marshal"]
-    volumes: [".:/src"]
+    build: *build-dev
+    command: bash -lc "${BUILD_CMD:-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build} && ./build/fk_client --http http://marshal:8080 --count 5 --step 0.05"
+    environment:
+      BUILD_CMD: *build-command
+    depends_on:
+      - marshal
+    volumes: *dev-volumes
     working_dir: /src
 
-  fs_client:
-    build: .
-    command: ./build/fs_tail_client
-    volumes:
-      - ./data:/src/data
+  fs_tail:
+    build: *build-dev
+    command: bash -lc "${BUILD_CMD:-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build} && ./build/fs_tail_client"
     environment:
-      - DM_INDEX=./data/mrd/index.jsonl
-      - DM_TAIL_OFFSET=./data/mrd/.fs_tail_offset
-    depends_on: [marshal]
-
+      BUILD_CMD: *build-command
+      DM_INDEX: /data/mrd/index.jsonl
+      DM_TAIL_OFFSET: /data/mrd/.fs_tail_offset
+    depends_on:
+      - marshal
+    volumes: *dev-volumes
+    working_dir: /src

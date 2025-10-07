@@ -1,24 +1,65 @@
 # CWRU Data Marshal
 
-**What it is.** A tiny, fast HTTP/WS hub for reconstructed MRI data (ISMRMRD). It runs in exactly one of two modes:
+The marshal is a tiny, fast HTTP/WebSocket hub for reconstructed MRI data (ISMRMRD).
+It always runs in exactly **one** of two modes:
 
-- **Mode A — Live file access:** scanner → `marshal` → **MRD files** → clients read files  
-- **Mode B — Record → Replay:**  
-  - **Record now:** scanner → `marshal` → **dumpbox session** (no `/data/mrd` writes)  
-  - **Replay later:** `playback` → `marshal` → **MRD files** → clients read files (same interface as live)
+- **Mode A – Live file access:** scanner → `marshal` → **MRD files** → clients read files.
+- **Mode B – Record → Replay:**
+  - **Record now:** scanner → `marshal` → **dumpbox session** (no `/data/mrd` writes).
+  - **Replay later:** `playback` → `marshal` → **MRD files** → clients read files using the same interface as live.
 
-This keeps the data sink unambiguous: **one or the other**.
+Keeping the sink explicit makes operations predictable, observability trivial, and
+failure handling much easier.
 
 ---
 
-## Features
+## Why you might want this
 
-- 🚦 **Two explicit sinks**
-  - **MRD sink** (Live): writes `/data/mrd/<timestamp>_<seq>.mrd`, maintains `index.jsonl`, `latest.json`.
-  - **Dumpbox sink** (Record): writes `/data/dumpbox/<SESSION>/files/*.mrd`, with session-scoped `index.jsonl`, `latest.json`.
-- 🔁 **HTTP playback** tool: re-POSTs a dumpbox session back to `/v1/mrd/ingest` to simulate the scanner; `marshal` (in MRD mode) rewrites fresh MRDs for clients.
-- 🧩 **Zero client code changes** between Live and Replay—clients always “read files.”
-- ⚙️ **Tiny footprint**: Boost.Asio/Beast + nlohmann/json; no heavy deps.
+- 🚦 **Two explicit sinks** keep live and replay data flows separate and auditable.
+- 🔁 **Playback utility** replays dumpbox sessions by re-posting them to the marshal.
+- 🔓 **HDF5 SWMR streaming** (`POST /v1/ismrmrd/frame`) lets clients open growing MRD
+  files safely while the marshal appends new frames.
+- 🧩 **Clients stay simple:** they only ever read MRD files on disk.
+- ⚙️ **No heavy dependencies:** Boost.Asio/Beast and nlohmann/json do the heavy lifting.
+
+---
+
+## First-time setup (10 minutes)
+
+1. **Install build tools and SDKs** (Ubuntu/Debian):
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y \
+     build-essential cmake ninja-build pkg-config \
+     libboost-all-dev libhdf5-dev libismrmrd-dev
+   ```
+   These match the toolchain baked into `docker/Dockerfile` so local builds
+   have the HDF5, Boost, and ISMRMRD headers needed for SWMR support.
+2. **Configure + build** the binaries:
+   ```bash
+   mkdir -p build
+   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF
+   cmake --build build -j"$(nproc)"
+   ```
+3. **Pick a sink:**
+   - Live MRD files: `./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink mrd`.
+   - Record-only dumpbox: `./build/marshal --http ... --sink dumpbox --dumpbox-root ./data/dumpbox`.
+4. **Ingest data:**
+   - Upload MRD files via `POST /v1/mrd/ingest` (curl examples below).
+   - Append SWMR frames via `POST /v1/ismrmrd/frame` with ISMRMRD image
+     messages to stream voxels into a growing dataset that readers can follow in
+     near real time.
+5. **Inspect outputs:** MRD sink writes to `./data/mrd`; dumpbox sink writes to
+   `./data/dumpbox/<session>/files`. Metadata is mirrored in `index.jsonl` and
+   `latest.json` for simple polling clients.
+
+The step-by-step runbooks in [`README_MODE_A.md`](README_MODE_A.md) and
+[`README_MODE_B.md`](README_MODE_B.md) expand on these steps with copy/paste-able
+commands, cleanup instructions, and verification tips.
+
+Prefer containerized workflows? See [`docs/CONTAINERS.md`](docs/CONTAINERS.md) for
+a deep dive into the devcontainer image, the multi-stage Dockerfile, and the
+`docker compose` demo stack that spins up the marshal alongside example clients.
 
 ---
 
@@ -27,8 +68,8 @@ This keeps the data sink unambiguous: **one or the other**.
 **Live (MRD sink)**
 ```
 /data/mrd/
-├─ 2025-09-20T01:23:45.123Z_000001.mrd
-├─ 2025-09-20T01:23:47.045Z_000002.mrd
+├─ streamA.mrd
+├─ streamB.mrd
 ├─ index.jsonl
 └─ latest.json
 ```
@@ -37,8 +78,8 @@ This keeps the data sink unambiguous: **one or the other**.
 ```
 /data/dumpbox/2025-09-20T01:23:00Z/
 ├─ files/
-│  ├─ 2025-09-20T01:23:45.123Z_000001.mrd
-│  └─ 2025-09-20T01:23:47.045Z_000002.mrd
+│  ├─ streamA.mrd
+│  └─ streamB.mrd
 ├─ index.jsonl
 └─ latest.json
 ```
@@ -47,28 +88,18 @@ This keeps the data sink unambiguous: **one or the other**.
 
 ## Build
 
-### Prereqs (Ubuntu/Debian)
-```bash
-sudo apt-get update
-sudo apt-get install -y       build-essential cmake ninja-build pkg-config       libboost-system-dev
-```
+### Binaries produced
 
-### Compile
-```bash
-mkdir -p build
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF
-cmake --build build -j"$(nproc)"
-```
-
-**Binaries**
-- `build/marshal` — server (HTTP/WS)
-- `build/playback` — **HTTP-only** playback (replays dumpbox sessions)
+- `build/marshal` — HTTP/WebSocket server.
+- `build/playback` — HTTP-only session replayer (feeds dumpbox sessions back to the marshal).
+- `build/viz_client` — simple HDF5 SWMR-aware visualization client.
+- `build/mk_mrd` — utility that creates valid placeholder MRD files for smoke tests.
 
 ---
 
 ## Quick start
 
-> Full, copy-pasteable runbooks are in `README_MODE_A.md` (Live) and `README_MODE_B.md` (Record→Replay).  
+> Full, copy-pasteable runbooks are in `README_MODE_A.md` (Live) and `README_MODE_B.md` (Record→Replay).
 > Below are minimal one-liners.
 
 ### Live (Mode A) — scanner → MRD → clients
@@ -91,17 +122,23 @@ tail -n 5 ./data/mrd/index.jsonl || true
 cat ./data/mrd/latest.json
 ```
 
----
+#### Stream frames with SWMR
 
-## Developer note: MRD ingestion helper
+The marshal accepts ISMRMRD Image messages. Each POST body is an
+`ISMRMRD::ImageHeader` immediately followed by the raw voxel payload. See
+[`docs/API_REFERENCE.md`](docs/API_REFERENCE.md#post-v1ismrmrdframe) for the
+exact layout and a Python packing snippet. Once you have a binary message:
 
-Both the HTTP (`POST /v1/mrd/ingest`) and WebSocket binary ingest paths share
-`include/mrd_io.hpp`.  The helper writes the payload to a temporary file,
-`fsync`s it, and atomically renames it into place before appending to
-`index.jsonl` and rewriting `latest.json`.  It then emits the corresponding
-metadata JSON over the WebSocket fan-out.  Reusing this helper keeps the HTTP
-and WebSocket behaviours identical and guarantees clients only ever see fully
-flushed MRD artifacts.
+```bash
+curl -fsS \
+  -H 'Content-Type: application/octet-stream' \
+  -H 'X-MRD-Stream: demo_stream' \
+  --data-binary @image_message.bin \
+  http://localhost:8080/v1/ismrmrd/frame | jq
+
+# Follow the growing dataset (requires HDF5 runtime on the system)
+./build/viz_client --ws ws://localhost:8090/ws --data ./data/mrd
+```
 
 ### Record→Replay (Mode B)
 ```bash
@@ -135,13 +172,29 @@ cat ./data/mrd/latest.json
 
 ---
 
+## Developer note: MRD ingestion helper
+
+Both the HTTP (`POST /v1/mrd/ingest`) and WebSocket binary ingest paths share
+`include/mrd_io.hpp`.  The helper writes the payload to a temporary file,
+`fsync`s it, and atomically renames it into place before appending to
+`index.jsonl` and rewriting `latest.json`.  It then emits the corresponding
+metadata JSON over the WebSocket fan-out.  Reusing this helper keeps the HTTP
+and WebSocket behaviours identical and guarantees clients only ever see fully
+flushed MRD artifacts.
+
 ## HTTP API
 
-- **`POST /v1/mrd/ingest`** — Body: MRD bytes (`application/octet-stream`)  
-  - **MRD mode:** writes to `/data/mrd`, updates global `index.jsonl`/`latest.json`.  
+- **`POST /v1/mrd/ingest`** — Body: MRD bytes (`application/octet-stream`)
+  - **MRD mode:** writes to `/data/mrd`, updates global `index.jsonl`/`latest.json`.
   - **Dumpbox mode:** writes to session under `/data/dumpbox/<SESSION>`, updates session `index.jsonl`/`latest.json`.
+- **`POST /v1/ismrmrd/frame`** — Body: ISMRMRD Image header + voxels
+  - `X-MRD-Stream`: logical identifier; the marshal will keep a matching `.mrd` file open
+  - Appends into `/images/data` using HDF5 SWMR so readers can open the file while it grows
 - **`GET /health`** — returns `ok`.
 - **(If present) `GET /v1/mrd/since?ts=...&limit=...`** — convenience reader over `index.jsonl`.
+
+See [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) for details, payload examples,
+and error semantics aimed at new integrators.
 
 ---
 
