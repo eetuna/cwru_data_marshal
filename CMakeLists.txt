@@ -42,7 +42,7 @@ if(DEFINED CACHE{ENABLE_VIZ_CLIENT})
 endif()
 option(ENABLE_VIZ_CLIENT "Build viz_client (requires OpenCV)" ON)
 if(ENABLE_VIZ_CLIENT)
-  find_package(OpenCV QUIET COMPONENTS core imgproc highgui)
+  find_package(OpenCV 4 QUIET COMPONENTS core imgproc highgui)
   if(NOT OpenCV_FOUND)
     if(_viz_client_option_was_cached)
       message(FATAL_ERROR "ENABLE_VIZ_CLIENT is ON but OpenCV was not found. Provide OpenCV or disable the viz client.")
@@ -51,6 +51,8 @@ if(ENABLE_VIZ_CLIENT)
       set(ENABLE_VIZ_CLIENT OFF CACHE BOOL "Build viz_client (requires OpenCV)" FORCE)
       set(ENABLE_VIZ_CLIENT OFF)
     endif()
+  else()
+    message(STATUS "Found OpenCV: ${OpenCV_VERSION} (components: ${OpenCV_LIBS})")
   endif()
 endif()
 
@@ -92,8 +94,19 @@ target_link_libraries(fk_client PRIVATE Boost::system Threads::Threads nlohmann_
 
 if(ENABLE_VIZ_CLIENT)
   add_executable(viz_client clients/viz_client/viz_client_main.cpp)
-  target_include_directories(viz_client PRIVATE ${OpenCV_INCLUDE_DIRS})
-  target_link_libraries(viz_client PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json ${hdf5_target} ${OpenCV_LIBS})
+  if(TARGET OpenCV::opencv_core)
+    target_link_libraries(viz_client PRIVATE
+      Boost::system
+      Threads::Threads
+      nlohmann_json::nlohmann_json
+      ${hdf5_target}
+      OpenCV::opencv_core
+      OpenCV::opencv_imgproc
+      OpenCV::opencv_highgui)
+  else()
+    target_include_directories(viz_client PRIVATE ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(viz_client PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json ${hdf5_target} ${OpenCV_LIBS})
+  endif()
 else()
   message(STATUS "viz_client disabled (ENABLE_VIZ_CLIENT=OFF)")
 endif()
