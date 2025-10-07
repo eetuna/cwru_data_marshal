@@ -15,14 +15,18 @@ if out_path.parent != Path(""):
 
 # Tiny 4x4 float32 image with ramp data
 data = np.arange(16, dtype=np.float32).reshape(4, 4)
-img = ismrmrd.Image.from_array(data)
+img = ismrmrd.Image.from_array(data, transpose=False)
 
-# Minimal header fields
-img.head.channels  = 1
-img.head.data_type = ismrmrd.DATATYPE_FLOAT  # float32
+# Minimal header fields (Image.head was removed in ismrmrd>=1.14)
+head = img.getHead()
+head.channels = 1
+head.data_type = ismrmrd.DATATYPE_FLOAT  # float32
+img.setHead(head)
 
+
+header_bytes = bytes(head)
 with open(out, "wb") as f:
-    f.write(img.getHead().tobytes())
+    f.write(header_bytes)
     f.write(img.data.tobytes())
 
-print(f"Wrote {out} ({len(img.getHead().tobytes()) + len(img.data.tobytes())} bytes)")
+print(f"Wrote {out} ({len(header_bytes) + len(img.data.tobytes())} bytes)")
