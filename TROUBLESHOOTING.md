@@ -8,4 +8,7 @@
 - viz_client disabled because OpenCV is missing: install `libopencv-dev libopencv-viz-dev`
   in addition to the core dependencies above, then rerun `cmake -S . -B build` (and rebuild with
   `cmake --build build --target viz_client`). If OpenCV is installed in a non-standard
-  prefix, set `OpenCV_DIR` to the folder containing `OpenCVConfig.cmake`.
+  prefix, set `OpenCV_DIR` to the folder containing `OpenCVConfig.cmake`. The `libopencv-dev`
+  meta package is what provides `OpenCVConfig.cmake`; the devcontainer/Docker images still add the
+  split `libopencv-*-dev` packages so we get the viz GUI bits without pulling in every optional
+  OpenCV module via `Recommends`.

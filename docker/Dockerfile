@@ -26,6 +26,9 @@ RUN apt-get update && \
   libboost-program-options-dev \
   libboost-system-dev \
   libboost-thread-dev \
+  # libopencv-dev ships OpenCVConfig.cmake, the split packages pull in viz + GUI bits without
+  # dragging every optional OpenCV module via Recommends.
+  libopencv-dev \
   libopencv-core-dev \
   libopencv-highgui-dev \
   libopencv-imgcodecs-dev \
