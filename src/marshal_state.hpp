@@ -20,6 +20,11 @@
 #include <boost/asio.hpp>
 #include <nlohmann/json.hpp>
 #include "common/pose.hpp"
+
+namespace mrd
+{
+class MrdSink;
+}
 enum class SinkMode
 {
     MRD,
@@ -59,4 +64,6 @@ struct MarshalState
     // Optional topic-based emit hook (set by WsServer on init).
     std::function<void(const std::string &, const std::string &topic)> ws_emit_topic =
         [](const std::string &, const std::string &) {};
+
+    std::shared_ptr<mrd::MrdSink> mrd_sink;
 };
