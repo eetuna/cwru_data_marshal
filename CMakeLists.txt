@@ -35,6 +35,9 @@ endif()
 #message(STATUS "HDF5 library dirs: ${HDF5_LIBRARY_DIRS}")
 message(STATUS "HDF5 libraries: ${HDF5_LIBRARIES}")
 
+# OpenCV (for viz_client image display)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui)
+
 # JSON
 include(FetchContent)
 FetchContent_Declare(nlohmann_json GIT_REPOSITORY https://github.com/nlohmann/json.git GIT_TAG v3.11.3)
@@ -72,7 +75,8 @@ add_executable(fk_client clients/fk_client/fk_client_main.cpp)
 target_link_libraries(fk_client PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json)
 
 add_executable(viz_client clients/viz_client/viz_client_main.cpp)
-target_link_libraries(viz_client PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json ${hdf5_target})
+target_include_directories(viz_client PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(viz_client PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json ${hdf5_target} ${OpenCV_LIBS})
 
 add_executable(image_streamer clients/image_streamer/image_streamer_main.cpp)
 target_link_libraries(image_streamer PRIVATE Boost::system Threads::Threads ${ismrmrd_target})
