@@ -119,23 +119,27 @@ stream.
 
 ### 5b. Stream reconstructed frames via SWMR
 The marshal can now append ISMRMRD Image messages into a live MRD file while
-`viz_client` observes the growth. Once you have a packed message saved as
-`viz_image_message.bin` (see
-[`docs/API_REFERENCE.md`](API_REFERENCE.md#post-v1ismrmrdframe) for a helper):
-
-# Creates ./viz_image_message.bin in CWD
-./build/make_image_message --out viz_image_message.bin
-ls -l viz_image_message.bin
+`viz_client` observes the growth. Use any of the helpers to create and stream
+frames (all write to `./data` by default):
 
 ```bash
+# Single frame
+./build/make_image_message --out ./data/viz_image_message.bin
+python3 tools/make_image_message.py ./data/viz_image_message.bin
+
 curl -fsS \
   -H 'Content-Type: application/octet-stream' \
   -H 'X-MRD-Stream: viz_demo' \
-  --data-binary @viz_image_message.bin \
+  --data-binary @./data/viz_image_message.bin \
   http://localhost:8080/v1/ismrmrd/frame | tee /dev/stderr
+
+# Continuous wobble (C++ or Python)
+./build/image_streamer --http http://localhost:8080 --stream viz_demo --nx 128 --ny 128 --nslices 8 --dt-ms 200
+python3 tools/stream_image_series.py --http http://localhost:8080 --stream viz_demo --nx 128 --ny 128 --nslices 8 --dt-ms 200
 ```
 
-`viz_client` will print the new frame count immediately thanks to HDF5 SWMR.
+`viz_client` now renders a lightweight ASCII view of every slice so changes in
+the incoming volume are obvious.
 
 ### 6. Inspect live-mode outputs
 

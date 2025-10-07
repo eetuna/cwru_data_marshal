@@ -74,6 +74,9 @@ target_link_libraries(fk_client PRIVATE Boost::system Threads::Threads nlohmann_
 add_executable(viz_client clients/viz_client/viz_client_main.cpp)
 target_link_libraries(viz_client PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json ${hdf5_target})
 
+add_executable(image_streamer clients/image_streamer/image_streamer_main.cpp)
+target_link_libraries(image_streamer PRIVATE Boost::system Threads::Threads ${ismrmrd_target})
+
 add_executable(mk_mrd src/mk_mrd.cpp)
 target_link_libraries(mk_mrd PRIVATE ${ismrmrd_target} hdf5_serial)
 target_compile_features(mk_mrd PRIVATE cxx_std_17)
@@ -86,7 +89,7 @@ target_link_libraries(ws_producer PRIVATE Boost::system Threads::Threads)
 
 # tools/make_image_message
 add_executable(make_image_message tools/make_image_message.cpp)
-target_link_libraries(make_image_message PRIVATE ismrmrd)
+target_link_libraries(make_image_message PRIVATE ${ismrmrd_target})
 
 if(BUILD_TESTING)
   find_package(Catch2 3 REQUIRED)

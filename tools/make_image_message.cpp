@@ -7,9 +7,11 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
+#include <filesystem>
+#include <system_error>
 
 int main(int argc, char** argv) {
-    const char* out = "image_message.bin";
+    const char* out = "data/image_message.bin";
     // Hardcode a tiny example: 4x4, 1 channel, float32
     uint16_t nx = 4, ny = 4, nz = 1, channels = 1;
 
@@ -17,6 +19,17 @@ int main(int argc, char** argv) {
     for (int i = 1; i + 1 < argc; ++i) {
         if (std::strcmp(argv[i], "--out") == 0) {
             out = argv[i + 1];
+        }
+    }
+
+    // Ensure parent directory exists if caller kept default path
+    std::filesystem::path out_path{out};
+    if (out_path.has_parent_path()) {
+        std::error_code ec;
+        std::filesystem::create_directories(out_path.parent_path(), ec);
+        if (ec) {
+            std::cerr << "Failed to create directory for " << out_path << ": " << ec.message() << "\n";
+            return 1;
         }
     }
 

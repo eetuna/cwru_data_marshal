@@ -68,20 +68,33 @@ curl -fsS -H "Content-Type: application/octet-stream" \
 
 ## 6. (Optional) Append streaming frames via SWMR
 Capture or synthesize an ISMRMRD Image message (header + voxels) and save it as
-`image_message.bin`, then stream it into a live MRD file identified by
-`live_demo`. See [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md#post-v1ismrmrdframe)
-for a Python helper snippet:
-
-# Creates ./image_message.bin in CWD
-./build/make_image_message --out image_message.bin
-ls -l image_message.bin
+`./data/image_message.bin`, then stream it into a live MRD file identified by
+`live_demo`. Two helper utilities are available:
 
 ```bash
+# Single frame (C++)
+./build/make_image_message --out ./data/image_message.bin
+
+# Single frame (Python)
+python3 tools/make_image_message.py
+
 curl -fsS \
   -H 'Content-Type: application/octet-stream' \
   -H 'X-MRD-Stream: live_demo' \
-  --data-binary @image_message.bin \
+  --data-binary @./data/image_message.bin \
   http://localhost:8080/v1/ismrmrd/frame | tee /dev/stderr
+```
+
+To continuously stream multi-slice frames (showing slight motion between time
+steps), use either generator. Override geometry or cadence with flags such as
+`--nx 128 --ny 128 --nslices 8 --dt-ms 200`:
+
+```bash
+# C++ streamer (Ctrl+C to stop)
+./build/image_streamer --http http://localhost:8080 --stream live_demo --nx 128 --ny 128 --nslices 8 --dt-ms 200
+
+# Python streamer
+python3 tools/stream_image_series.py --http http://localhost:8080 --stream live_demo --nx 128 --ny 128 --nslices 8 --dt-ms 200
 ```
 
 ## 7. (Optional) Smoke-test WebSocket ingestion

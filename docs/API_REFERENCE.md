@@ -88,6 +88,11 @@ Supported datatypes are:
 
 #### Packing example (Python)
 
+Repository helpers: `tools/make_image_message.py` (single frame) and
+`tools/stream_image_series.py` (continuous wobble) wrap the same logic. The C++
+counterparts live in `tools/make_image_message.cpp` and
+`clients/image_streamer/image_streamer_main.cpp` respectively.
+
 ```bash
 pip install ismrmrd numpy  # once per environment
 python - <<'PY'
