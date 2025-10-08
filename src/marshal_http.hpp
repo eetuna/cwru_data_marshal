@@ -40,6 +40,8 @@
 namespace http = boost::beast::http;
 namespace fs = std::filesystem;
 
+inline constexpr std::size_t kMaxHttpBodyBytes = 128ULL * 1024ULL * 1024ULL; // 128 MiB ceiling for inbound payloads
+
 // Seconds-precision ISO8601 for pose endpoint (keeps your original behavior)
 inline std::string iso8601_now()
 {
@@ -106,9 +108,28 @@ private:
         void do_read()
         {
             auto self = shared_from_this();
-            http::async_read(socket, buffer, req, [self](auto ec, auto)
+            self->req = {};
+            auto parser = std::make_shared<http::request_parser<http::string_body>>();
+            parser->body_limit(kMaxHttpBodyBytes);
+
+            http::async_read(socket, buffer, *parser, [self, parser](auto ec, auto)
                              {
-                if (!ec) self->handle(); });
+                if (ec)
+                {
+                    if (ec == http::error::body_limit)
+                    {
+                        using nlohmann::json;
+                        http::response<http::string_body> res{http::status::payload_too_large, 11};
+                        res.set(http::field::content_type, "application/json");
+                        res.body() = json{{"error", "request body exceeds limit"}, {"limit_bytes", kMaxHttpBodyBytes}}.dump();
+                        res.prepare_payload();
+                        self->respond(std::move(res));
+                    }
+                    return;
+                }
+
+                self->req = parser->release();
+                self->handle(); });
         }
 
         // FIX: keep response alive through async_write

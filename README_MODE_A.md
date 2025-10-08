@@ -48,6 +48,7 @@ sleep 1
 ## 4. Verify the service is healthy
 
 ```bash
+# Prints JSON {"status":"ok","uptime_s":...}
 curl -fsS http://localhost:8080/health | tee /dev/stderr
 ```
 
@@ -97,6 +98,10 @@ steps), use either generator. Override geometry or cadence with flags such as
 python3 tools/stream_image_series.py --http http://localhost:8080 --stream live_demo --nx 128 --ny 128 --nslices 8 --dt-ms 200
 ```
 
+If the geometry changes during a run the marshal automatically flushes the
+current MRD and starts a new, geometry-stamped file so clients can tell volumes
+apart.
+
 ## 7. (Optional) Smoke-test WebSocket ingestion
 
 If you have [`websocat`](https://github.com/vi/websocat) installed, you can send
@@ -122,5 +127,7 @@ echo "== index.jsonl (MRD) tail =="; [ -f ./data/mrd/index.jsonl ] && tail -n 5 
 ```bash
 kill "$MARSHAL_PID"
 wait "$MARSHAL_PID" 2>/dev/null || true
+# Fallback if MARSHAL_PID is unavailable
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
 echo "Live mode done."
 ```

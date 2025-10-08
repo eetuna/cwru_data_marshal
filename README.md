@@ -102,6 +102,12 @@ a deep dive into the devcontainer image, the multi-stage Dockerfile, and the
 - `build/image_streamer` — synthetic multi-slice generator that posts frames to the marshal.
 - `build/mk_mrd` — utility that creates valid placeholder MRD files for smoke tests.
 
+### Tests
+
+Enable `BUILD_TESTING` during configuration and run `ctest` to exercise the Catch2
+suite. [`docs/TESTS_OVERVIEW.md`](docs/TESTS_OVERVIEW.md) lists each test module
+and the focused commands needed to run them individually.
+
 ---
 
 ## Quick start
@@ -111,10 +117,13 @@ a deep dive into the devcontainer image, the multi-stage Dockerfile, and the
 
 ### Live (Mode A) — scanner → MRD → clients
 ```bash
+# Ensure no previous marshal instance is running
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
+
 # Start server in MRD sink
 ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink mrd &
 sleep 1
-curl -s http://localhost:8080/health    # expect: ok
+curl -s http://localhost:8080/health    # expect JSON {"status":"ok","uptime_s":...}
 
 # Ingest two files (dummy fallback shown)
 mkdir -p ./data/mrd
@@ -127,6 +136,9 @@ curl -s -H "Content-Type: application/octet-stream" --data-binary @./data/mrd/b.
 ls -l ./data/mrd
 tail -n 5 ./data/mrd/index.jsonl || true
 cat ./data/mrd/latest.json
+
+# Stop the marshal when finished (fallback if background PID was lost)
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
 ```
 
 #### Stream frames with SWMR
@@ -137,7 +149,9 @@ The marshal accepts ISMRMRD Image messages. Each POST body is an
 exact layout. Two helper utilities now live in-tree:
 
 - **C++ (`image_streamer`)** — builds with the rest of the project. Generates a
-  multi-slice, single-channel float32 series with subtle temporal wobble.
+  multi-slice, single-channel float32 series with subtle temporal wobble. The
+  MRD sink automatically rolls to a new file if `nx`, `ny`, or slice counts
+  change mid-stream, stamping the geometry into the filename.
 - **Python (`tools/stream_image_series.py`)** — mirrors the C++ generator using
   `numpy`/`ismrmrd`. Both land their temporary `.bin` artifacts under `./data`.
   Width/height, slice count, and cadence can be overridden with flags such as
@@ -177,7 +191,7 @@ python3 tools/stream_image_series.py --http http://localhost:8080 --stream demo_
 # RECORD: start server in dumpbox sink; session auto-named
 ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink dumpbox --dumpbox-root ./data/dumpbox &
 sleep 1
-curl -s http://localhost:8080/health
+curl -s http://localhost:8080/health    # -> {"status":"ok","uptime_s":...}
 
 # Post two files (dummy shown)
 head -c 16384 </dev/urandom > ./data/tmp1.mrd
@@ -191,7 +205,7 @@ echo "$SESSION_DIR"
 find "$SESSION_DIR" -maxdepth 2 -type f -print
 
 # REPLAY: restart server in MRD sink and play back the session
-pkill -f "/build/marshal" || true
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
 ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink mrd &
 sleep 1
 ./build/playback --http http://localhost:8080 --data "$SESSION_DIR" --speed 1.0
@@ -222,11 +236,14 @@ flushed MRD artifacts.
 - **`POST /v1/ismrmrd/frame`** — Body: ISMRMRD Image header + voxels
   - `X-MRD-Stream`: logical identifier; the marshal will keep a matching `.mrd` file open
   - Appends into `/images/data` using HDF5 SWMR so readers can open the file while it grows
-- **`GET /health`** — returns `ok`.
+- **`POST /v1/pose/update`** — JSON body `{ "p": [x,y,z], "R": [9] }`; records pose and broadcasts it.
+- **`GET /v1/pose/current`** — Latest pose (if any) in JSON.
+- **`GET /health`** — returns JSON `{ "status": "ok", "uptime_s": <seconds> }`.
 - **(If present) `GET /v1/mrd/since?ts=...&limit=...`** — convenience reader over `index.jsonl`.
 
 See [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) for details, payload examples,
-and error semantics aimed at new integrators.
+and error semantics aimed at new integrators. Pose handling and WebSocket
+broadcast topics are covered there as well.
 
 ---
 
@@ -261,7 +278,7 @@ services/
 include/
   atomic_write.hpp       # safe file writes (tmp + rename)
 docs/
-  overview.md            # Doxygen main page
+  ARCHITECTURE.md        # Internal components and data flow
 ```
 
 ---

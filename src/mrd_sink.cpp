@@ -1,9 +1,12 @@
 #include "mrd_sink.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <iomanip>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -15,6 +18,8 @@ namespace mrd
 {
 namespace
 {
+constexpr unsigned long long kTargetChunkBytes = 8ULL * 1024ULL * 1024ULL; // 8 MiB target chunk size
+
 hid_t element_hdf_type(ElementType type)
 {
     switch (type)
@@ -47,6 +52,67 @@ hid_t element_hdf_type(ElementType type)
     }
     }
     throw std::runtime_error("unsupported element type");
+}
+
+ImageDimensions normalize_dims(ImageDimensions dims)
+{
+    if (dims.spatial[2] == 0)
+        dims.spatial[2] = 1;
+    if (dims.channels == 0)
+        dims.channels = 1;
+    return dims;
+}
+
+std::array<hsize_t, 5> compute_chunk_shape(const ImageDimensions &dims, ElementType type)
+{
+    std::array<hsize_t, 5> chunk = {1,
+                                    dims.channels ? dims.channels : static_cast<hsize_t>(1),
+                                    dims.spatial[2] ? dims.spatial[2] : static_cast<hsize_t>(1),
+                                    dims.spatial[1] ? dims.spatial[1] : static_cast<hsize_t>(1),
+                                    dims.spatial[0] ? dims.spatial[0] : static_cast<hsize_t>(1)};
+
+    const unsigned long long element_bytes = static_cast<unsigned long long>(element_type_bytes(type));
+    auto chunk_bytes = [&]() -> unsigned long long
+    {
+        return static_cast<unsigned long long>(chunk[0]) * static_cast<unsigned long long>(chunk[1]) *
+               static_cast<unsigned long long>(chunk[2]) * static_cast<unsigned long long>(chunk[3]) *
+               static_cast<unsigned long long>(chunk[4]) * element_bytes;
+    };
+
+    auto try_reduce = [&](size_t idx) -> bool
+    {
+        if (chunk[idx] > 1)
+        {
+            chunk[idx] = (chunk[idx] + 1) / 2;
+            return true;
+        }
+        return false;
+    };
+
+    while (chunk_bytes() > kTargetChunkBytes)
+    {
+        bool reduced = try_reduce(4) || try_reduce(3) || try_reduce(2) || try_reduce(1);
+        if (!reduced)
+            break;
+    }
+
+    return chunk;
+}
+
+std::filesystem::path make_stream_file_path(const std::filesystem::path &root,
+                                            const std::string &canonical,
+                                            const ImageDimensions &dims,
+                                            size_t generation)
+{
+    std::ostringstream oss;
+    oss << canonical;
+    const auto z = dims.spatial[2] ? dims.spatial[2] : static_cast<hsize_t>(1);
+    oss << '-' << static_cast<unsigned long long>(dims.spatial[0]) << 'x'
+        << static_cast<unsigned long long>(dims.spatial[1]) << 'x'
+        << static_cast<unsigned long long>(z);
+    oss << "-g" << std::setw(4) << std::setfill('0') << generation;
+    oss << ".mrd";
+    return root / oss.str();
 }
 
 } // namespace
@@ -145,7 +211,7 @@ void MrdFile::open()
     const hsize_t z = dims_.spatial[2];
     hsize_t initial_dims[5] = {0, dims_.channels, z, dims_.spatial[1], dims_.spatial[0]};
     hsize_t max_dims[5] = {H5S_UNLIMITED, dims_.channels, z, dims_.spatial[1], dims_.spatial[0]};
-    hsize_t chunk[5] = {1, dims_.channels, z, dims_.spatial[1], dims_.spatial[0]};
+    auto chunk = compute_chunk_shape(dims_, type_);
 
     hid_t space = H5Screate_simple(5, initial_dims, max_dims);
     if (space < 0)
@@ -162,7 +228,7 @@ void MrdFile::open()
         throw std::runtime_error("H5Pcreate (dcpl) failed");
     }
 
-    if (H5Pset_chunk(dcpl, 5, chunk) < 0 ||
+    if (H5Pset_chunk(dcpl, 5, chunk.data()) < 0 ||
         H5Pset_fill_time(dcpl, H5D_FILL_TIME_NEVER) < 0 ||
         H5Pset_alloc_time(dcpl, H5D_ALLOC_TIME_EARLY) < 0)
     {
@@ -282,23 +348,57 @@ std::shared_ptr<MrdSink::StreamState> MrdSink::ensure_stream(const std::string &
                                                              std::string_view header_xml)
 {
     std::lock_guard<std::mutex> guard(map_mutex_);
+    ImageDimensions normalized = normalize_dims(dims);
+
     auto it = streams_.find(stream_id);
     if (it != streams_.end())
     {
         auto state = it->second;
-        if (state->dims.spatial != dims.spatial || state->dims.channels != dims.channels || state->type != type)
-            throw std::runtime_error("stream dimensions/type mismatch");
+        if (state->type != type)
+            throw std::runtime_error("stream element type mismatch");
+
+        bool root_changed = state->sink_root != sink_root;
+        bool dims_changed = state->dims.spatial != normalized.spatial || state->dims.channels != normalized.channels;
+
+        if (dims_changed || root_changed)
+        {
+            std::lock_guard<std::mutex> state_guard(state->mutex);
+            state->file.reset();
+            state->dims = normalized;
+            state->sink_root = sink_root;
+            if (root_changed)
+                state->generation = 0;
+            else
+                state->generation += 1;
+
+            std::string next_header = header_xml.empty()
+                                          ? default_ismrmrd_header(state->dims, state->type, stream_id)
+                                          : std::string(header_xml);
+            state->header_xml = std::move(next_header);
+
+            auto file_path = make_stream_file_path(state->sink_root, state->canonical_name, state->dims, state->generation);
+            state->file = std::make_unique<MrdFile>(file_path, stream_id, state->type, state->dims, state->header_xml);
+        }
+        else if (!header_xml.empty() && state->header_xml.empty())
+        {
+            state->header_xml = std::string(header_xml);
+        }
+
         return state;
     }
 
     const std::string canonical = canonical_scan_name(stream_id);
-    std::filesystem::path file_path = sink_root / (canonical + ".mrd");
-
     auto state = std::make_shared<StreamState>();
-    state->dims = dims;
+    state->dims = normalized;
     state->type = type;
-    state->header_xml = std::string(header_xml);
-    state->file = std::make_unique<MrdFile>(file_path, stream_id, type, dims, state->header_xml);
+    state->header_xml = header_xml.empty() ? default_ismrmrd_header(state->dims, state->type, stream_id)
+                                           : std::string(header_xml);
+    state->canonical_name = canonical;
+    state->sink_root = sink_root;
+    state->generation = 0;
+
+    auto file_path = make_stream_file_path(state->sink_root, state->canonical_name, state->dims, state->generation);
+    state->file = std::make_unique<MrdFile>(file_path, stream_id, state->type, state->dims, state->header_xml);
 
     streams_.emplace(stream_id, state);
     return state;

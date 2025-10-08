@@ -51,6 +51,7 @@ sleep 1
 ### 4. Health check
 
 ```bash
+# Prints JSON {"status":"ok","uptime_s":...}
 curl -fsS http://localhost:8080/health | tee /dev/stderr
 ```
 
@@ -96,6 +97,9 @@ the generated geometry or cadence (for example `--nx 128 --ny 128 --nslices 8 --
 python3 tools/stream_image_series.py --http http://localhost:8080 --stream dumpbox_demo --nx 128 --ny 128 --nslices 8 --dt-ms 200
 ```
 
+The marshal will automatically roll to a new geometry-stamped MRD if the stream
+dimensions change while recording.
+
 ### 6. Locate the newest session
 
 The loop waits for MRD files to arrive before proceeding.
@@ -124,6 +128,8 @@ echo "== index.jsonl tail =="; tail -n 5 "$SESSION_DIR/index.jsonl" || true
 ```bash
 kill "$MARSHAL_REC_PID"
 wait "$MARSHAL_REC_PID" 2>/dev/null || true
+# Fallback if MARSHAL_REC_PID is unavailable
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
 ```
 
 ## Phase 2 — Replay the session as live MRDs
@@ -145,6 +151,7 @@ sleep 1
 ### 9. Confirm the service is ready
 
 ```bash
+# Prints JSON {"status":"ok","uptime_s":...}
 curl -fsS http://localhost:8080/health | tee /dev/stderr
 ```
 
@@ -167,5 +174,7 @@ echo "== index.jsonl tail (MRD) =="; [ -f ./data/mrd/index.jsonl ] && tail -n 5 
 ```bash
 kill "$MARSHAL_REP_PID"
 wait "$MARSHAL_REP_PID" 2>/dev/null || true
+# Fallback if MARSHAL_REP_PID is unavailable
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
 echo "Record→Replay mode done."
 ```
