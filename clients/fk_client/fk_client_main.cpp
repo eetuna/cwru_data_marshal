@@ -14,6 +14,7 @@
 #include <boost/beast/core/buffers_to_string.hpp>
 #include <nlohmann/json.hpp>
 #include <chrono>
+#include <cmath>
 #include <thread> // << added
 
 namespace http = boost::beast::http;
@@ -53,11 +54,20 @@ int main(int argc, char **argv)
         req.set(http::field::content_type, "application/json");
 
         // Minimal valid payload the server wants: p (vec3), R (3x3 matrix)
-        // Keep it dead simple; identity rotation is fine.
+        // Drive both translation and yaw with smooth sinusoids.
+        const double t = 0.1 * static_cast<double>(k);
+        const double radius = 0.05;
+        const double px = radius * std::sin(t);
+        const double py = radius * std::cos(t);
+        const double pz = 0.02 * std::sin(0.5 * t);
+        const double yaw = 0.25 * std::sin(t);
+        const double cy = std::cos(yaw);
+        const double sy = std::sin(yaw);
+
         json j{
-            {"p", {0.01 * k, 0.0, 0.0}},
-            // Flattened 3x3 identity (row-major):
-            {"R", {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}},
+            {"p", {px, py, pz}},
+            // Rotation about Z with sinusoidal yaw.
+            {"R", {cy, -sy, 0.0, sy, cy, 0.0, 0.0, 0.0, 1.0}},
             {"source", "fk"}};
 
         req.body() = j.dump();

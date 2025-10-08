@@ -51,6 +51,7 @@ sleep 1
 ### 4. Health check
 
 ```bash
+# Prints JSON {"status":"ok","uptime_s":...}
 curl -fsS http://localhost:8080/health | tee /dev/stderr
 ```
 
@@ -95,6 +96,9 @@ the generated geometry or cadence (for example `--nx 128 --ny 128 --nslices 8 --
 # or
 python3 tools/stream_image_series.py --http http://localhost:8080 --stream dumpbox_demo --nx 128 --ny 128 --nslices 8 --dt-ms 200
 ```
+
+The marshal will automatically roll to a new geometry-stamped MRD if the stream
+dimensions change while recording.
 
 ### 6. Locate the newest session
 
@@ -145,6 +149,7 @@ sleep 1
 ### 9. Confirm the service is ready
 
 ```bash
+# Prints JSON {"status":"ok","uptime_s":...}
 curl -fsS http://localhost:8080/health | tee /dev/stderr
 ```
 
