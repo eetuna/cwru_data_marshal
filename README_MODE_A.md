@@ -127,5 +127,7 @@ echo "== index.jsonl (MRD) tail =="; [ -f ./data/mrd/index.jsonl ] && tail -n 5 
 ```bash
 kill "$MARSHAL_PID"
 wait "$MARSHAL_PID" 2>/dev/null || true
+# Fallback if MARSHAL_PID is unavailable
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
 echo "Live mode done."
 ```

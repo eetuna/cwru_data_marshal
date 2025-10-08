@@ -128,6 +128,8 @@ echo "== index.jsonl tail =="; tail -n 5 "$SESSION_DIR/index.jsonl" || true
 ```bash
 kill "$MARSHAL_REC_PID"
 wait "$MARSHAL_REC_PID" 2>/dev/null || true
+# Fallback if MARSHAL_REC_PID is unavailable
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
 ```
 
 ## Phase 2 — Replay the session as live MRDs
@@ -172,5 +174,7 @@ echo "== index.jsonl tail (MRD) =="; [ -f ./data/mrd/index.jsonl ] && tail -n 5 
 ```bash
 kill "$MARSHAL_REP_PID"
 wait "$MARSHAL_REP_PID" 2>/dev/null || true
+# Fallback if MARSHAL_REP_PID is unavailable
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
 echo "Record→Replay mode done."
 ```

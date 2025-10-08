@@ -44,7 +44,13 @@ find ./data -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 mkdir -p ./data/mrd
 ```
 
-### 2. Start the marshal in MRD sink mode
+### 2. Ensure no previous marshal instance is running
+
+```bash
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
+```
+
+### 3. Start the marshal in MRD sink mode
 
 ```bash
 ./build/marshal \
@@ -58,7 +64,7 @@ MARSHAL_PID=$!
 sleep 1
 ```
 
-### 3. Smoke test the HTTP and WebSocket ingress paths
+### 4. Smoke test the HTTP and WebSocket ingress paths
 
 Create two valid MRD payloads with the built-in generator and ingest them via
 HTTP. Then push another payload through the WebSocket producer.
@@ -85,7 +91,7 @@ WS_FILE=./data/mrd/sample_http_1.h5 \
   ./build/ws_producer
 ```
 
-### 4. Run the sample clients
+### 5. Run the sample clients
 
 **Forward kinematics client (`fk_client`)**
 
@@ -108,7 +114,7 @@ can see the exact MRD metadata and pose updates the marshal emits.
 Leave both clients running while MRDs are ingested. `viz_client` prints every
 metadata broadcast coming from `/v1/mrd/ingest` and pose updates (see next step).
 
-### 5. Send pose updates while clients are running
+### 6. Send pose updates while clients are running
 
 ```bash
 ./build/fk_client --http http://localhost:8080 --pretty
@@ -118,7 +124,7 @@ The WebSocket fan-out will emit pose notifications that `viz_client` will show
 immediately. Re-run `fk_client` whenever you want another burst of the
 sinusoidal trajectory.
 
-### 5b. Stream reconstructed frames via SWMR
+### 6b. Stream reconstructed frames via SWMR
 The marshal can now append ISMRMRD Image messages into a live MRD file while
 `viz_client` observes the growth. Use any of the helpers to create and stream
 frames (all write to `./data` by default):
@@ -142,7 +148,7 @@ python3 tools/stream_image_series.py --http http://localhost:8080 --stream viz_d
 `viz_client` now renders a view of every slice so changes in
 the incoming volume are obvious.
 
-### 6. Inspect live-mode outputs
+### 7. Inspect live-mode outputs
 
 ```bash
 echo "== MRD directory =="
@@ -155,11 +161,13 @@ echo "== index.jsonl (tail) =="
 tail -n 5 ./data/mrd/index.jsonl
 ```
 
-### 7. Shut down the marshal
+### 8. Shut down the marshal
 
 ```bash
 kill "$MARSHAL_PID"
 wait "$MARSHAL_PID" 2>/dev/null || true
+# Fallback if MARSHAL_PID is unavailable
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
 ```
 
 At this point the clients can be stopped with `Ctrl+C`.
@@ -182,7 +190,13 @@ find ./data -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 mkdir -p ./data/mrd ./data/dumpbox
 ```
 
-#### 2. Start marshal in dumpbox mode
+#### 2. Ensure no previous marshal instance is running
+
+```bash
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
+```
+
+#### 3. Start marshal in dumpbox mode
 
 ```bash
 ./build/marshal \
@@ -198,7 +212,7 @@ sleep 1
 curl -fsS http://localhost:8080/health | tee /dev/stderr
 ```
 
-#### 3. Ingest MRDs via HTTP and WebSocket
+#### 4. Ingest MRDs via HTTP and WebSocket
 
 ```bash
 ./build/mk_mrd ./data/mrd/tmp_record_http_1.h5
@@ -216,7 +230,7 @@ WS_FILE=./data/mrd/tmp_record_http_1.h5 \
   ./build/ws_producer
 ```
 
-#### 4. Drive pose traffic during the recording window
+#### 5. Drive pose traffic during the recording window
 
 The marshal persists pose updates in memory and rebroadcasts them to any live
 WebSocket subscribers.
@@ -228,7 +242,7 @@ WebSocket subscribers.
 Leave `viz_client` running (if you started it) to observe that even in dumpbox
 mode it still receives the pose and ingest broadcasts.
 
-#### 5. Locate the newest dumpbox session
+#### 6. Locate the newest dumpbox session
 
 ```bash
 SESSION_DIR=""
@@ -246,16 +260,18 @@ find "$SESSION_DIR" -maxdepth 2 -type f -print | sed 's|^|  |'
 `viz_client` can continue running, but the MRD files for clients will not appear
 in `./data/mrd` yet—they remain inside the dumpbox session.
 
-#### 6. Stop the marshal (recording complete)
+#### 7. Stop the marshal (recording complete)
 
 ```bash
 kill "$MARSHAL_REC_PID"
 wait "$MARSHAL_REC_PID" 2>/dev/null || true
+# Fallback if MARSHAL_REC_PID is unavailable
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
 ```
 
 ### Phase 2 — Replay the session as live MRDs
 
-#### 7. Restart the marshal in MRD sink mode
+#### 8. Restart the marshal in MRD sink mode
 
 ```bash
 ./build/marshal \
@@ -273,7 +289,7 @@ curl -fsS http://localhost:8080/health | tee /dev/stderr
 If `viz_client` was still running it will reconnect automatically once the WS
 endpoint is available again.
 
-#### 8. Replay the recorded dumpbox session
+#### 9. Replay the recorded dumpbox session
 
 ```bash
 ./build/playback --http http://localhost:8080 --data "$SESSION_DIR" --speed 1.0
@@ -283,7 +299,7 @@ The playback utility replays the MRD files over HTTP so the marshal (now in MRD
 mode) regenerates client-visible artifacts. The WebSocket fan-out will emit the
 same ingest metadata that `viz_client` saw during the recording phase.
 
-#### 9. Verify MRD outputs and pose continuity
+#### 10. Verify MRD outputs and pose continuity
 
 ```bash
 echo "== MRD directory after replay =="
@@ -299,11 +315,13 @@ tail -n 5 ./data/mrd/index.jsonl
 Re-run `fk_client` if you want to inject fresh pose updates—the clients and
 HTTP interface work exactly the same as in live mode.
 
-#### 10. Stop the marshal
+#### 11. Stop the marshal
 
 ```bash
 kill "$MARSHAL_REP_PID"
 wait "$MARSHAL_REP_PID" 2>/dev/null || true
+# Fallback if MARSHAL_REP_PID is unavailable
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
 ```
 
 Stop any running clients with `Ctrl+C`. You now have a full dumpbox session on

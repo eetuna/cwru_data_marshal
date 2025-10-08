@@ -102,6 +102,12 @@ a deep dive into the devcontainer image, the multi-stage Dockerfile, and the
 - `build/image_streamer` — synthetic multi-slice generator that posts frames to the marshal.
 - `build/mk_mrd` — utility that creates valid placeholder MRD files for smoke tests.
 
+### Tests
+
+Enable `BUILD_TESTING` during configuration and run `ctest` to exercise the Catch2
+suite. [`docs/TESTS_OVERVIEW.md`](docs/TESTS_OVERVIEW.md) lists each test module
+and the focused commands needed to run them individually.
+
 ---
 
 ## Quick start
@@ -111,6 +117,9 @@ a deep dive into the devcontainer image, the multi-stage Dockerfile, and the
 
 ### Live (Mode A) — scanner → MRD → clients
 ```bash
+# Ensure no previous marshal instance is running
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
+
 # Start server in MRD sink
 ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink mrd &
 sleep 1
@@ -127,6 +136,9 @@ curl -s -H "Content-Type: application/octet-stream" --data-binary @./data/mrd/b.
 ls -l ./data/mrd
 tail -n 5 ./data/mrd/index.jsonl || true
 cat ./data/mrd/latest.json
+
+# Stop the marshal when finished (fallback if background PID was lost)
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
 ```
 
 #### Stream frames with SWMR
@@ -193,7 +205,7 @@ echo "$SESSION_DIR"
 find "$SESSION_DIR" -maxdepth 2 -type f -print
 
 # REPLAY: restart server in MRD sink and play back the session
-pkill -f "/build/marshal" || true
+pkill -f "/build/marshal" >/dev/null 2>&1 || true
 ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink mrd &
 sleep 1
 ./build/playback --http http://localhost:8080 --data "$SESSION_DIR" --speed 1.0

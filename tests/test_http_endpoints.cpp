@@ -13,7 +13,7 @@
 #include <catch2/catch_all.hpp>
 #include <boost/asio.hpp>
 #include <boost/beast/http.hpp>
-#include <boost/beast/test/stream.hpp>
+#include <boost/beast/_experimental/test/stream.hpp>
 #include <sstream>
 
 #include "marshal_http.hpp"
@@ -43,14 +43,14 @@ TEST_CASE("HTTP parser limit is raised for large payloads")
     SECTION("default limit rejects the payload")
     {
         boost::asio::io_context ioc;
-        boost::beast::test::stream<> stream{ioc};
+        boost::beast::test::stream stream{ioc};
         stream.append(raw);
 
         boost::beast::flat_buffer buffer;
-        boost::beast::http::request<boost::beast::http::string_body> req;
+        boost::beast::http::request_parser<boost::beast::http::string_body> parser;
 
         boost::system::error_code ec;
-        boost::beast::http::read(stream, buffer, req, ec);
+        boost::beast::http::read(stream, buffer, parser, ec);
 
         REQUIRE(ec == body_limit);
     }
@@ -58,18 +58,18 @@ TEST_CASE("HTTP parser limit is raised for large payloads")
     SECTION("raised limit accepts the payload")
     {
         boost::asio::io_context ioc;
-        boost::beast::test::stream<> stream{ioc};
+        boost::beast::test::stream stream{ioc};
         stream.append(raw);
 
         boost::beast::flat_buffer buffer;
-        boost::beast::http::request<boost::beast::http::string_body> req;
-        req.version(11);
-        req.body_limit(kMaxHttpBodyBytes);
+        boost::beast::http::request_parser<boost::beast::http::string_body> parser;
+        parser.body_limit(kMaxHttpBodyBytes);
 
         boost::system::error_code ec;
-        boost::beast::http::read(stream, buffer, req, ec);
+        boost::beast::http::read(stream, buffer, parser, ec);
 
         REQUIRE_FALSE(ec);
-        REQUIRE(req.body().size() == payload_bytes);
+        const auto released = parser.release();
+        REQUIRE(released.body().size() == payload_bytes);
     }
 }

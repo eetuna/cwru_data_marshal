@@ -109,16 +109,17 @@ private:
         {
             auto self = shared_from_this();
             self->req = {};
-            self->req.version(11);
-            self->req.body_limit(kMaxHttpBodyBytes);
-            http::async_read(socket, buffer, req, [self](auto ec, auto)
+            auto parser = std::make_shared<http::request_parser<http::string_body>>();
+            parser->body_limit(kMaxHttpBodyBytes);
+
+            http::async_read(socket, buffer, *parser, [self, parser](auto ec, auto)
                              {
                 if (ec)
                 {
                     if (ec == http::error::body_limit)
                     {
                         using nlohmann::json;
-                        http::response<http::string_body> res{http::status::payload_too_large, self->req.version()};
+                        http::response<http::string_body> res{http::status::payload_too_large, 11};
                         res.set(http::field::content_type, "application/json");
                         res.body() = json{{"error", "request body exceeds limit"}, {"limit_bytes", kMaxHttpBodyBytes}}.dump();
                         res.prepare_payload();
@@ -126,6 +127,8 @@ private:
                     }
                     return;
                 }
+
+                self->req = parser->release();
                 self->handle(); });
         }
 
