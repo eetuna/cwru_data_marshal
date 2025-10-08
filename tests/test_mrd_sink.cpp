@@ -238,3 +238,145 @@ TEST_CASE("MRD sink handles int16 payloads", "[mrd][int16]")
     for (size_t i = 0; i < elements; ++i)
         CHECK(readback[i] == frame[i]);
 }
+
+TEST_CASE("MRD sink rolls files when dimensions change", "[mrd][rollover]")
+{
+    std::string temp = unique_temp_dir();
+    fs::path data_dir = fs::path(temp) / "data";
+    fs::create_directories(data_dir / "mrd");
+
+    MarshalState state;
+    state.data_dir = data_dir.string();
+    state.sink_mode = SinkMode::MRD;
+    state.ws_emit = [](const std::string &) {};
+    state.ws_emit_topic = [](const std::string &, const std::string &) {};
+
+    mrd::MrdSink sink(state);
+
+    mrd::ImageDimensions dims1;
+    dims1.spatial = {4, 4, 2};
+    dims1.channels = 1;
+
+    const size_t vox1 = static_cast<size_t>(dims1.spatial[0]) * dims1.spatial[1] * dims1.spatial[2] * dims1.channels;
+    std::vector<float> frame1(vox1, 1.0f);
+    auto header1 = mrd::default_ismrmrd_header(dims1, mrd::ElementType::Float32, "shapeStream");
+
+    auto result1 = sink.append_frame("shapeStream", dims1, mrd::ElementType::Float32, header1, frame1.data(),
+                                     frame1.size() * sizeof(float));
+
+    mrd::ImageDimensions dims2;
+    dims2.spatial = {8, 8, 3};
+    dims2.channels = 1;
+    const size_t vox2 = static_cast<size_t>(dims2.spatial[0]) * dims2.spatial[1] * dims2.spatial[2] * dims2.channels;
+    std::vector<float> frame2(vox2, 2.0f);
+    auto header2 = mrd::default_ismrmrd_header(dims2, mrd::ElementType::Float32, "shapeStream");
+
+    auto result2 = sink.append_frame("shapeStream", dims2, mrd::ElementType::Float32, header2, frame2.data(),
+                                     frame2.size() * sizeof(float));
+
+    REQUIRE(result1.file_path != result2.file_path);
+    REQUIRE(result1.frame_index == 0);
+    REQUIRE(result2.frame_index == 0);
+
+    auto name1 = result1.file_path.filename().string();
+    auto name2 = result2.file_path.filename().string();
+    CHECK(name1.find("4x4x2") != std::string::npos);
+    CHECK(name2.find("8x8x3") != std::string::npos);
+
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    REQUIRE(fapl >= 0);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
+    H5Pset_fclose_degree(fapl, H5F_CLOSE_SEMI);
+
+    hid_t file1 = H5Fopen(result1.file_path.c_str(), H5F_ACC_RDONLY | H5F_ACC_SWMR_READ, fapl);
+    REQUIRE(file1 >= 0);
+    hid_t dset1 = H5Dopen2(file1, "/images/data", H5P_DEFAULT);
+    REQUIRE(dset1 >= 0);
+    hid_t space1 = H5Dget_space(dset1);
+    REQUIRE(space1 >= 0);
+    hsize_t dims_out1[5] = {0};
+    H5Sget_simple_extent_dims(space1, dims_out1, nullptr);
+    CHECK(dims_out1[0] == 1);
+    CHECK(dims_out1[2] == dims1.spatial[2]);
+    CHECK(dims_out1[3] == dims1.spatial[1]);
+    CHECK(dims_out1[4] == dims1.spatial[0]);
+    H5Sclose(space1);
+    H5Dclose(dset1);
+    H5Fclose(file1);
+
+    hid_t file2 = H5Fopen(result2.file_path.c_str(), H5F_ACC_RDONLY | H5F_ACC_SWMR_READ, fapl);
+    H5Pclose(fapl);
+    REQUIRE(file2 >= 0);
+    hid_t dset2 = H5Dopen2(file2, "/images/data", H5P_DEFAULT);
+    REQUIRE(dset2 >= 0);
+    hid_t space2 = H5Dget_space(dset2);
+    REQUIRE(space2 >= 0);
+    hsize_t dims_out2[5] = {0};
+    H5Sget_simple_extent_dims(space2, dims_out2, nullptr);
+    CHECK(dims_out2[0] == 1);
+    CHECK(dims_out2[2] == dims2.spatial[2]);
+    CHECK(dims_out2[3] == dims2.spatial[1]);
+    CHECK(dims_out2[4] == dims2.spatial[0]);
+    H5Sclose(space2);
+    H5Dclose(dset2);
+    H5Fclose(file2);
+}
+
+TEST_CASE("MRD dataset chunk size adapts to frame shape", "[mrd][chunk]")
+{
+    std::string temp = unique_temp_dir();
+    fs::path data_dir = fs::path(temp) / "data";
+    fs::create_directories(data_dir / "mrd");
+
+    MarshalState state;
+    state.data_dir = data_dir.string();
+    state.sink_mode = SinkMode::MRD;
+    state.ws_emit = [](const std::string &) {};
+    state.ws_emit_topic = [](const std::string &, const std::string &) {};
+
+    mrd::MrdSink sink(state);
+
+    mrd::ImageDimensions dims;
+    dims.spatial = {512, 512, 20};
+    dims.channels = 1;
+
+    const size_t voxels = static_cast<size_t>(dims.spatial[0]) * dims.spatial[1] * dims.spatial[2] * dims.channels;
+    std::vector<float> frame(voxels, 0.5f);
+    auto header = mrd::default_ismrmrd_header(dims, mrd::ElementType::Float32, "chunky");
+
+    auto result = sink.append_frame("chunky", dims, mrd::ElementType::Float32, header, frame.data(),
+                                    frame.size() * sizeof(float));
+
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    REQUIRE(fapl >= 0);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
+    H5Pset_fclose_degree(fapl, H5F_CLOSE_SEMI);
+    hid_t file = H5Fopen(result.file_path.c_str(), H5F_ACC_RDONLY | H5F_ACC_SWMR_READ, fapl);
+    H5Pclose(fapl);
+    REQUIRE(file >= 0);
+
+    hid_t dset = H5Dopen2(file, "/images/data", H5P_DEFAULT);
+    REQUIRE(dset >= 0);
+    hid_t dcpl = H5Dget_create_plist(dset);
+    REQUIRE(dcpl >= 0);
+    REQUIRE(H5Pget_layout(dcpl) == H5D_CHUNKED);
+
+    hsize_t chunk[5] = {0};
+    REQUIRE(H5Pget_chunk(dcpl, 5, chunk) >= 0);
+    H5Pclose(dcpl);
+    H5Dclose(dset);
+    H5Fclose(file);
+
+    constexpr unsigned long long target = 8ULL * 1024ULL * 1024ULL;
+    unsigned long long chunk_bytes = static_cast<unsigned long long>(chunk[0]) * static_cast<unsigned long long>(chunk[1]) *
+                                     static_cast<unsigned long long>(chunk[2]) * static_cast<unsigned long long>(chunk[3]) *
+                                     static_cast<unsigned long long>(chunk[4]) * sizeof(float);
+
+    CHECK(chunk[0] == 1);
+    CHECK(chunk[1] == dims.channels);
+    CHECK(chunk[2] <= dims.spatial[2]);
+    CHECK(chunk[3] <= dims.spatial[1]);
+    CHECK(chunk[4] <= dims.spatial[0]);
+    CHECK(chunk_bytes > 0);
+    CHECK(chunk_bytes <= target);
+}

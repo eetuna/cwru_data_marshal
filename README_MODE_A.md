@@ -48,6 +48,7 @@ sleep 1
 ## 4. Verify the service is healthy
 
 ```bash
+# Prints JSON {"status":"ok","uptime_s":...}
 curl -fsS http://localhost:8080/health | tee /dev/stderr
 ```
 
@@ -96,6 +97,10 @@ steps), use either generator. Override geometry or cadence with flags such as
 # Python streamer
 python3 tools/stream_image_series.py --http http://localhost:8080 --stream live_demo --nx 128 --ny 128 --nslices 8 --dt-ms 200
 ```
+
+If the geometry changes during a run the marshal automatically flushes the
+current MRD and starts a new, geometry-stamped file so clients can tell volumes
+apart.
 
 ## 7. (Optional) Smoke-test WebSocket ingestion
 

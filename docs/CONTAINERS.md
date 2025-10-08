@@ -82,7 +82,7 @@ Once the stack is running:
 
 - `marshal` listens on `http://localhost:8080` and `ws://localhost:8090/ws`.
 - `viz` tails `/data/mrd/*.mrd` inside the shared volume and prints frame updates.
-- `fk` submits synthetic frames to `marshal` using `POST /v1/ismrmrd/frame`.
+- `fk` streams sinusoidal pose updates to `/v1/pose/update` so clients can observe motion.
 - `fs_tail` streams updates from `/data/mrd/index.jsonl`.
 
 Use `docker compose logs -f <service>` to inspect each component individually. Shutdown the

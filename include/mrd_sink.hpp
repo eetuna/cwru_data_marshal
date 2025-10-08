@@ -104,6 +104,9 @@ class MrdSink
         ImageDimensions dims;
         ElementType type{ElementType::Float32};
         std::string header_xml;
+        std::string canonical_name;
+        std::filesystem::path sink_root;
+        size_t generation{0};
     };
 
     MarshalState &state_;
