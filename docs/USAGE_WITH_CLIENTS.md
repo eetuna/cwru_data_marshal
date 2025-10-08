@@ -3,7 +3,7 @@
 The repository ships three tiny client binaries that exercise all of the
 interfaces exposed by the marshal:
 
-- `fk_client` &mdash; periodic HTTP `POST /v1/pose/update` sender
+- `fk_client` &mdash; streams a smooth sinusoidal trajectory via HTTP `POST /v1/pose/update`
 - `viz_client` &mdash; watches `latest.json` on disk and the WebSocket fan-out
 - `ws_producer` &mdash; streams MRD payloads over WebSocket (binary frames)
 
@@ -64,7 +64,7 @@ Create two valid MRD payloads with the built-in generator and ingest them via
 HTTP. Then push another payload through the WebSocket producer.
 
 ```bash
-# Health check
+# Health check (prints JSON {"status":"ok","uptime_s":...})
 curl -fsS http://localhost:8080/health | tee /dev/stderr
 
 # Generate sample MRDs
@@ -89,7 +89,8 @@ WS_FILE=./data/mrd/sample_http_1.h5 \
 
 **Forward kinematics client (`fk_client`)**
 
-Posts pose updates and prints the JSON response body returned by the marshal.
+Posts fifty pose updates following the sinusoidal demo trajectory and prints the
+JSON response body returned by the marshal.
 
 ```bash
 ./build/fk_client --http http://localhost:8080 --pretty
@@ -114,8 +115,8 @@ metadata broadcast coming from `/v1/mrd/ingest` and pose updates (see next step)
 ```
 
 The WebSocket fan-out will emit pose notifications that `viz_client` will show
-immediately. You can re-run `fk_client` any time to emulate the scanner pose
-stream.
+immediately. Re-run `fk_client` whenever you want another burst of the
+sinusoidal trajectory.
 
 ### 5b. Stream reconstructed frames via SWMR
 The marshal can now append ISMRMRD Image messages into a live MRD file while
@@ -193,6 +194,7 @@ mkdir -p ./data/mrd ./data/dumpbox
   > ./data/marshal_record.log 2>&1 &
 MARSHAL_REC_PID=$!
 sleep 1
+# Health check (prints JSON {"status":"ok","uptime_s":...})
 curl -fsS http://localhost:8080/health | tee /dev/stderr
 ```
 
@@ -264,6 +266,7 @@ wait "$MARSHAL_REC_PID" 2>/dev/null || true
   > ./data/marshal_replay.log 2>&1 &
 MARSHAL_REP_PID=$!
 sleep 1
+# Health check (prints JSON {"status":"ok","uptime_s":...})
 curl -fsS http://localhost:8080/health | tee /dev/stderr
 ```
 
@@ -311,11 +314,11 @@ observed during replay.
 
 ## Quick reference: sample client behaviours
 
-| Binary          | Transport | Purpose                                                           | Key flags / env vars                |
-|-----------------|-----------|-------------------------------------------------------------------|-------------------------------------|
-| `fk_client`     | HTTP      | Posts `p`/`R` pose updates to `/v1/pose/update`, prints response. | `--http http://HOST:PORT`, `--pretty` |
-| `viz_client`    | HTTP+WS   | Polls `latest.json`, subscribes to WS fan-out, logs broadcasts.   | `--ws ws://HOST:PORT/PATH`, `--data DIR` |
-| `ws_producer`   | WS        | Sends binary MRD frames over WS; prints server replies.           | `WS_HOST`, `WS_PORT`, `WS_TARGET`, `WS_FILE`, `WS_FRAMES`, `WS_BYTES` |
+| Binary        | Transport | Purpose                                                                 | Key flags / env vars                        |
+|---------------|-----------|-------------------------------------------------------------------------|---------------------------------------------|
+| `fk_client`   | HTTP      | Streams sinusoidal `p`/`R` pose updates to `/v1/pose/update`, printing responses. | `--http http://HOST:PORT`, `--pretty`       |
+| `viz_client`  | HTTP+WS   | Polls `latest.json`, subscribes to WS fan-out, logs broadcasts.             | `--ws ws://HOST:PORT/PATH`, `--data DIR`    |
+| `ws_producer` | WS        | Sends binary MRD frames over WebSocket; prints server replies.             | `WS_HOST`, `WS_PORT`, `WS_TARGET`, `WS_FILE`, `WS_FRAMES`, `WS_BYTES` |
 
 These utilities are intentionally simple so they can be used as starting points
 for more sophisticated scanner, visualization, or ingestion tooling.

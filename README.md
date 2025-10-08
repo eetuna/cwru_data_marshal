@@ -114,7 +114,7 @@ a deep dive into the devcontainer image, the multi-stage Dockerfile, and the
 # Start server in MRD sink
 ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink mrd &
 sleep 1
-curl -s http://localhost:8080/health    # expect: ok
+curl -s http://localhost:8080/health    # expect JSON {"status":"ok","uptime_s":...}
 
 # Ingest two files (dummy fallback shown)
 mkdir -p ./data/mrd
@@ -137,7 +137,9 @@ The marshal accepts ISMRMRD Image messages. Each POST body is an
 exact layout. Two helper utilities now live in-tree:
 
 - **C++ (`image_streamer`)** — builds with the rest of the project. Generates a
-  multi-slice, single-channel float32 series with subtle temporal wobble.
+  multi-slice, single-channel float32 series with subtle temporal wobble. The
+  MRD sink automatically rolls to a new file if `nx`, `ny`, or slice counts
+  change mid-stream, stamping the geometry into the filename.
 - **Python (`tools/stream_image_series.py`)** — mirrors the C++ generator using
   `numpy`/`ismrmrd`. Both land their temporary `.bin` artifacts under `./data`.
   Width/height, slice count, and cadence can be overridden with flags such as
@@ -177,7 +179,7 @@ python3 tools/stream_image_series.py --http http://localhost:8080 --stream demo_
 # RECORD: start server in dumpbox sink; session auto-named
 ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink dumpbox --dumpbox-root ./data/dumpbox &
 sleep 1
-curl -s http://localhost:8080/health
+curl -s http://localhost:8080/health    # -> {"status":"ok","uptime_s":...}
 
 # Post two files (dummy shown)
 head -c 16384 </dev/urandom > ./data/tmp1.mrd
@@ -222,11 +224,14 @@ flushed MRD artifacts.
 - **`POST /v1/ismrmrd/frame`** — Body: ISMRMRD Image header + voxels
   - `X-MRD-Stream`: logical identifier; the marshal will keep a matching `.mrd` file open
   - Appends into `/images/data` using HDF5 SWMR so readers can open the file while it grows
-- **`GET /health`** — returns `ok`.
+- **`POST /v1/pose/update`** — JSON body `{ "p": [x,y,z], "R": [9] }`; records pose and broadcasts it.
+- **`GET /v1/pose/current`** — Latest pose (if any) in JSON.
+- **`GET /health`** — returns JSON `{ "status": "ok", "uptime_s": <seconds> }`.
 - **(If present) `GET /v1/mrd/since?ts=...&limit=...`** — convenience reader over `index.jsonl`.
 
 See [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) for details, payload examples,
-and error semantics aimed at new integrators.
+and error semantics aimed at new integrators. Pose handling and WebSocket
+broadcast topics are covered there as well.
 
 ---
 
@@ -261,7 +266,7 @@ services/
 include/
   atomic_write.hpp       # safe file writes (tmp + rename)
 docs/
-  overview.md            # Doxygen main page
+  ARCHITECTURE.md        # Internal components and data flow
 ```
 
 ---

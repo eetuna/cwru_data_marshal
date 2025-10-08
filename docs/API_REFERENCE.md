@@ -66,6 +66,11 @@ Append an ISMRMRD Image message directly into a growing HDF5 dataset while the
 file remains open in Single-Writer-Multiple-Reader (SWMR) mode. Each logical
 stream maps to one `.mrd` file under the current sink.
 
+The sink monitors geometry (`nx`, `ny`, `nz`, channels). If an incoming frame
+does not match the active file, the marshal flushes the existing MRD and
+continues in a new file whose name encodes the new dimensions. This keeps SWMR
+streams fast without manual intervention.
+
 ### Required headers
 
 | Header | Description |
@@ -145,8 +150,41 @@ JSON describing the stream after the append:
 
 ## `GET /health`
 
-Simple readiness probe. Returns HTTP 200 with body `ok` when the marshal is
-running.
+Simple readiness probe. Returns HTTP 200 with JSON `{ "status": "ok",
+"uptime_s": <seconds since start> }` when the marshal is running.
+
+---
+
+## `POST /v1/pose/update`
+
+Store the latest scanner pose and broadcast it to connected WebSocket clients.
+
+### Request
+
+- **Headers**
+  - `Content-Type: application/json`
+- **Body**
+  - `p`: array of three translation values (meters)
+  - `R`: array of nine rotation matrix coefficients (row-major)
+  - Optional `frame`/`source` strings for metadata
+
+### Response
+
+- **Status 200** with JSON `{ "status": "ok", "pose": { ... } }` describing
+  the stored pose and including a timestamp.
+- **Status 400** if required fields are missing or have the wrong lengths.
+
+---
+
+## `GET /v1/pose/current`
+
+Return the most recently stored pose (if any). Helpful for monitoring dashboards
+that want the current scanner transform without subscribing to WebSockets.
+
+### Response
+
+- **Status 200** with JSON `{ "pose": { ... }, "source": "..." }`. If no pose
+  has been submitted yet the marshal returns an identity transform.
 
 ---
 
