@@ -380,3 +380,66 @@ TEST_CASE("MRD dataset chunk size adapts to frame shape", "[mrd][chunk]")
     CHECK(chunk_bytes > 0);
     CHECK(chunk_bytes <= target);
 }
+
+TEST_CASE("MRD sink starts a new file when the session token changes", "[mrd][session]")
+{
+    std::string temp = unique_temp_dir();
+    fs::path data_dir = fs::path(temp) / "data";
+    fs::create_directories(data_dir / "mrd");
+
+    MarshalState state;
+    state.data_dir = data_dir.string();
+    state.sink_mode = SinkMode::MRD;
+    state.ws_emit = [](const std::string &) {};
+    state.ws_emit_topic = [](const std::string &, const std::string &) {};
+
+    mrd::MrdSink sink(state);
+
+    mrd::ImageDimensions dims;
+    dims.spatial = {6, 6, 4};
+    dims.channels = 1;
+
+    const size_t vox = static_cast<size_t>(dims.spatial[0]) * dims.spatial[1] * dims.spatial[2] * dims.channels;
+    std::vector<float> frame(vox, 0.25f);
+    auto header = mrd::default_ismrmrd_header(dims, mrd::ElementType::Float32, "sessionStream");
+
+    auto result1 = sink.append_frame("sessionStream",
+                                     dims,
+                                     mrd::ElementType::Float32,
+                                     header,
+                                     frame.data(),
+                                     frame.size() * sizeof(float),
+                                     "sess-1");
+    REQUIRE(result1.frame_index == 0);
+
+    auto result2 = sink.append_frame("sessionStream",
+                                     dims,
+                                     mrd::ElementType::Float32,
+                                     header,
+                                     frame.data(),
+                                     frame.size() * sizeof(float),
+                                     "sess-1");
+    REQUIRE(result2.frame_index == 1);
+    CHECK(result2.file_path == result1.file_path);
+
+    auto result3 = sink.append_frame("sessionStream",
+                                     dims,
+                                     mrd::ElementType::Float32,
+                                     header,
+                                     frame.data(),
+                                     frame.size() * sizeof(float),
+                                     "sess-2");
+    REQUIRE(result3.frame_index == 0);
+    CHECK(result3.file_path != result2.file_path);
+    CHECK(result3.file_path.filename() != result2.file_path.filename());
+
+    auto result4 = sink.append_frame("sessionStream",
+                                     dims,
+                                     mrd::ElementType::Float32,
+                                     header,
+                                     frame.data(),
+                                     frame.size() * sizeof(float),
+                                     "sess-2");
+    REQUIRE(result4.frame_index == 1);
+    CHECK(result4.file_path == result3.file_path);
+}

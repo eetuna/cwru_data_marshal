@@ -395,75 +395,108 @@ std::shared_ptr<MrdSink::StreamState> MrdSink::ensure_stream(const std::string &
                                                              const ImageDimensions &dims,
                                                              ElementType type,
                                                              const std::filesystem::path &sink_root,
-                                                             std::string_view header_xml)
+                                                             std::string_view header_xml,
+                                                             std::string_view session_token)
 {
-    std::lock_guard<std::mutex> guard(map_mutex_);
     ImageDimensions normalized = normalize_dims(dims);
+    std::shared_ptr<StreamState> state;
+    bool create_new_state = false;
+    bool reopen_file = false;
+    bool header_was_empty = false;
+    bool update_session_only = false;
+    bool refresh_flush_policy = false;
+    bool root_changed = false;
+    size_t next_generation = 0;
 
-    auto it = streams_.find(stream_id);
-    if (it != streams_.end())
     {
-        auto state = it->second;
-        if (state->type != type)
-            throw std::runtime_error("stream element type mismatch");
-
-        bool root_changed = state->sink_root != sink_root;
-        bool dims_changed = state->dims.spatial != normalized.spatial || state->dims.channels != normalized.channels;
-
-        if (dims_changed || root_changed)
+        std::lock_guard<std::mutex> guard(map_mutex_);
+        auto it = streams_.find(stream_id);
+        if (it != streams_.end())
         {
-            std::lock_guard<std::mutex> state_guard(state->mutex);
-            state->file.reset();
-            state->dims = normalized;
-            state->sink_root = sink_root;
-            if (root_changed)
-                state->generation = 0;
-            else
-                state->generation += 1;
+            state = it->second;
+            if (state->type != type)
+                throw std::runtime_error("stream element type mismatch");
 
-            std::string next_header = header_xml.empty()
-                                          ? default_ismrmrd_header(state->dims, state->type, stream_id)
-                                          : std::string(header_xml);
-            state->header_xml = std::move(next_header);
+            root_changed = state->sink_root != sink_root;
+            bool dims_changed = state->dims.spatial != normalized.spatial || state->dims.channels != normalized.channels;
+            bool session_changed = !session_token.empty() && state->active_session != session_token;
 
-            auto file_path = make_stream_file_path(state->sink_root, state->canonical_name, state->dims, state->generation);
-            state->flush_policy = state_.flush_policy;
-            state->file = std::make_unique<MrdFile>(file_path, stream_id, state->type, state->dims, state->header_xml, state->flush_policy);
+            reopen_file = dims_changed || root_changed || session_changed;
+            if (reopen_file)
+                next_generation = root_changed ? 0 : state->generation + 1;
+
+            header_was_empty = !header_xml.empty() && state->header_xml.empty();
+            update_session_only = !session_token.empty() && !reopen_file && state->active_session != session_token;
+            refresh_flush_policy = state->flush_policy.max_pending_frames != state_.flush_policy.max_pending_frames ||
+                                   state->flush_policy.max_pending_interval != state_.flush_policy.max_pending_interval;
         }
-        else if (!header_xml.empty() && state->header_xml.empty())
+        else
         {
-            state->header_xml = std::string(header_xml);
+            const std::string canonical = canonical_scan_name(stream_id);
+            state = std::make_shared<StreamState>();
+            state->canonical_name = canonical;
+            streams_.emplace(stream_id, state);
+            create_new_state = true;
         }
+    }
 
-        {
-            std::lock_guard<std::mutex> state_guard(state->mutex);
-            if (state->flush_policy.max_pending_frames != state_.flush_policy.max_pending_frames ||
-                state->flush_policy.max_pending_interval != state_.flush_policy.max_pending_interval)
-            {
-                state->flush_policy = state_.flush_policy;
-                if (state->file)
-                    state->file->set_flush_policy(state->flush_policy);
-            }
-        }
+    if (create_new_state)
+    {
+        std::lock_guard<std::mutex> state_guard(state->mutex);
+        state->dims = normalized;
+        state->type = type;
+        state->header_xml = header_xml.empty() ? default_ismrmrd_header(state->dims, state->type, stream_id)
+                                               : std::string(header_xml);
+        state->sink_root = sink_root;
+        state->generation = 0;
+        state->flush_policy = state_.flush_policy;
+        if (!session_token.empty())
+            state->active_session = std::string(session_token);
 
+        auto file_path = make_stream_file_path(state->sink_root, state->canonical_name, state->dims, state->generation);
+        state->file = std::make_unique<MrdFile>(file_path, stream_id, state->type, state->dims, state->header_xml, state->flush_policy);
         return state;
     }
 
-    const std::string canonical = canonical_scan_name(stream_id);
-    auto state = std::make_shared<StreamState>();
-    state->dims = normalized;
-    state->type = type;
-    state->header_xml = header_xml.empty() ? default_ismrmrd_header(state->dims, state->type, stream_id)
-                                           : std::string(header_xml);
-    state->canonical_name = canonical;
-    state->sink_root = sink_root;
-    state->generation = 0;
-    state->flush_policy = state_.flush_policy;
+    if (reopen_file)
+    {
+        std::lock_guard<std::mutex> state_guard(state->mutex);
+        state->file.reset();
+        state->dims = normalized;
+        state->sink_root = sink_root;
+        state->generation = next_generation;
+        if (!session_token.empty())
+            state->active_session = std::string(session_token);
 
-    auto file_path = make_stream_file_path(state->sink_root, state->canonical_name, state->dims, state->generation);
-    state->file = std::make_unique<MrdFile>(file_path, stream_id, state->type, state->dims, state->header_xml, state->flush_policy);
+        std::string next_header = header_xml.empty()
+                                      ? default_ismrmrd_header(state->dims, state->type, stream_id)
+                                      : std::string(header_xml);
+        state->header_xml = std::move(next_header);
 
-    streams_.emplace(stream_id, state);
+        state->flush_policy = state_.flush_policy;
+        auto file_path = make_stream_file_path(state->sink_root, state->canonical_name, state->dims, state->generation);
+        state->file = std::make_unique<MrdFile>(file_path, stream_id, state->type, state->dims, state->header_xml, state->flush_policy);
+    }
+    else if (header_was_empty)
+    {
+        std::lock_guard<std::mutex> state_guard(state->mutex);
+        state->header_xml = std::string(header_xml);
+    }
+
+    if (update_session_only)
+    {
+        std::lock_guard<std::mutex> state_guard(state->mutex);
+        state->active_session = std::string(session_token);
+    }
+
+    if (refresh_flush_policy)
+    {
+        std::lock_guard<std::mutex> state_guard(state->mutex);
+        state->flush_policy = state_.flush_policy;
+        if (state->file)
+            state->file->set_flush_policy(state->flush_policy);
+    }
+
     return state;
 }
 
@@ -472,10 +505,11 @@ FrameAppendResult MrdSink::append_frame(const std::string &stream_id,
                                         ElementType type,
                                         std::string_view header_xml,
                                         const void *data,
-                                        size_t bytes)
+                                        size_t bytes,
+                                        std::string_view session_token)
 {
     auto sink = resolve_sink_paths(state_);
-    auto stream_state = ensure_stream(stream_id, dims, type, sink.sink_root, header_xml);
+    auto stream_state = ensure_stream(stream_id, dims, type, sink.sink_root, header_xml, session_token);
 
     std::lock_guard<std::mutex> guard(stream_state->mutex);
     if (!header_xml.empty() && stream_state->header_xml != header_xml)

@@ -108,6 +108,16 @@ int main(int argc, char **argv) {
         boost::beast::flat_buffer read_buffer;
         boost::beast::flat_buffer write_buffer;
         auto next_deadline = std::chrono::steady_clock::now();
+        std::uint64_t session_counter = 0;
+        std::string session_token;
+
+        auto refresh_session_token = [&]() {
+            ++session_counter;
+            auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
+            session_token = opt.stream + "-" + std::to_string(session_counter) + "-" + std::to_string(now_ms);
+        };
 
         auto connect_stream = [&](const char *reason) {
             boost::system::error_code close_ec;
@@ -132,6 +142,7 @@ int main(int argc, char **argv) {
                     stream.expires_never();
                     read_buffer.consume(read_buffer.size());
                     next_deadline = std::chrono::steady_clock::now();
+                    refresh_session_token();
                     if (reason)
                         std::cout << "image_streamer: connected (" << reason << ")\n";
                     return;
@@ -194,6 +205,8 @@ int main(int argc, char **argv) {
                 req.set(http::field::host, http_target.host);
                 req.set(http::field::content_type, "application/octet-stream");
                 req.set("X-MRD-Stream", opt.stream);
+                if (!session_token.empty())
+                    req.set("X-MRD-Session", session_token);
                 req.keep_alive(true);
                 req.body() = body;
                 req.prepare_payload();
