@@ -256,6 +256,10 @@ broadcast topics are covered there as well.
 - `--sink <mrd|dumpbox>`
 - `--dumpbox-root <path>` (only in dumpbox mode; default `/data/dumpbox`)
 - `--dumpbox-session <name>` (optional; auto UTC ISO if omitted)
+- `--flush-max-frames <N>` (default `4`) — coalesce up to *N* frames before
+  forcing an HDF5 flush when running in MRD mode.
+- `--flush-max-ms <ms>` (default `50`) — maximum wall-clock delay before the
+  marshal flushes pending SWMR data.
 
 **playback**
 - `--http http://host:port` (marshal base)

@@ -340,6 +340,7 @@ private:
                         {"path", result.file_path.string()},
                         {"stream", result.stream_id},
                         {"frame_index", result.frame_index},
+                        {"flushed", result.flushed},
                         {"ts", result.timestamp},
                         {"dims", {result.dims.spatial[0], result.dims.spatial[1], result.dims.spatial[2]}},
                         {"channels", result.dims.channels},
