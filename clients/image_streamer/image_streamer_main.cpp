@@ -105,7 +105,8 @@ int main(int argc, char **argv) {
         boost::asio::io_context ioc;
         boost::asio::ip::tcp::resolver resolver{ioc};
         boost::beast::tcp_stream stream{ioc};
-        boost::beast::flat_buffer buffer;
+        boost::beast::flat_buffer read_buffer;
+        boost::beast::flat_buffer write_buffer;
         auto next_deadline = std::chrono::steady_clock::now();
 
         auto connect_stream = [&](const char *reason) {
@@ -129,7 +130,8 @@ int main(int argc, char **argv) {
                 if (!connect_ec) {
                     stream.socket().set_option(boost::asio::ip::tcp::no_delay(true));
                     stream.expires_never();
-                    buffer.consume(buffer.size());
+                    read_buffer.consume(read_buffer.size());
+                    write_buffer.consume(write_buffer.size());
                     next_deadline = std::chrono::steady_clock::now();
                     if (reason)
                         std::cout << "image_streamer: connected (" << reason << ")\n";
@@ -159,6 +161,10 @@ int main(int argc, char **argv) {
         const std::size_t header_bytes = sizeof(ISMRMRD::ImageHeader);
         const std::size_t payload_bytes = n_vox * sizeof(float);
         std::vector<uint8_t> body(header_bytes + payload_bytes);
+        // Reserve the serializer workspace once so large frames do not trigger
+        // incremental growth on every write. consume() below only resets the
+        // readable area and keeps this capacity for reuse.
+        write_buffer.reserve(body.size() + 512);
 
         std::size_t frame_index = 0;
         const std::size_t total_frames = opt.frames;
@@ -200,7 +206,10 @@ int main(int argc, char **argv) {
                 req.prepare_payload();
 
                 boost::system::error_code write_ec;
-                http::write(stream, req, write_ec);
+                http::write(stream, req, write_buffer, write_ec);
+                // Reset the readable view while retaining capacity so the next
+                // request can reuse the same backing allocation.
+                write_buffer.consume(write_buffer.size());
                 if (write_ec) {
                     std::cerr << "image_streamer: write failed (" << write_ec.message() << "), reconnecting\n";
                     connect_stream("write error");
@@ -209,7 +218,7 @@ int main(int argc, char **argv) {
 
                 http::response<http::string_body> res;
                 boost::system::error_code read_ec;
-                http::read(stream, buffer, res, read_ec);
+                http::read(stream, read_buffer, res, read_ec);
                 if (read_ec) {
                     std::cerr << "image_streamer: read failed (" << read_ec.message() << "), reconnecting\n";
                     connect_stream("read error");
@@ -218,7 +227,7 @@ int main(int argc, char **argv) {
 
                 ack_status = res.result();
                 ack_body = res.body();
-                buffer.consume(buffer.size());
+                read_buffer.consume(read_buffer.size());
                 delivered = true;
 
                 if (!res.keep_alive()) {
