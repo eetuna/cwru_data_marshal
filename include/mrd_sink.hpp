@@ -102,7 +102,8 @@ class MrdSink
                                    ElementType type,
                                    std::string_view header_xml,
                                    const void *data,
-                                   size_t bytes);
+                                   size_t bytes,
+                                   std::string_view session_token = {});
 
   private:
     struct StreamState
@@ -116,6 +117,7 @@ class MrdSink
         std::filesystem::path sink_root;
         size_t generation{0};
         FlushPolicy flush_policy;
+        std::string active_session;
     };
 
     MarshalState &state_;
@@ -126,7 +128,8 @@ class MrdSink
                                                const ImageDimensions &dims,
                                                ElementType type,
                                                const std::filesystem::path &sink_root,
-                                               std::string_view header_xml);
+                                               std::string_view header_xml,
+                                               std::string_view session_token);
     static std::string canonical_scan_name(const std::string &stream_id);
     static std::string element_type_string(ElementType t);
     nlohmann::json make_entry_json(const FrameAppendResult &result) const;

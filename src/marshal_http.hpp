@@ -342,9 +342,16 @@ private:
                         throw std::runtime_error("payload size does not match header");
 
                     std::string header_xml = mrd::default_ismrmrd_header(dims, element_type, stream_header);
+                    std::string session_header = std::string(req["X-MRD-Session"]);
                     const void *payload = body.data() + sizeof(ISMRMRD::ImageHeader);
 
-                    auto result = state.mrd_sink->append_frame(stream_header, dims, element_type, header_xml, payload, payload_bytes);
+                    auto result = state.mrd_sink->append_frame(stream_header,
+                                                              dims,
+                                                              element_type,
+                                                              header_xml,
+                                                              payload,
+                                                              payload_bytes,
+                                                              session_header);
 
                     json resp = {
                         {"status", "ok"},
