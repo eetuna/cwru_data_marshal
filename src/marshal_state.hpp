@@ -24,6 +24,12 @@
 namespace mrd
 {
 class MrdSink;
+
+struct FlushPolicy
+{
+    std::size_t max_pending_frames{1};
+    std::chrono::milliseconds max_pending_interval{0};
+};
 }
 enum class SinkMode
 {
@@ -50,6 +56,7 @@ struct MarshalState
     std::string dumpbox_root{"./data/dumpbox"};
     std::string dumpbox_session{};
     std::atomic<uint64_t> seq{0};
+    mrd::FlushPolicy flush_policy{4, std::chrono::milliseconds{50}};
 
     PoseStore poses;
     std::string data_dir{"./data"};

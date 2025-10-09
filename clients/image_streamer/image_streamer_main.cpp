@@ -1,6 +1,8 @@
 #include <boost/asio.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/core/flat_buffer.hpp>
+#include <boost/beast/core/tcp_stream.hpp>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -102,77 +104,152 @@ int main(int argc, char **argv) {
 
         boost::asio::io_context ioc;
         boost::asio::ip::tcp::resolver resolver{ioc};
-        auto results = resolver.resolve(http_target.host, http_target.port);
+        boost::beast::tcp_stream stream{ioc};
+        boost::beast::flat_buffer buffer;
+        auto next_deadline = std::chrono::steady_clock::now();
+
+        auto connect_stream = [&](const char *reason) {
+            boost::system::error_code close_ec;
+            if (stream.socket().is_open()) {
+                stream.socket().shutdown(boost::asio::ip::tcp::socket::shutdown_both, close_ec);
+                stream.socket().close(close_ec);
+            }
+
+            for (int attempt = 0; attempt < 8; ++attempt) {
+                boost::system::error_code resolve_ec;
+                auto endpoints = resolver.resolve(http_target.host, http_target.port, resolve_ec);
+                if (resolve_ec) {
+                    std::cerr << "image_streamer: resolve failed (" << resolve_ec.message() << "), retrying\n";
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    continue;
+                }
+
+                boost::system::error_code connect_ec;
+                stream.connect(endpoints, connect_ec);
+                if (!connect_ec) {
+                    stream.socket().set_option(boost::asio::ip::tcp::no_delay(true));
+                    stream.expires_never();
+                    buffer.consume(buffer.size());
+                    next_deadline = std::chrono::steady_clock::now();
+                    if (reason)
+                        std::cout << "image_streamer: connected (" << reason << ")\n";
+                    return;
+                }
+
+                std::cerr << "image_streamer: connect failed (" << connect_ec.message() << "), retrying\n";
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+
+            throw std::runtime_error("image_streamer: unable to connect to marshal at " + opt.base_url);
+        };
+
+        connect_stream("startup");
+
+        ISMRMRD::Image<float> img(opt.nx, opt.ny, opt.nz, 1);
+        ISMRMRD::ImageHeader &head = img.getHead();
+        head.channels = 1;
+        head.data_type = ISMRMRD::ISMRMRD_FLOAT;
+        head.matrix_size[0] = opt.nx;
+        head.matrix_size[1] = opt.ny;
+        head.matrix_size[2] = opt.nz;
+        head.image_series_index = 1;
+
+        float *data = img.getDataPtr();
+        const std::size_t n_vox = static_cast<std::size_t>(opt.nx) * opt.ny * opt.nz;
+        const std::size_t header_bytes = sizeof(ISMRMRD::ImageHeader);
+        const std::size_t payload_bytes = n_vox * sizeof(float);
+        std::vector<uint8_t> body(header_bytes + payload_bytes);
 
         std::size_t frame_index = 0;
         const std::size_t total_frames = opt.frames;
+        const std::size_t log_stride = 30;
 
         while (total_frames == 0 || frame_index < total_frames) {
-            boost::asio::ip::tcp::socket socket{ioc};
-            boost::asio::connect(socket, results.begin(), results.end());
-
-            ISMRMRD::Image<float> img(opt.nx, opt.ny, opt.nz, 1);
-            ISMRMRD::ImageHeader &head = img.getHead();
-            head.channels = 1;
-            head.data_type = ISMRMRD::ISMRMRD_FLOAT;
-            head.matrix_size[0] = opt.nx;
-            head.matrix_size[1] = opt.ny;
-            head.matrix_size[2] = opt.nz;
             head.image_index = static_cast<uint16_t>((frame_index % 65535) + 1);
-            head.image_series_index = 1;
-            head.slice = static_cast<uint16_t>(frame_index % opt.nz);
+            head.slice = static_cast<uint16_t>((opt.nz > 0) ? (frame_index % opt.nz) : 0);
 
-            float *data = img.getDataPtr();
-            const std::size_t n_vox = static_cast<std::size_t>(opt.nx) * opt.ny * opt.nz;
             const double t = static_cast<double>(frame_index);
             for (std::size_t z = 0; z < opt.nz; ++z) {
+                const double z_term = z * 0.35;
                 for (std::size_t y = 0; y < opt.ny; ++y) {
+                    const double y_term = y * 0.07;
                     for (std::size_t x = 0; x < opt.nx; ++x) {
                         const std::size_t idx = z * opt.ny * opt.nx + y * opt.nx + x;
-                        const double base = (static_cast<double>(x + y) / (opt.nx + opt.ny));
-                        const double wave = std::sin(t * 0.25 + z * 0.35 + x * 0.05 + y * 0.07);
+                        const double base = static_cast<double>(x + y) / std::max<std::size_t>(1, opt.nx + opt.ny);
+                        const double wave = std::sin(t * 0.25 + z_term + x * 0.05 + y_term);
                         data[idx] = static_cast<float>(base + 0.25 * wave);
                     }
                 }
             }
 
-            const std::size_t header_bytes = sizeof(ISMRMRD::ImageHeader);
-            const std::size_t payload_bytes = n_vox * sizeof(float);
-
-            std::vector<uint8_t> body;
-            body.resize(header_bytes + payload_bytes);
             std::memcpy(body.data(), &head, header_bytes);
             std::memcpy(body.data() + header_bytes, data, payload_bytes);
 
-            http::request<http::vector_body<uint8_t>> req{http::verb::post, "/v1/ismrmrd/frame", 11};
-            req.set(http::field::host, http_target.host);
-            req.set(http::field::content_type, "application/octet-stream");
-            req.set("X-MRD-Stream", opt.stream);
-            req.body() = body;
-            req.prepare_payload();
+            bool delivered = false;
+            std::string ack_body;
+            http::status ack_status = http::status::ok;
 
-            http::write(socket, req);
+            for (int attempt = 0; attempt < 3 && !delivered; ++attempt) {
+                http::request<http::buffer_body> req{http::verb::post, "/v1/ismrmrd/frame", 11};
+                req.set(http::field::host, http_target.host);
+                req.set(http::field::content_type, "application/octet-stream");
+                req.set("X-MRD-Stream", opt.stream);
+                req.keep_alive(true);
+                req.body().data = body.data();
+                req.body().size = body.size();
+                req.prepare_payload();
 
-            boost::beast::flat_buffer buffer;
-            http::response<http::string_body> res;
-            http::read(socket, buffer, res);
+                boost::system::error_code write_ec;
+                http::write(stream, req, write_ec);
+                if (write_ec) {
+                    std::cerr << "image_streamer: write failed (" << write_ec.message() << "), reconnecting\n";
+                    connect_stream("write error");
+                    continue;
+                }
 
-            if (res.result() != http::status::ok) {
-                std::cerr << "image_streamer: server responded with " << res.result_int()
-                          << " body=" << res.body() << "\n";
-            } else {
-                std::cout << "frame " << frame_index << " -> " << res.body() << "\n";
+                http::response<http::string_body> res;
+                boost::system::error_code read_ec;
+                http::read(stream, buffer, res, read_ec);
+                if (read_ec) {
+                    std::cerr << "image_streamer: read failed (" << read_ec.message() << "), reconnecting\n";
+                    connect_stream("read error");
+                    continue;
+                }
+
+                ack_status = res.result();
+                ack_body = res.body();
+                buffer.consume(buffer.size());
+                delivered = true;
+
+                if (!res.keep_alive()) {
+                    connect_stream("server closed");
+                }
             }
 
-            boost::system::error_code ec;
-            socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+            if (!delivered) {
+                continue; // try frame again after reconnect attempts
+            }
+
+            if (ack_status != http::status::ok) {
+                std::cerr << "image_streamer: server responded with " << static_cast<unsigned>(ack_status)
+                          << " body=" << ack_body << "\n";
+            } else if (frame_index == 0 || frame_index % log_stride == 0) {
+                std::cout << "frame " << frame_index << " -> " << ack_body << "\n";
+            }
 
             ++frame_index;
             if (total_frames != 0 && frame_index >= total_frames) {
                 break;
             }
+
             if (opt.interval > 0.0) {
-                std::this_thread::sleep_for(std::chrono::duration<double>(opt.interval));
+                next_deadline += std::chrono::duration<double>(opt.interval);
+                auto now = std::chrono::steady_clock::now();
+                if (next_deadline > now) {
+                    std::this_thread::sleep_until(next_deadline);
+                } else {
+                    next_deadline = now;
+                }
             }
         }
     } catch (const std::exception &e) {

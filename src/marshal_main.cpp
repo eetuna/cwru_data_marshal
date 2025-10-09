@@ -9,6 +9,7 @@
  * Last updated: 2025-09-21
  */
 
+#include <algorithm>
 #include <iostream>
 #include <filesystem>
 #include <system_error>
@@ -30,6 +31,8 @@ int main(int argc, char **argv)
     std::string sink = "mrd"; // "mrd" or "dumpbox"
     std::string dumpbox_root = "./data/dumpbox";
     std::string dumpbox_session = "";
+    std::size_t flush_max_frames = 4;
+    int flush_max_ms = 50;
     // Parse CLI
     for (int i = 1; i < argc; ++i)
     {
@@ -46,6 +49,10 @@ int main(int argc, char **argv)
             dumpbox_root = argv[++i];
         else if (a == "--dumpbox-session" && i + 1 < argc)
             dumpbox_session = argv[++i];
+        else if (a == "--flush-max-frames" && i + 1 < argc)
+            flush_max_frames = static_cast<std::size_t>(std::stoull(argv[++i]));
+        else if (a == "--flush-max-ms" && i + 1 < argc)
+            flush_max_ms = std::stoi(argv[++i]);
     }
 
     auto split = [](const std::string &s)
@@ -66,6 +73,8 @@ int main(int argc, char **argv)
     state.data_dir = data_dir;
     state.dumpbox_root = dumpbox_root;
     state.dumpbox_session = dumpbox_session;
+    state.flush_policy.max_pending_frames = std::max<std::size_t>(1, flush_max_frames);
+    state.flush_policy.max_pending_interval = std::chrono::milliseconds(std::max(flush_max_ms, 0));
 
     // Ensure directories
     std::error_code ec;
@@ -114,7 +123,9 @@ int main(int argc, char **argv)
     }
     else
     {
-        std::cout << " sink=mrd";
+        std::cout << " sink=mrd"
+                  << " flush_frames=" << state.flush_policy.max_pending_frames
+                  << " flush_ms=" << state.flush_policy.max_pending_interval.count();
     }
     std::cout << "\n";
 

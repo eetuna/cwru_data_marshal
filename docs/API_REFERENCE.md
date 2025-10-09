@@ -54,7 +54,9 @@ sink (live MRD or dumpbox session) and updates the corresponding metadata files.
 - Writes the binary file to either `data/mrd/` (live mode) or
   `data/dumpbox/<session>/files/` (record mode).
 - Appends a JSON line to the appropriate `index.jsonl`.
-- Rewrites the relevant `latest.json` with the most recent metadata.
+- Rewrites the relevant `latest.json` with the most recent metadata, including
+  a `flushed` boolean so readers can tell when the HDF5 dataset has been
+  refreshed.
 - Broadcasts the metadata JSON over the WebSocket channel (if any clients are
   connected).
 
@@ -125,11 +127,14 @@ JSON describing the stream after the append:
 ```json
 {
   "stream": "demo_stream",
-  "frames_written": 3,
-  "frame_shape": [4, 3],
-  "channels": 2,
+  "frame_index": 2,
+  "flushed": true,
+  "dims": [128, 128, 8],
+  "channels": 1,
   "datatype": "float32",
-  "path": "demo_stream.mrd"
+  "size_bytes": 524288,
+  "path": "demo_stream.mrd",
+  "ts": "2025-09-20T01:23:45.123Z"
 }
 ```
 
@@ -141,8 +146,12 @@ JSON describing the stream after the append:
 ### Reader expectations
 
 - Readers open the `.mrd` file using `H5F_ACC_SWMR_READ`. The marshal flushes
-  dataset + file metadata after every append, so newly written frames become
-  visible quickly.
+  dataset + file metadata according to its coalescing policy, configured via
+  `--flush-max-frames` (default 4) and `--flush-max-ms` (default 50 ms). When
+  the response (and corresponding broadcast JSON) includes `"flushed": false`,
+  the frame has been written but not yet made visible to SWMR readers. Poll the
+  WebSocket or `latest.json` until a `"flushed": true` entry appears before
+  attempting to read.
 - Image voxels live in `/images/data` with shape `[frames, channels, z, y, x]`.
 - A minimal ISMRMRD XML header is stored at `/header`.
 
@@ -243,3 +252,6 @@ active dumpbox session directory.
   components.
 - [`docs/USAGE_WITH_CLIENTS.md`](USAGE_WITH_CLIENTS.md) — walkthroughs that pair
   the marshal with bundled sample clients.
+- [`docs/CLIENT_INTEGRATION.md`](CLIENT_INTEGRATION.md) — guidance for production
+  scanners, FK publishers, and visualization consumers integrating with the
+  marshal.
