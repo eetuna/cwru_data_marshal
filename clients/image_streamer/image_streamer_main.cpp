@@ -189,19 +189,16 @@ int main(int argc, char **argv) {
             http::status ack_status = http::status::ok;
 
             for (int attempt = 0; attempt < 3 && !delivered; ++attempt) {
-                http::request<http::buffer_body> req{http::verb::post, "/v1/ismrmrd/frame", 11};
+                http::request<http::vector_body<uint8_t>> req{http::verb::post, "/v1/ismrmrd/frame", 11};
                 req.set(http::field::host, http_target.host);
                 req.set(http::field::content_type, "application/octet-stream");
                 req.set("X-MRD-Stream", opt.stream);
                 req.keep_alive(true);
-                req.body().data = body.data();
-                req.body().size = body.size();
+                req.body() = body;
                 req.prepare_payload();
 
-                http::request_serializer<http::buffer_body> serializer{req};
-                serializer.split(true);
                 boost::system::error_code write_ec;
-                http::write(stream, serializer, write_ec);
+                http::write(stream, req, write_ec);
                 if (write_ec) {
                     std::cerr << "image_streamer: write failed (" << write_ec.message() << "), reconnecting\n";
                     connect_stream("write error");
