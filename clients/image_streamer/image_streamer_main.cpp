@@ -106,7 +106,6 @@ int main(int argc, char **argv) {
         boost::asio::ip::tcp::resolver resolver{ioc};
         boost::beast::tcp_stream stream{ioc};
         boost::beast::flat_buffer read_buffer;
-        boost::beast::flat_buffer write_buffer;
         auto next_deadline = std::chrono::steady_clock::now();
 
         auto connect_stream = [&](const char *reason) {
@@ -131,7 +130,6 @@ int main(int argc, char **argv) {
                     stream.socket().set_option(boost::asio::ip::tcp::no_delay(true));
                     stream.expires_never();
                     read_buffer.consume(read_buffer.size());
-                    write_buffer.consume(write_buffer.size());
                     next_deadline = std::chrono::steady_clock::now();
                     if (reason)
                         std::cout << "image_streamer: connected (" << reason << ")\n";
@@ -161,11 +159,6 @@ int main(int argc, char **argv) {
         const std::size_t header_bytes = sizeof(ISMRMRD::ImageHeader);
         const std::size_t payload_bytes = n_vox * sizeof(float);
         std::vector<uint8_t> body(header_bytes + payload_bytes);
-        // Reserve the serializer workspace once so large frames do not trigger
-        // incremental growth on every write. consume() below only resets the
-        // readable area and keeps this capacity for reuse.
-        write_buffer.reserve(body.size() + 512);
-
         std::size_t frame_index = 0;
         const std::size_t total_frames = opt.frames;
         const std::size_t log_stride = 30;
@@ -205,11 +198,10 @@ int main(int argc, char **argv) {
                 req.body().size = body.size();
                 req.prepare_payload();
 
+                http::request_serializer<http::buffer_body> serializer{req};
+                serializer.split(true);
                 boost::system::error_code write_ec;
-                http::write(stream, req, write_buffer, write_ec);
-                // Reset the readable view while retaining capacity so the next
-                // request can reuse the same backing allocation.
-                write_buffer.consume(write_buffer.size());
+                http::write(stream, serializer, write_ec);
                 if (write_ec) {
                     std::cerr << "image_streamer: write failed (" << write_ec.message() << "), reconnecting\n";
                     connect_stream("write error");
