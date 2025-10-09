@@ -59,101 +59,12 @@ static double g_recent_fps = 0.0;
 static std::chrono::steady_clock::time_point g_last_frame_time;
 static bool g_have_last_frame_time = false;
 
-struct FrameTask
-{
-    std::string path;
-    size_t frame_index{0};
-    size_t advertised_frames{0};
-};
-
-class FrameQueue
-{
-  public:
-    void push(FrameTask task)
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        pending_[task.path] = std::move(task);
-        cv_.notify_one();
-    }
-
-    bool pop(FrameTask &task)
-    {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait(lock, [&] { return stop_ || !pending_.empty(); });
-        if (pending_.empty())
-            return false;
-        auto it = pending_.begin();
-        task = std::move(it->second);
-        pending_.erase(it);
-        return true;
-    }
-
-    void shutdown()
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        stop_ = true;
-        cv_.notify_all();
-    }
-
-  private:
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    std::unordered_map<std::string, FrameTask> pending_;
-    bool stop_{false};
-};
-
-class SwmrHandle
-{
-  public:
-    explicit SwmrHandle(std::string path) : path_(std::move(path)) {}
-    ~SwmrHandle() { close(); }
-
-    SwmrHandle(const SwmrHandle &) = delete;
-    SwmrHandle &operator=(const SwmrHandle &) = delete;
-
-    bool render_latest(size_t frame_index_hint, size_t advertised_frames);
-
-  private:
-    std::string path_;
-    hid_t file_{-1};
-    hid_t dataset_{-1};
-    std::array<hsize_t, 5> dims_{};
-    hsize_t last_frame_{static_cast<hsize_t>(-1)};
-    bool warned_channel_{false};
-    bool logged_shape_{false};
-    std::vector<float> buffer_;
-
-    bool ensure_open();
-    void close();
-};
-
-class SwmrCache
-{
-  public:
-    std::shared_ptr<SwmrHandle> get(const std::string &path)
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = handles_.find(path);
-        if (it != handles_.end())
-            return it->second;
-        auto handle = std::make_shared<SwmrHandle>(path);
-        handles_.emplace(path, handle);
-        return handle;
-    }
-
-    void clear()
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        handles_.clear();
-    }
-
-  private:
-    std::mutex mutex_;
-    std::unordered_map<std::string, std::shared_ptr<SwmrHandle>> handles_;
-};
-
-static FrameQueue g_frame_queue;
-static SwmrCache g_swmr_cache;
+static void update_volume_image(const std::vector<float> &voxels,
+                                size_t nx,
+                                size_t ny,
+                                size_t nz,
+                                size_t frame_idx,
+                                size_t frame_count);
 
 struct FrameTask
 {
@@ -538,39 +449,6 @@ static void update_volume_image(const std::vector<float> &voxels,
         g_latest_image = std::move(bgr);
         g_status_text = oss.str();
         g_recent_fps = smoothed_fps;
-    }
-}
-
-static void frame_worker_loop()
-{
-    FrameTask task;
-    while (g_frame_queue.pop(task))
-    {
-        auto handle = g_swmr_cache.get(task.path);
-        if (!handle)
-            continue;
-        handle->render_latest(task.frame_index, task.advertised_frames);
-    }
-}
-
-static void enqueue_frame_from_json(const json &j)
-{
-    try
-    {
-        if (!j.contains("path") || !j["path"].is_string())
-            return;
-        if (j.contains("flushed") && j["flushed"].is_boolean() && !j["flushed"].get<bool>())
-            return;
-
-        FrameTask task;
-        task.path = j["path"].get<std::string>();
-        if (j.contains("frame_index") && j["frame_index"].is_number_unsigned())
-            task.frame_index = j["frame_index"].get<uint64_t>();
-        task.advertised_frames = task.frame_index + 1;
-        g_frame_queue.push(std::move(task));
-    }
-    catch (...)
-    {
     }
 }
 

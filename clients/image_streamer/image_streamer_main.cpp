@@ -243,7 +243,8 @@ int main(int argc, char **argv) {
             }
 
             if (opt.interval > 0.0) {
-                next_deadline += std::chrono::duration<double>(opt.interval);
+                next_deadline += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(opt.interval));
                 auto now = std::chrono::steady_clock::now();
                 if (next_deadline > now) {
                     std::this_thread::sleep_until(next_deadline);
