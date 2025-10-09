@@ -58,10 +58,13 @@ pkill -f "/build/marshal" >/dev/null 2>&1 || true
   --ws   0.0.0.0:8090 \
   --data ./data \
   --sink mrd \
+  --flush-max-frames 4 \
+  --flush-max-ms 50 \
   > ./data/marshal_live.log 2>&1 &
-  
+
 MARSHAL_PID=$!
 sleep 1
+# Switch to single-frame flushing with `--flush-max-frames 1 --flush-max-ms 0` if you need the legacy baseline.
 ```
 
 ### 4. Smoke test the HTTP and WebSocket ingress paths
@@ -279,9 +282,12 @@ pkill -f "/build/marshal" >/dev/null 2>&1 || true
   --ws   0.0.0.0:8090 \
   --data ./data \
   --sink mrd \
+  --flush-max-frames 4 \
+  --flush-max-ms 50 \
   > ./data/marshal_replay.log 2>&1 &
 MARSHAL_REP_PID=$!
 sleep 1
+# Revert to single-frame flushing with `--flush-max-frames 1 --flush-max-ms 0` when deterministic visibility is required.
 # Health check (prints JSON {"status":"ok","uptime_s":...})
 curl -fsS http://localhost:8080/health | tee /dev/stderr
 ```

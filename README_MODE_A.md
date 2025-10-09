@@ -39,10 +39,13 @@ pkill -f "/build/marshal" >/dev/null 2>&1 || true
   --ws   0.0.0.0:8090 \
   --data ./data \
   --sink mrd \
+  --flush-max-frames 4 \
+  --flush-max-ms 50 \
   > ./data/marshal_live.log 2>&1 &
 
 MARSHAL_PID=$!
 sleep 1
+# Switch to the single-flush baseline with `--flush-max-frames 1 --flush-max-ms 0` when minimal latency is required.
 ```
 
 ## 4. Verify the service is healthy

@@ -55,6 +55,105 @@ static bool g_has_pose = false;
 static std::string g_status_text;
 static constexpr size_t kMaxPoseTrail = 256;
 static std::atomic<bool> g_display_running{true};
+static double g_recent_fps = 0.0;
+static std::chrono::steady_clock::time_point g_last_frame_time;
+static bool g_have_last_frame_time = false;
+
+struct FrameTask
+{
+    std::string path;
+    size_t frame_index{0};
+    size_t advertised_frames{0};
+};
+
+class FrameQueue
+{
+  public:
+    void push(FrameTask task)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_[task.path] = std::move(task);
+        cv_.notify_one();
+    }
+
+    bool pop(FrameTask &task)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [&] { return stop_ || !pending_.empty(); });
+        if (pending_.empty())
+            return false;
+        auto it = pending_.begin();
+        task = std::move(it->second);
+        pending_.erase(it);
+        return true;
+    }
+
+    void shutdown()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_ = true;
+        cv_.notify_all();
+    }
+
+  private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::unordered_map<std::string, FrameTask> pending_;
+    bool stop_{false};
+};
+
+class SwmrHandle
+{
+  public:
+    explicit SwmrHandle(std::string path) : path_(std::move(path)) {}
+    ~SwmrHandle() { close(); }
+
+    SwmrHandle(const SwmrHandle &) = delete;
+    SwmrHandle &operator=(const SwmrHandle &) = delete;
+
+    bool render_latest(size_t frame_index_hint, size_t advertised_frames);
+
+  private:
+    std::string path_;
+    hid_t file_{-1};
+    hid_t dataset_{-1};
+    std::array<hsize_t, 5> dims_{};
+    hsize_t last_frame_{static_cast<hsize_t>(-1)};
+    bool warned_channel_{false};
+    bool logged_shape_{false};
+    std::vector<float> buffer_;
+
+    bool ensure_open();
+    void close();
+};
+
+class SwmrCache
+{
+  public:
+    std::shared_ptr<SwmrHandle> get(const std::string &path)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = handles_.find(path);
+        if (it != handles_.end())
+            return it->second;
+        auto handle = std::make_shared<SwmrHandle>(path);
+        handles_.emplace(path, handle);
+        return handle;
+    }
+
+    void clear()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        handles_.clear();
+    }
+
+  private:
+    std::mutex mutex_;
+    std::unordered_map<std::string, std::shared_ptr<SwmrHandle>> handles_;
+};
+
+static FrameQueue g_frame_queue;
+static SwmrCache g_swmr_cache;
 
 struct FrameTask
 {
@@ -400,6 +499,33 @@ static void update_volume_image(const std::vector<float> &voxels,
     cv::Mat bgr;
     cv::cvtColor(gray, bgr, cv::COLOR_GRAY2BGR);
 
+    static double smoothed_fps_internal = 0.0;
+    double smoothed_fps = smoothed_fps_internal;
+    double instant_fps = 0.0;
+    const auto now = std::chrono::steady_clock::now();
+    if (g_have_last_frame_time)
+    {
+        const double delta = std::chrono::duration<double>(now - g_last_frame_time).count();
+        if (delta > 1e-6)
+            instant_fps = 1.0 / delta;
+    }
+    g_last_frame_time = now;
+    g_have_last_frame_time = true;
+    if (instant_fps > 0.0)
+    {
+        if (smoothed_fps <= 0.0)
+            smoothed_fps = instant_fps;
+        else
+            smoothed_fps = 0.8 * smoothed_fps + 0.2 * instant_fps;
+    }
+    else if (smoothed_fps > 0.0)
+    {
+        smoothed_fps = 0.95 * smoothed_fps;
+        if (smoothed_fps < 0.01)
+            smoothed_fps = 0.0;
+    }
+    smoothed_fps_internal = smoothed_fps;
+
     std::ostringstream oss;
     oss << "Frame " << (frame_idx + 1) << "/" << frame_count
         << "  size=" << nx << "x" << ny << "x" << nz
@@ -411,6 +537,40 @@ static void update_volume_image(const std::vector<float> &voxels,
         std::scoped_lock lk(g_viz_mutex);
         g_latest_image = std::move(bgr);
         g_status_text = oss.str();
+        g_recent_fps = smoothed_fps;
+    }
+}
+
+static void frame_worker_loop()
+{
+    FrameTask task;
+    while (g_frame_queue.pop(task))
+    {
+        auto handle = g_swmr_cache.get(task.path);
+        if (!handle)
+            continue;
+        handle->render_latest(task.frame_index, task.advertised_frames);
+    }
+}
+
+static void enqueue_frame_from_json(const json &j)
+{
+    try
+    {
+        if (!j.contains("path") || !j["path"].is_string())
+            return;
+        if (j.contains("flushed") && j["flushed"].is_boolean() && !j["flushed"].get<bool>())
+            return;
+
+        FrameTask task;
+        task.path = j["path"].get<std::string>();
+        if (j.contains("frame_index") && j["frame_index"].is_number_unsigned())
+            task.frame_index = j["frame_index"].get<uint64_t>();
+        task.advertised_frames = task.frame_index + 1;
+        g_frame_queue.push(std::move(task));
+    }
+    catch (...)
+    {
     }
 }
 
@@ -518,6 +678,7 @@ static void display_loop()
         std::string status;
         std::array<double, 3> pose{};
         bool has_pose = false;
+        double fps_value = 0.0;
 
         {
             std::scoped_lock lk(g_viz_mutex);
@@ -527,6 +688,7 @@ static void display_loop()
             status = g_status_text;
             pose = g_last_pose;
             has_pose = g_has_pose;
+            fps_value = g_recent_fps;
         }
 
         if (frame.empty())
@@ -544,6 +706,20 @@ static void display_loop()
                             cv::Scalar(0, 0, 0), 2, cv::LINE_AA);
                 cv::putText(frame, status, cv::Point(10, 20), cv::FONT_HERSHEY_SIMPLEX, 0.45,
                             cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
+            }
+            if (fps_value > 0.0)
+            {
+                std::ostringstream fps_oss;
+                fps_oss << std::fixed << std::setprecision(1) << fps_value << " fps";
+                const auto fps_text = fps_oss.str();
+                cv::Point origin(10, status.empty() ? 20 : 40);
+                if (!status.empty())
+                {
+                    cv::putText(frame, fps_text, origin, cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                                cv::Scalar(0, 0, 0), 2, cv::LINE_AA);
+                }
+                cv::putText(frame, fps_text, origin, cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                            cv::Scalar(0, 255, 255), 1, cv::LINE_AA);
             }
             if (has_pose)
             {
