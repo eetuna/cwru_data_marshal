@@ -123,6 +123,7 @@ private:
                         res.set(http::field::content_type, "application/json");
                         res.body() = json{{"error", "request body exceeds limit"}, {"limit_bytes", kMaxHttpBodyBytes}}.dump();
                         res.prepare_payload();
+                        res.keep_alive(false);
                         self->respond(std::move(res));
                     }
                     return;
@@ -132,17 +133,27 @@ private:
                 self->handle(); });
         }
 
-        // FIX: keep response alive through async_write
         void respond(http::response<http::string_body> &&res)
         {
             auto self = shared_from_this();
+            const bool keep_alive = req.keep_alive() && res.keep_alive();
             auto sp = std::make_shared<http::response<http::string_body>>(std::move(res));
             sp->set(http::field::server, "marshal-beast");
+            sp->keep_alive(keep_alive);
 
-            http::async_write(socket, *sp, [self, sp](boost::beast::error_code, std::size_t)
+            http::async_write(socket, *sp, [self, sp, keep_alive](boost::beast::error_code, std::size_t)
                               {
                 boost::system::error_code ignored;
-                self->socket.shutdown(boost::asio::ip::tcp::socket::shutdown_send, ignored); });
+                if (keep_alive)
+                {
+                    self->do_read();
+                }
+                else
+                {
+                    self->socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored);
+                    self->socket.close(ignored);
+                }
+            });
         }
 
         // crude parser for ?ts=…&limit=…

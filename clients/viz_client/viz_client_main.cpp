@@ -646,11 +646,7 @@ int main(int argc, char **argv)
 
     fs::path latest = fs::path(data) / "latest.json";
     if (!fs::exists(latest))
-    {
-        std::cerr << "viz: waiting for latest.json...\n";
-        while (!fs::exists(latest))
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-    }
+        std::cerr << "viz: latest.json not found yet; waiting for frames while continuing setup...\n";
 
     // --- Poll latest.json forever ---
     std::thread poll([&]()
