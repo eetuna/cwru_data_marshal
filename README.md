@@ -48,8 +48,9 @@ failure handling much easier.
    cmake --build build -j"$(nproc)"
    ```
 3. **Pick a sink:**
-   - Live MRD files: `./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink mrd`.
+   - Live MRD files: `./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink mrd --flush-max-frames 4 --flush-max-ms 50`.
    - Record-only dumpbox: `./build/marshal --http ... --sink dumpbox --dumpbox-root ./data/dumpbox`.
+   - Use `--flush-max-frames 1 --flush-max-ms 0` with the MRD sink to force single-frame flushing when latency outweighs throughput.
 4. **Ingest data:**
    - Upload MRD files via `POST /v1/mrd/ingest` (curl examples below).
    - Append SWMR frames via `POST /v1/ismrmrd/frame` with ISMRMRD image
@@ -121,8 +122,9 @@ and the focused commands needed to run them individually.
 pkill -f "/build/marshal" >/dev/null 2>&1 || true
 
 # Start server in MRD sink
-./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink mrd &
+./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink mrd --flush-max-frames 4 --flush-max-ms 50 &
 sleep 1
+# Use `--flush-max-frames 1 --flush-max-ms 0` if you need the legacy single-frame flush baseline.
 curl -s http://localhost:8080/health    # expect JSON {"status":"ok","uptime_s":...}
 
 # Ingest two files (dummy fallback shown)
@@ -206,8 +208,9 @@ find "$SESSION_DIR" -maxdepth 2 -type f -print
 
 # REPLAY: restart server in MRD sink and play back the session
 pkill -f "/build/marshal" >/dev/null 2>&1 || true
-./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink mrd &
+./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink mrd --flush-max-frames 4 --flush-max-ms 50 &
 sleep 1
+# Legacy single-flush behavior is available with `--flush-max-frames 1 --flush-max-ms 0` if required for latency-sensitive runs.
 ./build/playback --http http://localhost:8080 --data "$SESSION_DIR" --speed 1.0
 
 # Verify MRDs rebuilt for clients
@@ -256,6 +259,10 @@ broadcast topics are covered there as well.
 - `--sink <mrd|dumpbox>`
 - `--dumpbox-root <path>` (only in dumpbox mode; default `/data/dumpbox`)
 - `--dumpbox-session <name>` (optional; auto UTC ISO if omitted)
+- `--flush-max-frames <N>` (default `4`) — coalesce up to *N* frames before
+  forcing an HDF5 flush when running in MRD mode.
+- `--flush-max-ms <ms>` (default `50`) — maximum wall-clock delay before the
+  marshal flushes pending SWMR data.
 
 **playback**
 - `--http http://host:port` (marshal base)

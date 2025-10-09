@@ -17,7 +17,7 @@ x-build-command: &build-command "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE
 services:
   marshal:
     build: *build-dev
-    command: bash -lc "${BUILD_CMD:-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build} && ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data /data"
+    command: bash -lc "${BUILD_CMD:-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build} && ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data /data --sink mrd --flush-max-frames 4 --flush-max-ms 50"
     environment:
       BUILD_CMD: *build-command
     ports:

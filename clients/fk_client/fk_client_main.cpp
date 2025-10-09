@@ -44,7 +44,9 @@ int main(int argc, char **argv)
     auto port = hp.substr(host.size() + 1);
     auto results = res.resolve(host, port);
 
-    for (int k = 0; k < 50; ++k)
+    constexpr int total_samples = 200;
+    const double two_pi = 2.0 * std::acos(-1.0);
+    for (int k = 0; k < total_samples; ++k)
     {
         boost::asio::ip::tcp::socket sock{ioc};
         boost::asio::connect(sock, results.begin(), results.end());
@@ -55,7 +57,7 @@ int main(int argc, char **argv)
 
         // Minimal valid payload the server wants: p (vec3), R (3x3 matrix)
         // Drive both translation and yaw with smooth sinusoids.
-        const double t = 0.1 * static_cast<double>(k);
+        const double t = two_pi * static_cast<double>(k) / static_cast<double>(total_samples);
         const double radius = 0.05;
         const double px = radius * std::sin(t);
         const double py = radius * std::cos(t);

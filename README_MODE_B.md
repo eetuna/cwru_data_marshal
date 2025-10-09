@@ -142,10 +142,13 @@ pkill -f "/build/marshal" >/dev/null 2>&1 || true
   --ws   0.0.0.0:8090 \
   --data ./data \
   --sink mrd \
+  --flush-max-frames 4 \
+  --flush-max-ms 50 \
   > ./data/marshal_replay.log 2>&1 &
 
 MARSHAL_REP_PID=$!
 sleep 1
+# Set `--flush-max-frames 1 --flush-max-ms 0` if you must mirror the single-frame flush baseline for latency-critical replay.
 ```
 
 ### 9. Confirm the service is ready

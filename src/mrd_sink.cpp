@@ -121,8 +121,13 @@ MrdFile::MrdFile(const std::filesystem::path &path,
                  const std::string &stream_id,
                  ElementType type,
                  const ImageDimensions &dims,
-                 std::string header_xml)
-    : path_(path), stream_id_(stream_id), type_(type), dims_(dims), header_xml_(std::move(header_xml))
+                 std::string header_xml,
+                 FlushPolicy flush_policy)
+    : path_(path),
+      stream_id_(stream_id),
+      type_(type),
+      dims_(dims),
+      header_xml_(std::move(header_xml))
 {
     if (dims_.spatial[0] == 0 || dims_.spatial[1] == 0 || dims_.channels == 0)
         throw std::runtime_error("invalid MRD dimensions");
@@ -131,12 +136,24 @@ MrdFile::MrdFile(const std::filesystem::path &path,
     frame_bytes_ = element_type_bytes(type_) * static_cast<size_t>(dims_.spatial[0]) *
                    static_cast<size_t>(dims_.spatial[1]) * static_cast<size_t>(dims_.spatial[2]) *
                    static_cast<size_t>(dims_.channels);
+    set_flush_policy(flush_policy);
     open();
 }
 
 MrdFile::~MrdFile()
 {
     close();
+}
+
+void MrdFile::set_flush_policy(FlushPolicy policy)
+{
+    if (policy.max_pending_frames == 0)
+        policy.max_pending_frames = 1;
+    if (policy.max_pending_interval < std::chrono::milliseconds{0})
+        policy.max_pending_interval = std::chrono::milliseconds{0};
+    flush_policy_ = policy;
+    frames_since_flush_ = 0;
+    last_flush_ = std::chrono::steady_clock::now();
 }
 
 void MrdFile::open()
@@ -264,6 +281,7 @@ void MrdFile::open()
 
 void MrdFile::close()
 {
+    perform_flush(true);
     if (dataset_ >= 0)
     {
         H5Dclose(dataset_);
@@ -318,10 +336,8 @@ FrameAppendResult MrdFile::append_frame(const void *data, size_t bytes)
     H5Sclose(memspace);
     H5Sclose(filespace);
 
-    if (H5Dflush(dataset_) < 0)
-        throw std::runtime_error("H5Dflush failed");
-    if (H5Fflush(file_, H5F_SCOPE_GLOBAL) < 0)
-        throw std::runtime_error("H5Fflush failed");
+    frames_since_flush_++;
+    const bool flushed = perform_flush(false);
 
     FrameAppendResult result;
     result.file_path = path_;
@@ -331,9 +347,43 @@ FrameAppendResult MrdFile::append_frame(const void *data, size_t bytes)
     result.element_type = type_;
     result.dims = dims_;
     result.timestamp = iso8601_now_ms();
+    result.flushed = flushed;
 
     frames_++;
     return result;
+}
+
+bool MrdFile::perform_flush(bool force)
+{
+    if (dataset_ < 0 || file_ < 0)
+        return false;
+
+    bool should_flush = force;
+    if (!should_flush)
+    {
+        if (frames_since_flush_ >= flush_policy_.max_pending_frames)
+        {
+            should_flush = true;
+        }
+        else if (flush_policy_.max_pending_interval.count() > 0)
+        {
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_flush_ >= flush_policy_.max_pending_interval)
+                should_flush = true;
+        }
+    }
+
+    if (!should_flush)
+        return false;
+
+    if (H5Dflush(dataset_) < 0)
+        throw std::runtime_error("H5Dflush failed");
+    if (H5Fflush(file_, H5F_SCOPE_LOCAL) < 0)
+        throw std::runtime_error("H5Fflush failed");
+
+    frames_since_flush_ = 0;
+    last_flush_ = std::chrono::steady_clock::now();
+    return true;
 }
 
 MrdSink::MrdSink(MarshalState &state)
@@ -377,11 +427,23 @@ std::shared_ptr<MrdSink::StreamState> MrdSink::ensure_stream(const std::string &
             state->header_xml = std::move(next_header);
 
             auto file_path = make_stream_file_path(state->sink_root, state->canonical_name, state->dims, state->generation);
-            state->file = std::make_unique<MrdFile>(file_path, stream_id, state->type, state->dims, state->header_xml);
+            state->flush_policy = state_.flush_policy;
+            state->file = std::make_unique<MrdFile>(file_path, stream_id, state->type, state->dims, state->header_xml, state->flush_policy);
         }
         else if (!header_xml.empty() && state->header_xml.empty())
         {
             state->header_xml = std::string(header_xml);
+        }
+
+        {
+            std::lock_guard<std::mutex> state_guard(state->mutex);
+            if (state->flush_policy.max_pending_frames != state_.flush_policy.max_pending_frames ||
+                state->flush_policy.max_pending_interval != state_.flush_policy.max_pending_interval)
+            {
+                state->flush_policy = state_.flush_policy;
+                if (state->file)
+                    state->file->set_flush_policy(state->flush_policy);
+            }
         }
 
         return state;
@@ -396,9 +458,10 @@ std::shared_ptr<MrdSink::StreamState> MrdSink::ensure_stream(const std::string &
     state->canonical_name = canonical;
     state->sink_root = sink_root;
     state->generation = 0;
+    state->flush_policy = state_.flush_policy;
 
     auto file_path = make_stream_file_path(state->sink_root, state->canonical_name, state->dims, state->generation);
-    state->file = std::make_unique<MrdFile>(file_path, stream_id, state->type, state->dims, state->header_xml);
+    state->file = std::make_unique<MrdFile>(file_path, stream_id, state->type, state->dims, state->header_xml, state->flush_policy);
 
     streams_.emplace(stream_id, state);
     return state;
@@ -484,6 +547,7 @@ nlohmann::json MrdSink::make_entry_json(const FrameAppendResult &result) const
         {"stream", result.stream_id},
         {"ts", result.timestamp},
         {"frame_index", result.frame_index},
+        {"flushed", result.flushed},
         {"element_type", element_type_string(result.element_type)},
         {"dims", dims_json},
         {"size_bytes", result.bytes}};

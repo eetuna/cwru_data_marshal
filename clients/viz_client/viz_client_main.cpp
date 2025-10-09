@@ -5,6 +5,8 @@
 #include <chrono>
 #include <mutex>
 #include <deque>
+#include <condition_variable>
+#include <unordered_map>
 #include <sstream>
 #include <iomanip>
 #include <array>
@@ -53,6 +55,105 @@ static bool g_has_pose = false;
 static std::string g_status_text;
 static constexpr size_t kMaxPoseTrail = 256;
 static std::atomic<bool> g_display_running{true};
+static double g_recent_fps = 0.0;
+static std::chrono::steady_clock::time_point g_last_frame_time;
+static bool g_have_last_frame_time = false;
+
+struct FrameTask
+{
+    std::string path;
+    size_t frame_index{0};
+    size_t advertised_frames{0};
+};
+
+class FrameQueue
+{
+  public:
+    void push(FrameTask task)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_[task.path] = std::move(task);
+        cv_.notify_one();
+    }
+
+    bool pop(FrameTask &task)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [&] { return stop_ || !pending_.empty(); });
+        if (pending_.empty())
+            return false;
+        auto it = pending_.begin();
+        task = std::move(it->second);
+        pending_.erase(it);
+        return true;
+    }
+
+    void shutdown()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_ = true;
+        cv_.notify_all();
+    }
+
+  private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::unordered_map<std::string, FrameTask> pending_;
+    bool stop_{false};
+};
+
+class SwmrHandle
+{
+  public:
+    explicit SwmrHandle(std::string path) : path_(std::move(path)) {}
+    ~SwmrHandle() { close(); }
+
+    SwmrHandle(const SwmrHandle &) = delete;
+    SwmrHandle &operator=(const SwmrHandle &) = delete;
+
+    bool render_latest(size_t frame_index_hint, size_t advertised_frames);
+
+  private:
+    std::string path_;
+    hid_t file_{-1};
+    hid_t dataset_{-1};
+    std::array<hsize_t, 5> dims_{};
+    hsize_t last_frame_{static_cast<hsize_t>(-1)};
+    bool warned_channel_{false};
+    bool logged_shape_{false};
+    std::vector<float> buffer_;
+
+    bool ensure_open();
+    void close();
+};
+
+class SwmrCache
+{
+  public:
+    std::shared_ptr<SwmrHandle> get(const std::string &path)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = handles_.find(path);
+        if (it != handles_.end())
+            return it->second;
+        auto handle = std::make_shared<SwmrHandle>(path);
+        handles_.emplace(path, handle);
+        return handle;
+    }
+
+    void clear()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        handles_.clear();
+    }
+
+  private:
+    std::mutex mutex_;
+    std::unordered_map<std::string, std::shared_ptr<SwmrHandle>> handles_;
+};
+
+static FrameQueue g_frame_queue;
+static SwmrCache g_swmr_cache;
 
 static void recompute_pose_bounds(PoseHistory &history)
 {
@@ -118,6 +219,158 @@ static void record_pose_from_json(const json &j)
     record_pose_point(x, y, z);
 }
 
+bool SwmrHandle::ensure_open()
+{
+    if (file_ >= 0 && dataset_ >= 0)
+        return true;
+
+    close();
+
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    if (fapl < 0)
+        return false;
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
+    H5Pset_fclose_degree(fapl, H5F_CLOSE_SEMI);
+
+    file_ = H5Fopen(path_.c_str(), H5F_ACC_RDONLY | H5F_ACC_SWMR_READ, fapl);
+    H5Pclose(fapl);
+    if (file_ < 0)
+        return false;
+
+    dataset_ = H5Dopen2(file_, "/images/data", H5P_DEFAULT);
+    if (dataset_ < 0)
+    {
+        close();
+        return false;
+    }
+
+    last_frame_ = static_cast<hsize_t>(-1);
+    warned_channel_ = false;
+    logged_shape_ = false;
+    return true;
+}
+
+void SwmrHandle::close()
+{
+    if (dataset_ >= 0)
+    {
+        H5Dclose(dataset_);
+        dataset_ = -1;
+    }
+    if (file_ >= 0)
+    {
+        H5Fclose(file_);
+        file_ = -1;
+    }
+}
+
+bool SwmrHandle::render_latest(size_t frame_index_hint, size_t advertised_frames)
+{
+    for (int attempt = 0; attempt < 2; ++attempt)
+    {
+        if (!ensure_open())
+            return false;
+
+        if (H5Drefresh(dataset_) < 0)
+        {
+            close();
+            continue;
+        }
+
+        hid_t space = H5Dget_space(dataset_);
+        if (space < 0)
+        {
+            close();
+            continue;
+        }
+
+        if (H5Sget_simple_extent_ndims(space) != 5)
+        {
+            H5Sclose(space);
+            close();
+            return false;
+        }
+
+        std::array<hsize_t, 5> dims{};
+        if (H5Sget_simple_extent_dims(space, dims.data(), nullptr) < 0)
+        {
+            H5Sclose(space);
+            close();
+            continue;
+        }
+
+        hsize_t frames = dims[0];
+        if (frames == 0)
+        {
+            H5Sclose(space);
+            return false;
+        }
+
+        hsize_t target = static_cast<hsize_t>(frame_index_hint);
+        if (target >= frames)
+            target = frames - 1;
+        if (target == last_frame_)
+        {
+            H5Sclose(space);
+            return false;
+        }
+
+        if (dims[1] > 1 && !warned_channel_)
+        {
+            std::cerr << "viz: only first channel rendered (" << dims[1] << " available)\n";
+            warned_channel_ = true;
+        }
+
+        if (!logged_shape_ || dims != dims_)
+        {
+            std::cout << "viz swmr: frames=" << frames
+                      << " channels=" << dims[1]
+                      << " shape=" << dims[4] << "x" << dims[3] << "x" << dims[2]
+                      << "\n";
+            dims_ = dims;
+            logged_shape_ = true;
+        }
+
+        hsize_t start[5] = {target, 0, 0, 0, 0};
+        hsize_t count[5] = {1, 1, dims[2], dims[3], dims[4]};
+        if (H5Sselect_hyperslab(space, H5S_SELECT_SET, start, nullptr, count, nullptr) < 0)
+        {
+            H5Sclose(space);
+            close();
+            continue;
+        }
+
+        hsize_t mem_dims[5] = {1, 1, dims[2], dims[3], dims[4]};
+        hid_t memspace = H5Screate_simple(5, mem_dims, nullptr);
+        if (memspace < 0)
+        {
+            H5Sclose(space);
+            close();
+            continue;
+        }
+
+        buffer_.resize(static_cast<size_t>(dims[2] * dims[3] * dims[4]));
+        if (H5Dread(dataset_, H5T_NATIVE_FLOAT, memspace, space, H5P_DEFAULT, buffer_.data()) < 0)
+        {
+            H5Sclose(memspace);
+            H5Sclose(space);
+            close();
+            continue;
+        }
+
+        H5Sclose(memspace);
+        H5Sclose(space);
+
+        last_frame_ = target;
+        size_t total_frames = std::max<size_t>(static_cast<size_t>(frames), advertised_frames);
+        update_volume_image(buffer_, static_cast<size_t>(dims[4]), static_cast<size_t>(dims[3]), static_cast<size_t>(dims[2]),
+                            static_cast<size_t>(target), total_frames);
+        return true;
+    }
+
+    return false;
+}
+
 static void update_volume_image(const std::vector<float> &voxels,
                                 size_t nx,
                                 size_t ny,
@@ -128,39 +381,54 @@ static void update_volume_image(const std::vector<float> &voxels,
     if (voxels.empty() || nx == 0 || ny == 0)
         return;
 
-    std::vector<float> projection(nx * ny, std::numeric_limits<float>::lowest());
+    const size_t plane = nx * ny;
+    std::vector<float> projection(plane, std::numeric_limits<float>::lowest());
     for (size_t z = 0; z < nz; ++z)
     {
-        for (size_t y = 0; y < ny; ++y)
-        {
-            for (size_t x = 0; x < nx; ++x)
-            {
-                size_t idx = z * ny * nx + y * nx + x;
-                auto &dst = projection[y * nx + x];
-                dst = std::max(dst, voxels[idx]);
-            }
-        }
+        const float *src = voxels.data() + z * plane;
+        for (size_t i = 0; i < plane; ++i)
+            projection[i] = std::max(projection[i], src[i]);
     }
 
-    auto [min_it, max_it] = std::minmax_element(projection.begin(), projection.end());
-    float min_v = (min_it != projection.end()) ? *min_it : 0.f;
-    float max_v = (max_it != projection.end()) ? *max_it : 1.f;
-    float span = std::max(1e-6f, max_v - min_v);
+    cv::Mat proj_mat(static_cast<int>(ny), static_cast<int>(nx), CV_32F, projection.data());
+    double min_v = 0.0;
+    double max_v = 0.0;
+    cv::minMaxLoc(proj_mat, &min_v, &max_v);
+    double scale = (max_v > min_v) ? 255.0 / (max_v - min_v) : 1.0;
+    double shift = -min_v * scale;
 
-    cv::Mat gray(static_cast<int>(ny), static_cast<int>(nx), CV_8UC1);
-    for (size_t y = 0; y < ny; ++y)
-    {
-        auto *row = gray.ptr<uint8_t>(static_cast<int>(y));
-        for (size_t x = 0; x < nx; ++x)
-        {
-            float norm = (projection[y * nx + x] - min_v) / span;
-            norm = std::clamp(norm, 0.0f, 1.0f);
-            row[x] = static_cast<uint8_t>(norm * 255.f);
-        }
-    }
+    cv::Mat gray;
+    proj_mat.convertTo(gray, CV_8U, scale, shift);
 
     cv::Mat bgr;
     cv::cvtColor(gray, bgr, cv::COLOR_GRAY2BGR);
+
+    static double smoothed_fps_internal = 0.0;
+    double smoothed_fps = smoothed_fps_internal;
+    double instant_fps = 0.0;
+    const auto now = std::chrono::steady_clock::now();
+    if (g_have_last_frame_time)
+    {
+        const double delta = std::chrono::duration<double>(now - g_last_frame_time).count();
+        if (delta > 1e-6)
+            instant_fps = 1.0 / delta;
+    }
+    g_last_frame_time = now;
+    g_have_last_frame_time = true;
+    if (instant_fps > 0.0)
+    {
+        if (smoothed_fps <= 0.0)
+            smoothed_fps = instant_fps;
+        else
+            smoothed_fps = 0.8 * smoothed_fps + 0.2 * instant_fps;
+    }
+    else if (smoothed_fps > 0.0)
+    {
+        smoothed_fps = 0.95 * smoothed_fps;
+        if (smoothed_fps < 0.01)
+            smoothed_fps = 0.0;
+    }
+    smoothed_fps_internal = smoothed_fps;
 
     std::ostringstream oss;
     oss << "Frame " << (frame_idx + 1) << "/" << frame_count
@@ -173,6 +441,40 @@ static void update_volume_image(const std::vector<float> &voxels,
         std::scoped_lock lk(g_viz_mutex);
         g_latest_image = std::move(bgr);
         g_status_text = oss.str();
+        g_recent_fps = smoothed_fps;
+    }
+}
+
+static void frame_worker_loop()
+{
+    FrameTask task;
+    while (g_frame_queue.pop(task))
+    {
+        auto handle = g_swmr_cache.get(task.path);
+        if (!handle)
+            continue;
+        handle->render_latest(task.frame_index, task.advertised_frames);
+    }
+}
+
+static void enqueue_frame_from_json(const json &j)
+{
+    try
+    {
+        if (!j.contains("path") || !j["path"].is_string())
+            return;
+        if (j.contains("flushed") && j["flushed"].is_boolean() && !j["flushed"].get<bool>())
+            return;
+
+        FrameTask task;
+        task.path = j["path"].get<std::string>();
+        if (j.contains("frame_index") && j["frame_index"].is_number_unsigned())
+            task.frame_index = j["frame_index"].get<uint64_t>();
+        task.advertised_frames = task.frame_index + 1;
+        g_frame_queue.push(std::move(task));
+    }
+    catch (...)
+    {
     }
 }
 
@@ -247,6 +549,7 @@ static void display_loop()
         std::string status;
         std::array<double, 3> pose{};
         bool has_pose = false;
+        double fps_value = 0.0;
 
         {
             std::scoped_lock lk(g_viz_mutex);
@@ -256,6 +559,7 @@ static void display_loop()
             status = g_status_text;
             pose = g_last_pose;
             has_pose = g_has_pose;
+            fps_value = g_recent_fps;
         }
 
         if (frame.empty())
@@ -273,6 +577,20 @@ static void display_loop()
                             cv::Scalar(0, 0, 0), 2, cv::LINE_AA);
                 cv::putText(frame, status, cv::Point(10, 20), cv::FONT_HERSHEY_SIMPLEX, 0.45,
                             cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
+            }
+            if (fps_value > 0.0)
+            {
+                std::ostringstream fps_oss;
+                fps_oss << std::fixed << std::setprecision(1) << fps_value << " fps";
+                const auto fps_text = fps_oss.str();
+                cv::Point origin(10, status.empty() ? 20 : 40);
+                if (!status.empty())
+                {
+                    cv::putText(frame, fps_text, origin, cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                                cv::Scalar(0, 0, 0), 2, cv::LINE_AA);
+                }
+                cv::putText(frame, fps_text, origin, cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                            cv::Scalar(0, 255, 255), 1, cv::LINE_AA);
             }
             if (has_pose)
             {
@@ -292,7 +610,7 @@ static void display_loop()
 
         cv::imshow("viz_client", frame);
 
-        int key = cv::waitKey(30);
+        int key = cv::waitKey(1);
         if (key == 27) // ESC
         {
             g_display_running.store(false);
@@ -300,89 +618,6 @@ static void display_loop()
     }
 
     cv::destroyWindow("viz_client");
-}
-
-static void inspect_swmr_file(const std::string &path)
-{
-    if (path.empty())
-        return;
-    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
-    if (fapl < 0)
-        return;
-    H5Pset_libver_bounds(fapl, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
-    H5Pset_fclose_degree(fapl, H5F_CLOSE_SEMI);
-    hid_t file = H5Fopen(path.c_str(), H5F_ACC_RDONLY | H5F_ACC_SWMR_READ, fapl);
-    H5Pclose(fapl);
-    if (file < 0)
-    {
-        std::cerr << "viz: unable to open SWMR file " << path << "\n";
-        return;
-    }
-    hid_t dset = H5Dopen2(file, "/images/data", H5P_DEFAULT);
-    if (dset < 0)
-    {
-        std::cerr << "viz: /images/data dataset missing in " << path << "\n";
-        H5Fclose(file);
-        return;
-    }
-    if (H5Drefresh(dset) < 0)
-    {
-        std::cerr << "viz: H5Drefresh failed for " << path << "\n";
-    }
-    hid_t space = H5Dget_space(dset);
-    if (space < 0)
-    {
-        std::cerr << "viz: cannot read dataset space" << std::endl;
-        H5Dclose(dset);
-        H5Fclose(file);
-        return;
-    }
-    int rank = H5Sget_simple_extent_ndims(space);
-    std::vector<hsize_t> dims(rank, 0);
-    if (rank > 0)
-        H5Sget_simple_extent_dims(space, dims.data(), nullptr);
-
-    if (dims.size() == 5 && dims[0] > 0)
-    {
-        const hsize_t frames = dims[0];
-        const hsize_t channels = dims[1];
-        const hsize_t nz = dims[2];
-        const hsize_t ny = dims[3];
-        const hsize_t nx = dims[4];
-
-        hsize_t mem_dims[5] = {1, 1, nz, ny, nx};
-        hid_t memspace = H5Screate_simple(5, mem_dims, nullptr);
-        if (memspace >= 0)
-        {
-            std::vector<float> voxels(static_cast<size_t>(nz * ny * nx));
-            hsize_t start[5] = {frames - 1, 0, 0, 0, 0};
-            hsize_t count[5] = {1, 1, nz, ny, nx};
-            if (H5Sselect_hyperslab(space, H5S_SELECT_SET, start, nullptr, count, nullptr) >= 0)
-            {
-                if (channels > 1)
-                {
-                    std::cerr << "viz: only first channel rendered (" << channels << " available)\n";
-                }
-                if (H5Dread(dset, H5T_NATIVE_FLOAT, memspace, space, H5P_DEFAULT, voxels.data()) >= 0)
-                {
-                    update_volume_image(voxels, nx, ny, nz, frames - 1, frames);
-                }
-                else
-                {
-                    std::cerr << "viz: H5Dread failed for " << path << "\n";
-                }
-            }
-            H5Sclose(memspace);
-        }
-        std::cout << "viz swmr: frames=" << frames
-                  << " channels=" << channels
-                  << " shape=" << nx << "x" << ny << "x" << nz
-                  << "\n";
-    }
-
-    H5Sclose(space);
-    H5Dclose(dset);
-    H5Fclose(file);
 }
 
 int main(int argc, char **argv)
@@ -400,6 +635,7 @@ int main(int argc, char **argv)
     }
 
     std::thread display_thread(display_loop);
+    std::thread frame_thread(frame_worker_loop);
 
     fs::path latest = fs::path(data) / "latest.json";
     if (!fs::exists(latest))
@@ -425,17 +661,15 @@ int main(int argc, char **argv)
                         std::ifstream lf(latest);
                         json lj;
                         lf >> lj;
-                        std::cout << "viz latest=" << lj.dump() << "\n";
-                        if (lj.contains("frame_index") && lj.contains("path"))
+                        bool log_entry = true;
+                        if (lj.contains("frame_index") && lj["frame_index"].is_number_unsigned())
                         {
-                            try
-                            {
-                                inspect_swmr_file(lj["path"].get<std::string>());
-                            }
-                            catch (...)
-                            {
-                            }
+                            auto idx = lj["frame_index"].get<uint64_t>();
+                            log_entry = (idx % 30 == 0);
                         }
+                        if (log_entry)
+                            std::cout << "viz latest=" << lj.dump() << "\n";
+                        enqueue_frame_from_json(lj);
                         last = wt;
                     }
                 }
@@ -481,7 +715,14 @@ int main(int argc, char **argv)
             auto j = json::parse(s, nullptr, false);
             if (j.is_object())
             {
-                std::cout << "viz ws: " << j.dump() << "\n";
+                bool log_entry = true;
+                if (j.contains("frame_index") && j["frame_index"].is_number_unsigned())
+                {
+                    auto idx = j["frame_index"].get<uint64_t>();
+                    log_entry = (idx % 30 == 0);
+                }
+                if (log_entry)
+                    std::cout << "viz ws: " << j.dump() << "\n";
                 if (j.contains("type") && j["type"].is_string())
                 {
                     auto type = j["type"].get<std::string>();
@@ -496,16 +737,7 @@ int main(int argc, char **argv)
                         }
                     }
                 }
-                if (j.contains("frame_index") && j.contains("path"))
-                {
-                    try
-                    {
-                        inspect_swmr_file(j["path"].get<std::string>());
-                    }
-                    catch (...)
-                    {
-                    }
-                }
+                enqueue_frame_from_json(j);
             }
         }
     }
@@ -515,9 +747,13 @@ int main(int argc, char **argv)
     }
 
     g_display_running.store(false);
+    g_frame_queue.shutdown();
     if (poll.joinable())
         poll.join();
+    if (frame_thread.joinable())
+        frame_thread.join();
     if (display_thread.joinable())
         display_thread.join();
+    g_swmr_cache.clear();
     return 0;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -42,6 +43,7 @@ struct FrameAppendResult
     size_t bytes{0};
     ElementType element_type{ElementType::Float32};
     ImageDimensions dims;
+    bool flushed{true};
 };
 
 class MrdFile
@@ -51,13 +53,15 @@ class MrdFile
             const std::string &stream_id,
             ElementType type,
             const ImageDimensions &dims,
-            std::string header_xml);
+            std::string header_xml,
+            FlushPolicy flush_policy = {});
     ~MrdFile();
 
     MrdFile(const MrdFile &) = delete;
     MrdFile &operator=(const MrdFile &) = delete;
 
     FrameAppendResult append_frame(const void *data, size_t bytes);
+    void set_flush_policy(FlushPolicy policy);
 
     const std::filesystem::path &path() const noexcept { return path_; }
     ElementType element_type() const noexcept { return type_; }
@@ -76,9 +80,13 @@ class MrdFile
     size_t frame_bytes_{0};
     uint64_t frames_{0};
     std::mutex write_mutex_;
+    FlushPolicy flush_policy_{};
+    size_t frames_since_flush_{0};
+    std::chrono::steady_clock::time_point last_flush_;
 
     void open();
     void close();
+    bool perform_flush(bool force);
 };
 
 class MrdSink
@@ -107,6 +115,7 @@ class MrdSink
         std::string canonical_name;
         std::filesystem::path sink_root;
         size_t generation{0};
+        FlushPolicy flush_policy;
     };
 
     MarshalState &state_;
