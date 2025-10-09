@@ -106,6 +106,7 @@ int main(int argc, char **argv) {
         boost::asio::ip::tcp::resolver resolver{ioc};
         boost::beast::tcp_stream stream{ioc};
         boost::beast::flat_buffer read_buffer;
+        boost::beast::flat_buffer write_buffer;
         auto next_deadline = std::chrono::steady_clock::now();
 
         auto connect_stream = [&](const char *reason) {
@@ -196,16 +197,22 @@ int main(int argc, char **argv) {
                 req.keep_alive(true);
                 req.body().data = body.data();
                 req.body().size = body.size();
+                req.body().more = false;
                 req.prepare_payload();
 
                 http::request_serializer<http::buffer_body> serializer{req};
                 serializer.split(true);
                 boost::system::error_code write_ec;
-                http::write(stream, serializer, write_ec);
+                http::write(stream, write_buffer, serializer, write_ec);
                 if (write_ec) {
                     std::cerr << "image_streamer: write failed (" << write_ec.message() << "), reconnecting\n";
+                    write_buffer.consume(write_buffer.size());
                     connect_stream("write error");
                     continue;
+                }
+
+                if (write_buffer.size() != 0) {
+                    write_buffer.consume(write_buffer.size());
                 }
 
                 http::response<http::string_body> res;
