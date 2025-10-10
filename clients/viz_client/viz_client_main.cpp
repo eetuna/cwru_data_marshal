@@ -188,26 +188,13 @@ static void record_pose_point(double x, double y, double z)
 {
     std::scoped_lock lk(g_viz_mutex);
     auto &history = g_pose_history;
+    // Keep only the most recent pose sample so the overlay reflects the latest
+    // FK client update instead of the full historical trajectory.
+    history.points.clear();
     history.points.emplace_back(x, y, z);
-    if (!history.has_bounds)
-    {
-        history.min_x = history.max_x = x;
-        history.min_y = history.max_y = y;
-        history.has_bounds = true;
-    }
-    else
-    {
-        history.min_x = std::min(history.min_x, x);
-        history.max_x = std::max(history.max_x, x);
-        history.min_y = std::min(history.min_y, y);
-        history.max_y = std::max(history.max_y, y);
-    }
-
-    if (history.points.size() > kMaxPoseTrail)
-    {
-        history.points.pop_front();
-        recompute_pose_bounds(history);
-    }
+    history.min_x = history.max_x = x;
+    history.min_y = history.max_y = y;
+    history.has_bounds = true;
 
     g_last_pose = {x, y, z};
     g_has_pose = true;
