@@ -181,6 +181,20 @@ static void recompute_pose_bounds(PoseHistory &history)
         history.min_y = std::min(history.min_y, pt.y);
         history.max_y = std::max(history.max_y, pt.y);
     }
+
+    constexpr double kMinExtent = 1e-6;
+    if (std::abs(history.max_x - history.min_x) < kMinExtent)
+    {
+        double center = history.min_x;
+        history.min_x = center - 0.5 * kMinExtent;
+        history.max_x = center + 0.5 * kMinExtent;
+    }
+    if (std::abs(history.max_y - history.min_y) < kMinExtent)
+    {
+        double center = history.min_y;
+        history.min_y = center - 0.5 * kMinExtent;
+        history.max_y = center + 0.5 * kMinExtent;
+    }
     history.has_bounds = true;
 }
 
@@ -188,13 +202,10 @@ static void record_pose_point(double x, double y, double z)
 {
     std::scoped_lock lk(g_viz_mutex);
     auto &history = g_pose_history;
-    // Keep only the most recent pose sample so the overlay reflects the latest
-    // FK client update instead of the full historical trajectory.
-    history.points.clear();
     history.points.emplace_back(x, y, z);
-    history.min_x = history.max_x = x;
-    history.min_y = history.max_y = y;
-    history.has_bounds = true;
+    if (history.points.size() > kMaxPoseTrail)
+        history.points.pop_front();
+    recompute_pose_bounds(history);
 
     g_last_pose = {x, y, z};
     g_has_pose = true;
@@ -507,29 +518,13 @@ static void draw_pose_overlay(cv::Mat &frame, const PoseHistory &history)
     if (frame.empty() || history.points.empty() || !history.has_bounds)
         return;
 
-    cv::Point prev;
-    bool first = true;
-    size_t count = history.points.size();
-    size_t idx = 0;
-    for (const auto &pt : history.points)
-    {
-        cv::Point curr;
-        if (!project_pose_to_frame(pt, history, frame, curr))
-            return;
+    const auto &latest = history.points.back();
+    cv::Point pixel;
+    if (!project_pose_to_frame(latest, history, frame, pixel))
+        return;
 
-        if (!first)
-        {
-            double alpha = (count > 1) ? static_cast<double>(idx) / (count - 1) : 1.0;
-            cv::Scalar color(0, static_cast<int>(255 * (1.0 - alpha)), static_cast<int>(255 * alpha));
-            cv::line(frame, prev, curr, color, 2, cv::LINE_AA);
-        }
-
-        prev = curr;
-        first = false;
-        ++idx;
-    }
-
-    cv::circle(frame, prev, 5, cv::Scalar(0, 0, 255), -1, cv::LINE_AA);
+    cv::circle(frame, pixel, 6, cv::Scalar(0, 0, 255), -1, cv::LINE_AA);
+    cv::circle(frame, pixel, 10, cv::Scalar(0, 0, 255), 2, cv::LINE_AA);
 }
 
 static void display_loop()
