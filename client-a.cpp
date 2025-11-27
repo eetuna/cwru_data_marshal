@@ -44,6 +44,8 @@ int main() {
 
     if (!res || res->status != 200) {
         std::cerr << "Failed to read from server file: " << read_file << "\n";
+        std::cerr << "GET request response status: " << res->status << "\n";
+        std::cerr << "GET request response body: " << res->body << "\n";
         return 1;
     }
 
