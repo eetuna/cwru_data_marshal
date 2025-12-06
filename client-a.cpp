@@ -107,6 +107,54 @@ int main() {
     } else {
         std::cerr << "Failed to POST result2 to server.\n";
     }
+    //Step 7: Use GET to read k last entries from same read file as used in Step 2
+    int k = 5;
+    std::string read_endpoint_mult = "/read/" + read_file + "?last=" + std::to_string(k);
+    auto res_mult = cli.Get(read_endpoint_mult.c_str());
+
+    if (!res_mult || res_mult->status != 200) {
+        std::cerr << "Failed to read from server file: " << read_file << "\n";
+        std::cerr << "GET request response status: " << res_mult->status << "\n";
+        std::cerr << "GET request response body: " << res_mult->body << "\n";
+        return 1;
+    }
+
+    json input_data_mult = json::parse(res_mult->body);
+    // Check that "entries" exists and is an array
+
+    if (!input_data_mult.contains("entries") || !input_data_mult["entries"].is_array() || input_data_mult["entries"].empty()) {
+        std::cerr << "Invalid data in server file\n";
+        return 1;
+    }
+    
+        // Access the count
+    int entry_count = 0;
+    if (input_data_mult.contains("count") && input_data_mult["count"].is_number_integer()) {
+        entry_count = input_data_mult["count"].get<int>();
+    } else {
+        // fallback: use size of array
+        entry_count = input_data_mult["entries"].size();
+    }
+
+    std::cout << "Number of entries: " << entry_count << "\n";
+
+    // Loop over all entries
+    for (int entry_idx = 0; entry_idx < entry_count; entry_idx++) {
+        const auto& entry = input_data_mult["entries"][entry_idx];
+
+        if (!entry.contains("values") || !entry["values"].is_array()) {
+            std::cerr << "Invalid entry at index " << entry_idx << "\n";
+            return 1;
+        }
+
+        const auto& values = entry["values"];  // JSON array of numbers
+        std::cout << "MULT Entries entry " << entry_idx << " values: ";
+        for (size_t i = 0; i < values.size(); ++i) {
+            std::cout << values[i].get<double>() << " "; // parse each value as double
+        }
+        std::cout << "\n";
+    }
+    
     // Wait 5 milliseconds before the next request
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
 }

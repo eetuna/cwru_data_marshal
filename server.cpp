@@ -8,8 +8,10 @@
 #include <queue>
 #include "httplib.h"
 #include "json.hpp"
+#include "circularBuffer.hpp"
 // Map filename -> cache (content as std::string)
-std::unordered_map<std::string, std::string> file_caches;
+//std::unordered_map<std::string, std::string> file_caches;
+std::unordered_map<std::string, CircularBuffer<std::string>> file_caches;
 
 // Map filename -> queue of pending writes
 std::unordered_map<std::string, std::queue<std::string>> write_queues;
@@ -35,7 +37,8 @@ std::unordered_map<std::string, std::shared_mutex> file_mutexes;
 // Mutex to protect the map itself
 std::shared_mutex map_mutex;
 
-
+//size of cahches
+int cache_capacity = 1000;
 
 // Access mutex for a file, assuming it exists in file_mutexes
 std::shared_mutex& get_mutex_for_file(const std::string& filename) {
@@ -142,6 +145,8 @@ bool load_config(const std::string& config_path) {
          } else {
              std::cerr << "Mutex already exists for file: " << filename << "\n";
          }*/
+        file_caches.emplace(filename, CircularBuffer<std::string>(cache_capacity));
+
         cache_mutexes.try_emplace(filename);
         write_queue_mutexes.try_emplace(filename);
         write_queues.try_emplace(filename);
@@ -178,7 +183,14 @@ bool load_config(const std::string& config_path) {
         // Store the content in the cache
         {
             std::unique_lock<std::shared_mutex> cache_lock(cache_mutexes[filename]);
-            file_caches[filename] = content;
+            //file_caches[filename] = content;
+           // file_caches[filename].push(content);
+           auto it = file_caches.find(filename);
+            if (it == file_caches.end()) {
+                return false;
+            }
+
+            it->second.push(content);
         }
 
         std::cerr << "Loaded file into cache: " << filename << "\n";
@@ -227,7 +239,17 @@ int main() {
             // Update the cache for the specific file
             {
                 std::unique_lock<std::shared_mutex> cache_lock(cache_mutexes[filename]);
-                file_caches[filename] = json_output;
+                //file_caches[filename] = json_output;
+                //file_caches[filename].push(json_output);
+                auto it = file_caches.find(filename);
+                if (it == file_caches.end()) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"File not found"})", "application/json");
+                    return;
+                }
+                std::cerr << "Caching entry for " << filename << ": " << json_output << "\n";
+
+                it->second.push(json_output);
             }
     
             // Add the write operation to the queue
@@ -249,18 +271,76 @@ int main() {
     server.Get(R"(/read/([\w\-.]+))", [&](const httplib::Request& req, httplib::Response& res) {
         std::string filename = req.matches[1];
         std::cerr << "GET request received for file: " << filename << "\n";
-        // Retrieve the content from the cache
-        std::shared_lock<std::shared_mutex> cache_lock(cache_mutexes[filename]);
+        // How many last entries to read?
+        // Default value
+        int k = 1;
+    
+        // Check query parameter "last"
+        if (req.has_param("last")) {
+            try {
+                k = std::stoi(req.get_param_value("last"));
+            } catch (const std::exception& e) {
+                k = 1;  // fallback
+            }
+        }
+        
+
+        
+
+        // Find mutex (safe even if you pre-created everything)
+        auto m_it = cache_mutexes.find(filename);
+        if (m_it == cache_mutexes.end()) {
+            res.status = 404;
+            res.set_content(R"({"error":"File not found"})", "application/json");
+            return;
+        }
+    
+        // Lock shared (peek doesn't modify buffer)
+        std::shared_lock<std::shared_mutex> cache_lock(m_it->second);
+    
+        // Find circular buffer
         auto it = file_caches.find(filename);
         if (it == file_caches.end()) {
             res.status = 404;
-            res.set_content(R"({"error":"File not found in cache"})", "application/json");
+            res.set_content(R"({"error":"File not found"})", "application/json");
             return;
         }
-        
-        res.set_content(it->second, "application/json");
-    });
+        //make sure k is within bounds
+        k = std::max(1, std::min(k,  static_cast<int>(it->second.size()))); // clamp between 1 and cache_capacity
+        if (k == 1) {
+            std::string entry_str;
+            if (!it->second.peek(entry_str,k)) {
+                res.status = 404;  
+                res.set_content(R"({"error":"Buffer empty"})", "application/json");
+                return;
+            }
+            json entry_json = json::parse(entry_str);
+            std::cerr << "Sending GET response for " << filename << ": " << entry_json.dump() << "\n";
+            res.set_content(entry_json.dump(), "application/json");
+        }
+        else{
+            json j;
+            j["entries"] = json::array();  // initialize array
+            for (int k_idx = k; k_idx > 0; k_idx--) {
+                std::string entry_str;
+                if (!it->second.peek(entry_str, k_idx)) {
+                    res.status = 404;  
+                    res.set_content(R"({"error":"Buffer empty"})", "application/json");
+                    return;
+                }
+                // Parse each string into JSON
+                json entry_json = json::parse(entry_str);
+                j["entries"].push_back(entry_json);
+                
 
+            }
+            j["count"] = j["entries"].size();
+            
+            std::cerr << "Sending GET response for k>1 " << filename << "\n";
+            res.set_content(j.dump(), "application/json");
+        }
+    });
+    
     
 
     std::cout << "Server running at http://localhost:8080\n";

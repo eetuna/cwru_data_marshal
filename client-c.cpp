@@ -69,7 +69,7 @@ int main() {
         {"client_id", client_id},
         {"sent_at", current_time_ns()},
         //{"tags", {"computed", "example"}},
-        {"values", {result}}
+        {"values", {result,1}}
     };
 
     // Step 5: Send POST to server to write result
