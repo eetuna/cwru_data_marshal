@@ -14,7 +14,7 @@
 std::unordered_map<std::string, CircularBuffer<std::string>> file_caches;
 
 // Map filename -> queue of pending writes
-std::unordered_map<std::string, std::queue<std::string>> write_queues;
+std::unordered_map<std::string, CircularBuffer<std::string>> write_queues;
 
 // Mutex to protect each file's cache and write queue
 std::unordered_map<std::string, std::shared_mutex> cache_mutexes;
@@ -58,6 +58,7 @@ void background_worker(const std::string& storage_dir) {
     while (true) {
         std::string filename;
         std::string data_to_write;
+        std::string entry_str;
 
         // Wait for a write operation to be added to the queue
         {
@@ -80,8 +81,9 @@ void background_worker(const std::string& storage_dir) {
                 std::lock_guard<std::mutex> queue_lock(write_queue_mutexes[file]);
                 if (!queue.empty()) {
                     filename = file;
-                    data_to_write = queue.front();
-                    queue.pop();
+                    
+                    queue.pop(entry_str); 
+                    //queue.pop();
                     break;
                 }
             }
@@ -98,7 +100,7 @@ void background_worker(const std::string& storage_dir) {
                 continue;
             }
 
-            ofs << data_to_write;
+            ofs << entry_str;
             ofs.close();
 
             std::filesystem::rename(tmp_path, path);
@@ -146,10 +148,11 @@ bool load_config(const std::string& config_path) {
              std::cerr << "Mutex already exists for file: " << filename << "\n";
          }*/
         file_caches.emplace(filename, CircularBuffer<std::string>(cache_capacity));
+        write_queues.emplace(filename, CircularBuffer<std::string>(cache_capacity));
 
         cache_mutexes.try_emplace(filename);
         write_queue_mutexes.try_emplace(filename);
-        write_queues.try_emplace(filename);
+        //write_queues.try_emplace(filename);
         const std::string storage_dir = "./";
         std::string path = storage_dir + filename;
         // Use the per-file mutex for thread safety
@@ -255,7 +258,16 @@ int main() {
             // Add the write operation to the queue
             {
                 std::lock_guard<std::mutex> queue_lock(write_queue_mutexes[filename]);
-                write_queues[filename].push(json_output);
+                //write_queues[filename].push(json_output);
+                auto it = write_queues.find(filename);
+                if (it == write_queues.end()) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"File not found"})", "application/json");
+                    return;
+                }
+                std::cerr << "Queuing entry for " << filename << ": " << json_output << "\n";
+
+                it->second.push(json_output);
             }
             write_condition.notify_all(); // Notify the background worker
             std::cerr << "POST request received for file: " << filename << "\n";
