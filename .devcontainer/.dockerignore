@@ -1,0 +1,6 @@
+# This build context is `.devcontainer/`, so this is mostly a safety net.
+.git
+.DS_Store
+node_modules
+npm-debug.log
+

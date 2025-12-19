@@ -1,12 +1,18 @@
 {
   "name": "cwru_data_marshal",
   "build": {
-    "context": "..",
-    "dockerfile": "../docker/Dockerfile",
+    "context": ".",
+    "dockerfile": "Dockerfile",
     "target": "dev",
     "args": {
       "BUILD_ISMRMRD_FROM_SOURCE": "true",
       "ISMRMRD_TAG": "main"
+    }
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "installOhMyZsh": true
     }
   },
   "containerEnv": {
@@ -18,21 +24,31 @@
   },
   "customizations": {
     "vscode": {
-      "settings": {},
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "cmake.configureOnOpen": false
+      },
       "extensions": [
         "ms-vscode.cpptools",
         "ms-vscode.cmake-tools",
         "ms-vscode.cpptools-extension-pack",
-        "ms-azuretools.vscode-containers"
+        "ms-azuretools.vscode-containers",
+        "ms-python.python",
+        "ms-python.vscode-pylance"
       ]
     }
   },
-  "workspaceFolder": "/src",
+  "workspaceFolder": "/workspaces/cwru_data_marshal",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/cwru_data_marshal,type=bind,consistency=cached",
   "mounts": [
-    "source=${localWorkspaceFolder},target=/src,type=bind",
-    "source=${localWorkspaceFolder}/data,target=/src/data,type=bind"
+    "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.config/claude,target=/home/vscode/.config/claude,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.vscode-server,target=/home/vscode/.vscode-server,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.codex,target=/home/vscode/.codex,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.gemini,target=/home/vscode/.gemini,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.cache/cloud-code,target=/home/vscode/.cache/cloud-code,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.cache/google-vscode-extension,target=/home/vscode/.cache/google-vscode-extension,type=bind,consistency=cached"
   ],
-  "remoteUser": "root",
-  "updateRemoteUserUID": false,
-  "postCreateCommand": "mkdir -p /src/data/mrd /src/data/dumpbox && echo 'Data root: /src/data' && printf 'Devcontainer built using %s\\nGenerator=%s LinkParallel=%s\\n' 'docker/Dockerfile' \"$CMAKE_GENERATOR\" \"$CMAKE_LINK_PARALLEL_JOBS\""
+  "remoteUser": "vscode",
+  "postCreateCommand": "bash -lc 'set -euo pipefail; mkdir -p /workspaces/cwru_data_marshal/data/mrd /workspaces/cwru_data_marshal/data/dumpbox; echo \"Data root: /workspaces/cwru_data_marshal/data\"; printf \"Devcontainer built using %s\\nGenerator=%s LinkParallel=%s\\n\" \".devcontainer/Dockerfile\" \"$CMAKE_GENERATOR\" \"$CMAKE_LINK_PARALLEL_JOBS\"'"
 }

@@ -3,7 +3,7 @@
 This guide walks through the container layouts that ship with `cwru_data_marshal` and
 how to use them for day-to-day development, ad-hoc testing, and multi-service demos.
 
-## Dockerfile layout (`docker/Dockerfile`)
+## Dockerfile layout (`.devcontainer/Dockerfile`)
 
 The repository maintains a single multi-stage Dockerfile with three stages:
 
@@ -29,11 +29,11 @@ Key notes:
 ## Dev container (`.devcontainer/devcontainer.json`)
 
 The VS Code devcontainer points to the `dev` stage in the Dockerfile and binds your source
-checkout into `/src`. When the container spins up it:
+checkout into `/workspaces/cwru_data_marshal`. When the container spins up it:
 
-1. Mounts `${workspaceFolder}` into `/src` and `${workspaceFolder}/data` into `/src/data`.
+1. Mounts `${workspaceFolder}` into `/workspaces/cwru_data_marshal`.
 2. Exposes the same Ninja + LLD toolchain that CI uses via `containerEnv`.
-3. Creates the standard data directories (`/src/data/mrd`, `/src/data/dumpbox`) via the
+3. Creates the standard data directories (`/workspaces/cwru_data_marshal/data/mrd`, `/workspaces/cwru_data_marshal/data/dumpbox`) via the
    `postCreateCommand` so the marshal can run immediately.
 
 Launch the devcontainer with the "Reopen in Container" command from VS Code. Once the
@@ -57,7 +57,7 @@ binary:
 
 All services share the same bind mounts:
 
-- `.:/src` so containers see the current working copy (sources + build directory).
+- `.:/workspaces/cwru_data_marshal` so containers see the current working copy (sources + build directory).
 - `./data:/data` so MRD artifacts persist on the host.
 
 Each container runs the helper command stored in the `BUILD_CMD` environment variable.
@@ -94,7 +94,7 @@ To build a lean runtime container that only ships the compiled binaries, target 
 `runtime` stage:
 
 ```bash
-docker build --target runtime -t cwru-data-marshal:runtime .
+docker build --target runtime -t cwru-data-marshal:runtime .devcontainer
 ```
 
 After building, copy your host-side `build/` artifacts into `/app` or add a small wrapper
@@ -107,6 +107,6 @@ script that downloads the desired release bundle.
 - **Recompiles on every `docker compose up`**: mount a persistent `build/` directory into
   the containers or override `BUILD_CMD` to only run `cmake --build` once configuration is
   in place.
-- **Volume permission issues**: the devcontainer and compose files run as `root` by default.
-  If you need non-root users, adjust `remoteUser` in the devcontainer and `user:` fields in
-  the compose services consistently.
+- **Volume permission issues**: the devcontainer and compose images default to `vscode`.
+  If your host UID/GID differs (common outside WSL), add a `user:` override in `docker-compose.yml`
+  (or run `docker compose` with a UID/GID-matching user) so build artifacts aren’t written as `root`.

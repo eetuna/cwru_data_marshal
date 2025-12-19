@@ -33,7 +33,7 @@ failure handling much easier.
      build-essential cmake ninja-build pkg-config \
      libboost-all-dev libhdf5-dev libismrmrd-dev
    ```
-   These match the toolchain baked into `docker/Dockerfile` so local builds
+   These match the toolchain baked into `.devcontainer/Dockerfile` so local builds
    have the HDF5, Boost, and ISMRMRD headers needed for SWMR support.
    Install the lightweight Python runtime used by the helpers:
    ```bash

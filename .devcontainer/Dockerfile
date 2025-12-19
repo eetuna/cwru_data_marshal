@@ -1,10 +1,16 @@
-# docker/Dockerfile
+# .devcontainer/Dockerfile
+#
+# Multi-stage image:
+# - build-base: full toolchain + ISMRMRD build/install
+# - dev: adds debugger/CLI tooling and defaults to non-root "vscode"
+# - runtime: lean runtime deps (optional)
+
 ARG UBUNTU_VERSION=22.04
 
 # =========================
 # Base build environment
 # =========================
-FROM ubuntu:${UBUNTU_VERSION} AS build-base
+FROM mcr.microsoft.com/devcontainers/base:ubuntu-22.04 AS build-base
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG BUILD_ISMRMRD_FROM_SOURCE=true
@@ -29,6 +35,7 @@ RUN apt-get update && \
   libboost-program-options-dev \
   libboost-system-dev \
   libboost-thread-dev \
+  libeigen3-dev \
   # libopencv-dev ships OpenCVConfig.cmake, the split packages pull in viz + GUI bits without
   # dragging every optional OpenCV module via Recommends.
   libopencv-dev \
@@ -39,11 +46,13 @@ RUN apt-get update && \
   libopencv-viz-dev \
   libpugixml-dev \
   python3 \
+  python3-dev \
   python3-pip \
+  python3-venv \
   && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
-    python3 -m pip install --no-cache-dir ismrmrd h5py numpy
+  python3 -m pip install --no-cache-dir ismrmrd h5py numpy
 
 ENV CMAKE_GENERATOR=Ninja
 ENV CMAKE_EXE_LINKER_FLAGS_INIT="-fuse-ld=lld"
@@ -53,28 +62,28 @@ ENV CMAKE_LINK_PARALLEL_JOBS=1
 # ---- ISMRMRD (source or apt) ----
 RUN set -eux; \
   if [ "${BUILD_ISMRMRD_FROM_SOURCE}" = "true" ]; then \
-  git clone --depth 1 --branch "${ISMRMRD_TAG}" https://github.com/ismrmrd/ismrmrd.git /opt/ismrmrd || \
-  git clone --depth 1 https://github.com/ismrmrd/ismrmrd.git /opt/ismrmrd; \
-  cmake -S /opt/ismrmrd -B /opt/ismrmrd/build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX=/usr/local \
-  -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF -DUSE_SYSTEM_HDF5=ON; \
-  cmake --build /opt/ismrmrd/build -j"$(nproc)"; \
-  cmake --install /opt/ismrmrd/build; \
+    git clone --depth 1 --branch "${ISMRMRD_TAG}" https://github.com/ismrmrd/ismrmrd.git /opt/ismrmrd || \
+    git clone --depth 1 https://github.com/ismrmrd/ismrmrd.git /opt/ismrmrd; \
+    cmake -S /opt/ismrmrd -B /opt/ismrmrd/build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF -DUSE_SYSTEM_HDF5=ON; \
+    cmake --build /opt/ismrmrd/build -j"$(nproc)"; \
+    cmake --install /opt/ismrmrd/build; \
   else \
-  apt-get update; \
-  apt-get install -y --no-install-recommends libismrmrd-dev || true; \
-  rm -rf /var/lib/apt/lists/*; \
-  if ! pkg-config --exists ismrmrd; then \
-  git clone --depth 1 --branch "${ISMRMRD_TAG}" https://github.com/ismrmrd/ismrmrd.git /opt/ismrmrd || \
-  git clone --depth 1 https://github.com/ismrmrd/ismrmrd.git /opt/ismrmrd; \
-  cmake -S /opt/ismrmrd -B /opt/ismrmrd/build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX=/usr/local \
-  -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF -DUSE_SYSTEM_HDF5=ON; \
-  cmake --build /opt/ismrmrd/build -j"$(nproc)"; \
-  cmake --install /opt/ismrmrd/build; \
-  fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends libismrmrd-dev || true; \
+    rm -rf /var/lib/apt/lists/*; \
+    if ! pkg-config --exists ismrmrd; then \
+      git clone --depth 1 --branch "${ISMRMRD_TAG}" https://github.com/ismrmrd/ismrmrd.git /opt/ismrmrd || \
+      git clone --depth 1 https://github.com/ismrmrd/ismrmrd.git /opt/ismrmrd; \
+      cmake -S /opt/ismrmrd -B /opt/ismrmrd/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF -DUSE_SYSTEM_HDF5=ON; \
+      cmake --build /opt/ismrmrd/build -j"$(nproc)"; \
+      cmake --install /opt/ismrmrd/build; \
+    fi; \
   fi; \
   ldconfig
 
@@ -84,31 +93,55 @@ ENV CMAKE_PREFIX_PATH=/usr/local
 # Dev stage (tools + debugger)
 # =========================
 FROM build-base AS dev
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
   gdb \
   less \
   vim-tiny \
+  clang \
+  lldb \
+  gnupg \
+  wget \
   && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 22 (NodeSource) + global CLIs
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+  apt-get update && \
+  apt-get install -y --no-install-recommends nodejs && \
+  rm -rf /var/lib/apt/lists/*
+
+RUN node -v && npm -v && \
+  npm install -g @google/gemini-cli @openai/codex @anthropic-ai/claude-code
 
 # Install websocat (static musl build, works on amd64/arm64)
 ARG WEBSOCAT_VERSION=v1.13.0
 RUN set -eux; \
   arch="$(dpkg --print-architecture)"; \
   case "$arch" in \
-  amd64) asset="websocat.x86_64-unknown-linux-musl" ;; \
-  arm64) asset="websocat.aarch64-unknown-linux-musl" ;; \
-  *) echo "Unsupported arch: $arch" >&2; exit 1 ;; \
+    amd64) asset="websocat.x86_64-unknown-linux-musl" ;; \
+    arm64) asset="websocat.aarch64-unknown-linux-musl" ;; \
+    *) echo "Unsupported arch: $arch" >&2; exit 1 ;; \
   esac; \
   url="https://github.com/vi/websocat/releases/download/${WEBSOCAT_VERSION}/${asset}"; \
   curl -fsSL "$url" -o /usr/local/bin/websocat; \
   chmod +x /usr/local/bin/websocat
 
-WORKDIR /src
+RUN mkdir -p /workspaces/cwru_data_marshal && \
+  mkdir -p /home/vscode/.cache /home/vscode/.config/claude /home/vscode/.claude && \
+  chown -R vscode:vscode /workspaces /home/vscode
+
+ENV SHELL=/bin/bash
+WORKDIR /workspaces/cwru_data_marshal
+
+USER vscode
+CMD ["/bin/bash"]
 
 # =========================
 # Runtime (lean) stage
 # =========================
 FROM ubuntu:${UBUNTU_VERSION} AS runtime
+ARG DEBIAN_FRONTEND=noninteractive
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
   curl \
@@ -133,16 +166,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
-    python3 -m pip install --no-cache-dir ismrmrd h5py numpy
+  python3 -m pip install --no-cache-dir ismrmrd h5py numpy
 
 # Optional: install websocat in runtime too
 ARG WEBSOCAT_VERSION=v1.13.0
 RUN set -eux; \
   arch="$(dpkg --print-architecture)"; \
   case "$arch" in \
-  amd64) asset="websocat.x86_64-unknown-linux-musl" ;; \
-  arm64) asset="websocat.aarch64-unknown-linux-musl" ;; \
-  *) echo "Unsupported arch: $arch" >&2; exit 1 ;; \
+    amd64) asset="websocat.x86_64-unknown-linux-musl" ;; \
+    arm64) asset="websocat.aarch64-unknown-linux-musl" ;; \
+    *) echo "Unsupported arch: $arch" >&2; exit 1 ;; \
   esac; \
   url="https://github.com/vi/websocat/releases/download/${WEBSOCAT_VERSION}/${asset}"; \
   curl -fsSL "$url" -o /usr/local/bin/websocat; \
@@ -158,3 +191,4 @@ ENV CMAKE_SHARED_LINKER_FLAGS_INIT="-fuse-ld=lld"
 ENV CMAKE_LINK_PARALLEL_JOBS=1
 
 WORKDIR /app
+

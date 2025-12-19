@@ -1,19 +1,11 @@
 // tools/make_image_message.cpp
-#include <ismrmrd/ismrmrd.h>
-#include <ismrmrd/xml.h>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <fstream>
 #include <iostream>
-#include <vector>
+#include <cstring>
 #include <filesystem>
-#include <system_error>
+#include "image_message_utils.hpp"
 
 int main(int argc, char** argv) {
     const char* out = "data/image_message.bin";
-    // Hardcode a tiny example: 4x4, 1 channel, float32
-    uint16_t nx = 4, ny = 4, nz = 1, channels = 1;
 
     // Allow optional --out <path>
     for (int i = 1; i + 1 < argc; ++i) {
@@ -22,48 +14,17 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Ensure parent directory exists if caller kept default path
-    std::filesystem::path out_path{out};
-    if (out_path.has_parent_path()) {
-        std::error_code ec;
-        std::filesystem::create_directories(out_path.parent_path(), ec);
-        if (ec) {
-            std::cerr << "Failed to create directory for " << out_path << ": " << ec.message() << "\n";
-            return 1;
-        }
-    }
-
-    // Construct an ISMRMRD Image<float> (float32 voxels)
-    ISMRMRD::Image<float> img(nx, ny, nz, channels);
-
-    // Fill data with a simple ramp
-    float* p = img.getDataPtr();
-    size_t nelem = static_cast<size_t>(nx) * ny * nz * channels;
-    for (size_t i = 0; i < nelem; ++i) p[i] = static_cast<float>(i);
-
-    // Minimal header fields
-    ISMRMRD::ImageHeader& h = img.getHead();
-    h.channels   = channels;
-    h.data_type  = ISMRMRD::ISMRMRD_FLOAT; // float32
-    h.matrix_size[0] = nx;
-    h.matrix_size[1] = ny;
-    h.matrix_size[2] = nz;
-    h.field_of_view[0] = 1.f;
-    h.field_of_view[1] = 1.f;
-    h.field_of_view[2] = 1.f;
-
-    // Write [header][raw voxels] to out
-    std::ofstream ofs(out, std::ios::binary);
-    if (!ofs) {
-        std::cerr << "Failed to open " << out << " for write\n";
+    try {
+        generate_image_message(out);
+        
+        // Calculate size for logging (4x4x1x1 float32 = 16 * 4 = 64 bytes data)
+        size_t data_size = 4 * 4 * 1 * 1 * sizeof(float);
+        std::cout << "Wrote " << out << " ("
+                  << sizeof(ISMRMRD::ImageHeader) + data_size
+                  << " bytes)\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "make_image_message error: " << e.what() << "\n";
         return 1;
     }
-    ofs.write(reinterpret_cast<const char*>(&h), sizeof(ISMRMRD::ImageHeader));
-    ofs.write(reinterpret_cast<const char*>(p), nelem * sizeof(float));
-    ofs.close();
-
-    std::cout << "Wrote " << out << " ("
-              << sizeof(ISMRMRD::ImageHeader) + nelem*sizeof(float)
-              << " bytes)\n";
-    return 0;
 }

@@ -1,15 +1,13 @@
-version: "3.9"
-
 x-build-dev: &build-dev
-  context: .
-  dockerfile: docker/Dockerfile
+  context: ./.devcontainer
+  dockerfile: Dockerfile
   target: dev
   args:
     BUILD_ISMRMRD_FROM_SOURCE: "true"
     ISMRMRD_TAG: "main"
 
 x-dev-volumes: &dev-volumes
-  - .:/src
+  - .:/workspaces/cwru_data_marshal
   - ./data:/data
 
 x-build-command: &build-command "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build"
@@ -24,7 +22,7 @@ services:
       - "8080:8080"
       - "8090:8090"
     volumes: *dev-volumes
-    working_dir: /src
+    working_dir: /workspaces/cwru_data_marshal
 
   viz:
     build: *build-dev
@@ -34,7 +32,7 @@ services:
     depends_on:
       - marshal
     volumes: *dev-volumes
-    working_dir: /src
+    working_dir: /workspaces/cwru_data_marshal
 
   fk:
     build: *build-dev
@@ -44,7 +42,7 @@ services:
     depends_on:
       - marshal
     volumes: *dev-volumes
-    working_dir: /src
+    working_dir: /workspaces/cwru_data_marshal
 
   image_streamer:
     build: *build-dev
@@ -54,7 +52,7 @@ services:
     depends_on:
       - marshal
     volumes: *dev-volumes
-    working_dir: /src
+    working_dir: /workspaces/cwru_data_marshal
 
   fs_tail:
     build: *build-dev
@@ -66,4 +64,4 @@ services:
     depends_on:
       - marshal
     volumes: *dev-volumes
-    working_dir: /src
+    working_dir: /workspaces/cwru_data_marshal

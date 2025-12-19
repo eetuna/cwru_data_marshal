@@ -24,6 +24,69 @@
 
 namespace websocket = boost::beast::websocket;
 
+// Helper struct for WS handler results
+struct WsResult
+{
+    std::string response;      // Send to caller only
+    std::string broadcast;     // Send to all (or topic)
+    std::string topic;         // New topic if updated
+    bool is_subscription = false;
+};
+
+inline WsResult handle_ws_message(MarshalState &state, const std::string &text_data, const std::vector<uint8_t> &binary_data, const std::string &current_topic)
+{
+    WsResult res;
+    res.topic = current_topic; // default: no change
+
+    // 1. Text Message Handling
+    if (!text_data.empty())
+    {
+        // Try to parse control JSON: {"subscribe":"<topic>"}
+        try
+        {
+            nlohmann::json j = nlohmann::json::parse(text_data, nullptr, false);
+            if (!j.is_discarded())
+            {
+                if (j.contains("subscribe") && j["subscribe"].is_string())
+                {
+                    res.topic = j["subscribe"].get<std::string>();
+                    res.is_subscription = true;
+                    res.response = "{\"ok\":true,\"subscribed\":\"" + res.topic + "\"}";
+                    return res;
+                }
+            }
+        }
+        catch (...)
+        {
+            // ignore
+        }
+
+        // Not a control message -> Broadcast it
+        res.broadcast = text_data;
+        return res;
+    }
+
+    // 2. Binary Message Handling
+    if (binary_data.empty())
+    {
+        res.response = "{\"error\":\"empty payload\"}";
+        return res;
+    }
+
+    try
+    {
+        auto entry = mrd::ingest_payload(state, binary_data.data(), binary_data.size(), "ws");
+        res.response = entry.dump();
+    }
+    catch (const std::exception &e)
+    {
+        nlohmann::json err = {{"error", "ws ingest failed"}, {"what", e.what()}};
+        res.response = err.dump();
+    }
+
+    return res;
+}
+
 class WsServer
 {
     boost::asio::ip::tcp::acceptor acceptor_;
@@ -113,58 +176,42 @@ do_accept(); });
         }
         void on_msg()
         {
+            std::string text_data;
+            std::vector<uint8_t> binary_data;
+
             if (ws.got_text())
             {
-                auto data = boost::beast::buffers_to_string(buffer.data());
-                buffer.consume(buffer.size());
-
-                // Try to parse control JSON: {"subscribe":"<topic>"}
-                try
-                {
-                    nlohmann::json j = nlohmann::json::parse(data);
-                    if (j.contains("subscribe") && j["subscribe"].is_string())
-                    {
-                        topic = j["subscribe"].get<std::string>();
-                        // Ack only to this client (do not broadcast the control)
-                        send(std::string("{\"ok\":true,\"subscribed\":\"") + topic + "\"}");
-                        return;
-                    }
-                }
-                catch (...)
-                {
-                    // not JSON/control; fall through to broadcast as-is
-                }
-
-                // Normal text: echo/broadcast to all sessions (including sender), as before
-                server.broadcast(data);
-                return;
+                text_data = boost::beast::buffers_to_string(buffer.data());
             }
-
-            auto cb = buffer.data();
-            std::vector<uint8_t> payload;
-            payload.reserve(buffer.size());
-            for (auto it = boost::asio::buffer_sequence_begin(cb);
-                 it != boost::asio::buffer_sequence_end(cb); ++it)
+            else
             {
-                auto seg = *it;
-                auto p = static_cast<const uint8_t *>(seg.data());
-                payload.insert(payload.end(), p, p + seg.size());
+                auto cb = buffer.data();
+                binary_data.reserve(buffer.size());
+                for (auto it = boost::asio::buffer_sequence_begin(cb);
+                     it != boost::asio::buffer_sequence_end(cb); ++it)
+                {
+                    auto seg = *it;
+                    auto p = static_cast<const uint8_t *>(seg.data());
+                    binary_data.insert(binary_data.end(), p, p + seg.size());
+                }
             }
             buffer.consume(buffer.size());
-            if (payload.empty())
+
+            WsResult res = handle_ws_message(state, text_data, binary_data, topic);
+
+            if (res.is_subscription)
             {
-                send("{\"error\":\"empty payload\"}");
-                return;
+                topic = res.topic;
             }
-            try
+
+            if (!res.response.empty())
             {
-                auto entry = mrd::ingest_payload(state, payload.data(), payload.size(), "ws");
-                send(entry.dump());
+                send(res.response);
             }
-            catch (const std::exception &e)
+
+            if (!res.broadcast.empty())
             {
-                nlohmann::json err = {{"error", "ws ingest failed"}, {"what", e.what()}};
-                send(err.dump());
+                server.broadcast(res.broadcast);
             }
         }
         void send(const std::string &s)

@@ -47,7 +47,8 @@ inline std::string iso8601_now_ms()
     auto now = time_point_cast<milliseconds>(system_clock::now());
     auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
     std::time_t tt = system_clock::to_time_t(now);
-    std::tm tm = *std::gmtime(&tt);
+    std::tm tm;
+    gmtime_r(&tt, &tm);
 
     char base[32];
     std::strftime(base, sizeof(base), "%Y-%m-%dT%H:%M:%S", &tm);

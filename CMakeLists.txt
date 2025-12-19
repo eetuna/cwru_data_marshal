@@ -144,6 +144,27 @@ if(BUILD_TESTING)
   add_executable(test_mrd_sink tests/test_mrd_sink.cpp src/mrd_sink.cpp)
   target_link_libraries(test_mrd_sink PRIVATE Catch2::Catch2WithMain nlohmann_json::nlohmann_json ${hdf5_target})
   add_test(NAME test_mrd_sink COMMAND test_mrd_sink)
+
+  add_executable(unit_http_handlers tests/test_http_handlers.cpp src/mrd_sink.cpp)
+  target_link_libraries(unit_http_handlers PRIVATE Catch2::Catch2WithMain Boost::system Threads::Threads nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target})
+  add_test(NAME unit_http_handlers COMMAND unit_http_handlers)
+
+  add_executable(unit_ws_handlers tests/test_ws_handlers.cpp src/mrd_sink.cpp)
+  target_link_libraries(unit_ws_handlers PRIVATE Catch2::Catch2WithMain Boost::system Threads::Threads nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target})
+  add_test(NAME unit_ws_handlers COMMAND unit_ws_handlers)
+
+  add_executable(unit_mk_mrd tests/test_mk_mrd.cpp)
+  target_link_libraries(unit_mk_mrd PRIVATE Catch2::Catch2WithMain ${ismrmrd_target} ${hdf5_target})
+  add_test(NAME unit_mk_mrd COMMAND unit_mk_mrd)
+
+  add_executable(unit_make_image tests/test_make_image_message.cpp)
+  target_link_libraries(unit_make_image PRIVATE Catch2::Catch2WithMain ${ismrmrd_target})
+  add_test(NAME unit_make_image COMMAND unit_make_image)
+
+  add_executable(unit_playback tests/test_playback.cpp)
+  target_include_directories(unit_playback PRIVATE services/playback)
+  target_link_libraries(unit_playback PRIVATE Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
+  add_test(NAME unit_playback COMMAND unit_playback)
 endif()
 
 add_executable(fs_tail_client tools/fs_tail_client.cpp)

@@ -43,3 +43,7 @@ data/
 !/docs/mrd_sink_update_explanation.md
 !/docs/TESTS_OVERVIEW.md
 !/docs/CLIENT_INTEGRATION_GUIDE.md
+
+#Drawio diagrams
+*.drawio   
+*.drawio:Zone.Identifier

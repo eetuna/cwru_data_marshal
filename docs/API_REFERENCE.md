@@ -237,6 +237,7 @@ Regardless of mode, clients can rely on the following metadata artefacts:
 
 - `index.jsonl` — newline-delimited metadata describing all ingested MRDs.
 - `latest.json` — JSON document mirroring the most recent ingest.
+- `poses.jsonl` — newline-delimited log of all scanner pose updates.
 
 Live mode keeps these files in `data/mrd/`; record mode keeps them within the
 active dumpbox session directory.
