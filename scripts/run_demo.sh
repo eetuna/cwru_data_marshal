@@ -95,8 +95,8 @@ if [ ! -f "./build/robot_marshal_demo" ]; then
     g++ -I ./robot_marshal_tmp_src ./robot_marshal_tmp_src/server.cpp -o ./build/robot_marshal_demo -lpthread
 fi
 
-echo -e "[*] Starting Hardened MRI Marshal on port $MRI_HTTP..."
-./build/marshal --http 127.0.0.1:$MRI_HTTP --ws 127.0.0.1:$MRI_WS --data "$DATA_MRI" --sink mrd > "$DATA_MRI/server.log" 2>&1 &
+echo -e "[*] Starting Hardened MRI Marshal on port $MRI_HTTP (Limit: 1GB)..."
+./build/marshal --http 127.0.0.1:$MRI_HTTP --ws 127.0.0.1:$MRI_WS --data "$DATA_MRI" --sink mrd --max-body-size $((1024*1024*1024)) > "$DATA_MRI/server.log" 2>&1 &
 
 echo -e "[*] Starting Specialized Robot Marshal on port $ROBOT_HTTP..."
 ./build/robot_marshal_demo 8081 > "$DATA_ROBOT/server.log" 2>&1 &

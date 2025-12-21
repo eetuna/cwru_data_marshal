@@ -35,15 +35,15 @@ data/
 *.7z
 
 # Docs
-/docs/*
-!/docs/ARCHITECTURE.md
-!/docs/USAGE_WITH_CLIENTS.md
-!/docs/API_REFERENCE.md
-!/docs/CONTAINERS.md
-!/docs/mrd_sink_update_explanation.md
-!/docs/TESTS_OVERVIEW.md
-!/docs/CLIENT_INTEGRATION_GUIDE.md
+# /docs/*
+# !/docs/ARCHITECTURE.md
+# !/docs/USAGE_WITH_CLIENTS.md
+# !/docs/API_REFERENCE.md
+# !/docs/CONTAINERS.md
+# !/docs/mrd_sink_update_explanation.md
+# !/docs/TESTS_OVERVIEW.md
+# !/docs/CLIENT_INTEGRATION_GUIDE.md
 
 #Drawio diagrams
-*.drawio   
+#*.drawio   
 *.drawio:Zone.Identifier

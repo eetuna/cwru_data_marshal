@@ -582,6 +582,7 @@ nlohmann::json MrdSink::make_entry_json(const FrameAppendResult &result) const
         {"path", result.file_path.string()},
         {"stream", result.stream_id},
         {"ts", result.timestamp},
+        {"t_ms", now_ms_epoch()},
         {"frame_index", result.frame_index},
         {"flushed", result.flushed},
         {"element_type", element_type_string(result.element_type)},

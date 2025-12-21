@@ -34,7 +34,8 @@ class Coordinator:
                 # Poll for latest metadata
                 resp = requests.get(f"{MRI_HTTP_BASE}/v1/mrd/latest", timeout=0.1)
                 if resp.status_code == 200:
-                    data = resp.json()
+                    envelope = resp.json()
+                    data = envelope.get("data", {})
                     
                     # Detect Fault via HTTP
                     if "error" in data and not self.is_halted:

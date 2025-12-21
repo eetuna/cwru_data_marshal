@@ -127,8 +127,12 @@ public:
         std::scoped_lock lk(state_.ws_mtx);
         for (auto h : state_.ws_clients)
         {
-            auto *s = static_cast<Session *>(h);
-            s->send(msg);
+            try {
+                auto *s = static_cast<Session *>(h);
+                s->send(msg);
+            } catch (const std::exception& e) {
+                std::cerr << "WS individual broadcast failed: " << e.what() << "\n";
+            }
         }
     }
     void broadcast_to(const std::string &msg, const std::string &topic)
@@ -136,9 +140,12 @@ public:
         std::scoped_lock lk(state_.ws_mtx);
         for (auto h : state_.ws_clients)
         {
-            auto *s = static_cast<Session *>(h);
-            if (topic.empty() || s->topic == topic) {
-                s->send(msg);
+            try {
+                auto *s = static_cast<Session *>(h);
+                if (topic.empty() || s->topic == topic)
+                    s->send(msg);
+            } catch (const std::exception& e) {
+                std::cerr << "WS topic broadcast failed: " << e.what() << "\n";
             }
         }
     }

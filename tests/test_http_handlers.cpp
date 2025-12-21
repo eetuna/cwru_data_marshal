@@ -35,7 +35,7 @@ TEST_CASE("HTTP Handler: Health Check", "[http]")
     REQUIRE(res.result() == http::status::ok);
     auto body = json::parse(res.body());
     CHECK(body["status"] == "ok");
-    CHECK(body.contains("uptime_s"));
+    CHECK(body["data"].contains("uptime_s"));
 }
 
 TEST_CASE("HTTP Handler: Configuration", "[http]")
@@ -48,8 +48,8 @@ TEST_CASE("HTTP Handler: Configuration", "[http]")
 
     REQUIRE(res.result() == http::status::ok);
     auto body = json::parse(res.body());
-    CHECK(body["data_dir"] == "/tmp/fake_data_dir");
-    CHECK(body["ws_port"] == 8090);
+    CHECK(body["status"] == "ok");
+    CHECK(body["data"]["data_dir"] == "/tmp/fake_data_dir");
 }
 
 TEST_CASE("HTTP Handler: Pose Operations", "[http]")
@@ -69,7 +69,7 @@ TEST_CASE("HTTP Handler: Pose Operations", "[http]")
         auto res = handle_http_request(req, state);
         REQUIRE(res.result() == http::status::ok);
         auto body = json::parse(res.body());
-        CHECK(body["pose"]["p"] == std::vector<double>{0, 0, 0});
+        CHECK(body["data"]["pose"]["p"] == std::vector<double>{0, 0, 0});
     }
 
     SECTION("Update pose valid")
@@ -86,6 +86,9 @@ TEST_CASE("HTTP Handler: Pose Operations", "[http]")
 
         auto res = handle_http_request(req, state);
         REQUIRE(res.result() == http::status::ok);
+        auto body = json::parse(res.body());
+        CHECK(body["status"] == "ok");
+        CHECK(body["data"]["pose"]["p"][0] == 1.0);
 
         // Verify state update
         auto p = state.poses.get();
@@ -106,6 +109,8 @@ TEST_CASE("HTTP Handler: Pose Operations", "[http]")
 
         auto res = handle_http_request(req, state);
         REQUIRE(res.result() == http::status::bad_request);
+        auto body = json::parse(res.body());
+        CHECK(body["status"] == "error");
     }
     
     fs::remove_all(temp);
@@ -132,11 +137,12 @@ TEST_CASE("HTTP Handler: MRD Ingest and Retrieval", "[http][mrd]")
         REQUIRE(res.result() == http::status::created);
         
         auto body = json::parse(res.body());
-        CHECK(body.contains("path"));
-        CHECK(body.contains("ts"));
+        CHECK(body["status"] == "ok");
+        CHECK(body["data"].contains("path"));
+        CHECK(body["data"].contains("ts"));
         
         // Verify file exists
-        std::string filepath = body["path"];
+        std::string filepath = body["data"]["path"];
         CHECK(fs::exists(filepath));
         
         // Verify index.jsonl
@@ -155,7 +161,8 @@ TEST_CASE("HTTP Handler: MRD Ingest and Retrieval", "[http][mrd]")
         http::request<http::string_body> req{http::verb::get, "/v1/mrd/latest", 11};
         auto res = handle_http_request(req, state);
         REQUIRE(res.result() == http::status::ok);
-        CHECK(res.body() == R"({"id": "file1.mrd"})");
+        auto body = json::parse(res.body());
+        CHECK(body["data"]["id"] == "file1.mrd");
     }
 
     SECTION("Get MRD Since")
@@ -175,10 +182,10 @@ TEST_CASE("HTTP Handler: MRD Ingest and Retrieval", "[http][mrd]")
         
         REQUIRE(res.result() == http::status::ok);
         auto body = json::parse(res.body());
-        REQUIRE(body.is_array());
-        REQUIRE(body.size() == 2);
-        CHECK(body[0]["id"] == "2");
-        CHECK(body[1]["id"] == "3");
+        REQUIRE(body["data"].is_array());
+        REQUIRE(body["data"].size() == 2);
+        CHECK(body["data"][0]["id"] == "2");
+        CHECK(body["data"][1]["id"] == "3");
     }
 
     fs::remove_all(temp);
@@ -224,9 +231,9 @@ TEST_CASE("HTTP Handler: ISMRMRD Frame", "[http][ismrmrd]")
     
             auto res = handle_http_request(req, state);
             REQUIRE(res.result() == http::status::ok);
-            auto j = json::parse(res.body());
-            CHECK(j["status"] == "ok");
-            CHECK(j["stream"] == "test_stream");
+            auto body = json::parse(res.body());
+            CHECK(body["status"] == "ok");
+            CHECK(body["data"]["stream"] == "test_stream");
         }
     
         SECTION("Missing Stream Header")
@@ -238,8 +245,9 @@ TEST_CASE("HTTP Handler: ISMRMRD Frame", "[http][ismrmrd]")
     
             auto res = handle_http_request(req, state);
             REQUIRE(res.result() == http::status::bad_request);
-            auto j = json::parse(res.body());
-            CHECK(j["error"] == "missing X-MRD-Stream header");
+            auto body = json::parse(res.body());
+            CHECK(body["status"] == "error");
+            CHECK(body["error"] == "missing X-MRD-Stream header");
         }
     
         SECTION("Invalid Payload Size")
@@ -252,8 +260,9 @@ TEST_CASE("HTTP Handler: ISMRMRD Frame", "[http][ismrmrd]")
     
             auto res = handle_http_request(req, state);
             REQUIRE(res.result() == http::status::bad_request);
-            auto j = json::parse(res.body());
-            CHECK(j["error"] == "payload size does not match header");
+            auto body = json::parse(res.body());
+            CHECK(body["status"] == "error");
+            CHECK(body["error"] == "payload size does not match header");
         }
     fs::remove_all(temp);
 }
@@ -264,4 +273,6 @@ TEST_CASE("HTTP Handler: 404 Not Found", "[http]")
     http::request<http::string_body> req{http::verb::get, "/unknown/endpoint", 11};
     auto res = handle_http_request(req, state);
     REQUIRE(res.result() == http::status::not_found);
+    auto body = json::parse(res.body());
+    CHECK(body["status"] == "error");
 }

@@ -102,7 +102,29 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
     {
         http::response<http::string_body> res{status, req.version()};
         res.set(http::field::content_type, "application/json");
-        res.body() = body.dump();
+        
+        if (status == http::status::no_content) {
+            res.body() = "";
+            res.prepare_payload();
+            return res;
+        }
+
+        json envelope;
+        if (static_cast<int>(status) >= 200 && static_cast<int>(status) < 300) {
+            envelope["status"] = "ok";
+            envelope["data"] = body;
+        } else {
+            envelope["status"] = "error";
+            // If body is already an error object, merge it, otherwise wrap it
+            if (body.is_object() && body.contains("error")) {
+                envelope["error"] = body["error"];
+                if (body.contains("what")) envelope["what"] = body["what"];
+            } else {
+                envelope["error"] = body.dump();
+            }
+        }
+
+        res.body() = envelope.dump();
         res.prepare_payload();
         return res;
     };
@@ -111,7 +133,7 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
     if (req.method() == http::verb::get && req.target() == "/health")
     {
         auto up = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.start).count();
-        return make_response(http::status::ok, {{"status", "ok"}, {"uptime_s", up}});
+        return make_response(http::status::ok, {{"uptime_s", up}});
     }
 
     // GET /v1/pose/current
@@ -120,6 +142,7 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
         auto p = state.poses.get();
         auto jpose = pose_to_json(p);
         jpose["ts"] = iso8601_now();
+        jpose["t_ms"] = mrd::now_ms_epoch();
         return make_response(http::status::ok, {{"pose", jpose}, {"source", p.source}});
     }
 
@@ -187,8 +210,9 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
 
             auto jpose = pose_to_json(pose);
             jpose["ts"] = iso8601_now();
+            jpose["t_ms"] = mrd::now_ms_epoch();
 
-            return make_response(http::status::ok, {{"status", "ok"}, {"pose", jpose}});
+            return make_response(http::status::ok, {{"pose", jpose}});
         }
         catch (const std::exception &e)
         {
@@ -235,6 +259,7 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                 // Ensure the message has a type for consumers who don't use topics yet
                 json evt = body;
                 evt["type"] = "bio";
+                evt["t_ms"] = mrd::now_ms_epoch();
                 
                 // Broadcast to "bio" topic specifically
                 if (state.ws_emit_topic) {
@@ -246,7 +271,7 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                 std::cerr << "Bio WS broadcast failed: " << e.what() << "\n";
             }
 
-            return make_response(http::status::ok, {{"status", "ok"}, {"count", body["data"].size()}});
+            return make_response(http::status::ok, {{"count", body["data"].size()}});
         }
         catch (const std::exception &e)
         {
@@ -308,19 +333,19 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                                                       payload_bytes,
                                                       session_header);
 
-            json resp = {
-                {"status", "ok"},
+            json resp_data = {
                 {"path", result.file_path.string()},
                 {"stream", result.stream_id},
                 {"frame_index", result.frame_index},
                 {"flushed", result.flushed},
                 {"ts", result.timestamp},
+                {"t_ms", mrd::now_ms_epoch()},
                 {"dims", {result.dims.spatial[0], result.dims.spatial[1], result.dims.spatial[2]}},
                 {"channels", result.dims.channels},
                 {"datatype", mrd::element_type_to_string(result.element_type)},
                 {"size_bytes", result.bytes}};
 
-            return make_response(http::status::ok, resp);
+            return make_response(http::status::ok, resp_data);
         }
         catch (const std::exception &e)
         {
@@ -340,9 +365,7 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
             }
 
             auto entry = mrd::ingest_payload(state, body.data(), body.size(), "http");
-            json resp = entry;
-            resp["status"] = "ok";
-            return make_response(http::status::created, resp);
+            return make_response(http::status::created, entry);
         }
         catch (const std::exception &e)
         {
@@ -353,29 +376,20 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
     // GET /v1/mrd/latest  (reads ${data_dir}/mrd/latest.json)
     if (req.method() == http::verb::get && req.target() == "/v1/mrd/latest")
     {
-        fs::path latest = fs::path(state.data_dir) / "mrd" / "latest.json";
-        http::response<http::string_body> res{http::status::ok, req.version()};
-        res.set(http::field::content_type, "application/json");
-        if (fs::exists(latest))
+        fs::path latest_path = fs::path(state.data_dir) / "mrd" / "latest.json";
+        if (fs::exists(latest_path))
         {
             std::string s;
-            if (read_file_all(latest, s) && !s.empty())
+            if (read_file_all(latest_path, s) && !s.empty())
             {
-                res.body() = s;
-            }
-            else
-            {
-                res.result(http::status::no_content);
-                res.body() = "";
+                try {
+                    return make_response(http::status::ok, json::parse(s));
+                } catch (...) {
+                    return make_response(http::status::internal_server_error, {{"error", "failed to parse latest.json"}});
+                }
             }
         }
-        else
-        {
-            res.result(http::status::no_content);
-            res.body() = "";
-        }
-        res.prepare_payload();
-        return res;
+        return make_response(http::status::no_content, {});
     }
 
     // GET /v1/mrd/since?ts=...&limit=...  (reads ${data_dir}/mrd/index.jsonl)
@@ -414,11 +428,7 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                 }
             }
             
-            http::response<http::string_body> res{http::status::ok, req.version()};
-            res.set(http::field::content_type, "application/json");
-            res.body() = out.dump();
-            res.prepare_payload();
-            return res;
+            return make_response(http::status::ok, out);
         }
         catch (const std::exception &e)
         {

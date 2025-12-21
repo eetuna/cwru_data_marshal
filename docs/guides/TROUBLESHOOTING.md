@@ -1,0 +1,21 @@
+# Troubleshooting
+
+- Segfault after /health: health handler must not dereference shared state.
+- WS connect refused: ensure ports exposed 8080/8090, route `/ws` matches.
+- latest.json missing: verify ingest path writes index & latest atomically.
+- CMake can't find Boost/HDF5/ISMRMRD: install `libboost-all-dev libhdf5-dev libismrmrd-dev`
+  (Ubuntu/Debian) or make sure the SDK paths are exported via `CMAKE_PREFIX_PATH`.
+- viz_client disabled because OpenCV is missing: install `libopencv-dev libopencv-viz-dev`
+  in addition to the core dependencies above, then rerun `cmake -S . -B build` (and rebuild with
+  `cmake --build build --target viz_client`). If OpenCV is installed in a non-standard
+  prefix, set `OpenCV_DIR` to the folder containing `OpenCVConfig.cmake`. The `libopencv-dev`
+  meta package is what provides `OpenCVConfig.cmake`; the devcontainer/Docker images still add the
+  split `libopencv-*-dev` packages so we get the viz GUI bits without pulling in every optional
+  OpenCV module via `Recommends`. A healthy configure run prints
+  `Found OpenCV: <version> (linking via targets .../libraries ...)` and the deduplicated include
+  directories so you can confirm CMake located the viz component.
+- `image_streamer` reconnect loop prints `write failed (need buffer)` on modern Boost releases:
+  Beast removed the synchronous overload that accepted an explicit `flat_buffer`, so the client must
+  drive a `http::request_serializer` directly. Rebuild the streamer with the current sources – it now
+  enables `serializer.split(true)` before calling `http::write(stream, serializer, ec)` so Beast emits
+  the payload in manageable segments regardless of the message size.

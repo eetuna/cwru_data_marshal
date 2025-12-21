@@ -14,7 +14,8 @@ def main():
             try:
                 resp = requests.get(f"{MRI_HTTP_BASE}/v1/mrd/latest", timeout=0.5)
                 if resp.status_code == 200:
-                    data = resp.json()
+                    envelope = resp.json()
+                    data = envelope.get("data", {})
                     current_ts = data.get("ts")
                     if current_ts != last_ts:
                         print(f"[HTTP-MRD] New Data: {data.get('path')} | Frame: {data.get('frame_index')}")
@@ -26,7 +27,8 @@ def main():
             try:
                 p_resp = requests.get(f"{MRI_HTTP_BASE}/v1/pose/current", timeout=0.5)
                 if p_resp.status_code == 200:
-                    p_data = p_resp.json()
+                    p_envelope = p_resp.json()
+                    p_data = p_envelope.get("data", {})
                     pos = p_data.get("pose", {}).get("p")
                     # (Optional: print pose if changed)
             except Exception:

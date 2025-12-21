@@ -1,7 +1,7 @@
 {
     "client_id": "coordinator_bridge",
-    "received_at": 1766206388087426034,
-    "sent_at": 1766206388084566272,
+    "received_at": 1766357072998618707,
+    "sent_at": 1766357072996666368,
     "values": [
         {
             "command": "HALT",

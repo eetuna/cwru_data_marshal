@@ -22,11 +22,6 @@
 
 #include "marshal_state.hpp"
 
-// mrd_io.hpp centralizes the logic for writing MRD payloads to disk in a way
-// that guarantees downstream readers only observe complete artifacts.  It is
-// shared by both the HTTP and WebSocket ingestion paths, so any new ingest
-// surface can call into the same helpers without reimplementing the
-// filesystem choreography.
 namespace mrd
 {
 inline std::string iso8601_now_ms()
@@ -44,6 +39,12 @@ inline std::string iso8601_now_ms()
     std::ostringstream oss;
     oss << base << '.' << std::setw(3) << std::setfill('0') << ms.count() << 'Z';
     return oss.str();
+}
+
+inline uint64_t now_ms_epoch()
+{
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
 inline void ensure_dir(const std::filesystem::path &p)
@@ -190,6 +191,7 @@ inline nlohmann::json ingest_payload(MarshalState &state,
 
     const std::string ts = iso8601_now_ms();
     const uint64_t seq = ingest_sequence().fetch_add(1);
+    const uint64_t t_ms = now_ms_epoch();
 
     std::ostringstream name;
     name << ts << '_' << std::setw(6) << std::setfill('0') << seq << ".mrd";
@@ -211,6 +213,7 @@ inline nlohmann::json ingest_payload(MarshalState &state,
     {
         {"path", out_path.string()},
         {"ts", ts},
+        {"t_ms", t_ms},
         {"size_bytes", size_bytes},
         {"type", "mrd"},
         {"seq", seq},
@@ -238,6 +241,7 @@ inline nlohmann::json ingest_payload(MarshalState &state,
             {"type", "acq"},
             {"path", out_path.string()},
             {"seq", seq},
+            {"t_ms", t_ms},
             {"size_bytes", size_bytes},
             {"ts", ts},
             {"source", source}
