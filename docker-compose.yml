@@ -13,9 +13,10 @@ x-dev-volumes: &dev-volumes
 x-build-command: &build-command "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build"
 
 services:
+  # MRI Data Marshal (Hardened Hub)
   marshal:
     build: *build-dev
-    command: bash -lc "${BUILD_CMD:-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build} && ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data /data --sink mrd --flush-max-frames 4 --flush-max-ms 50"
+    command: bash -lc "${BUILD_CMD} && ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data /data --sink mrd"
     environment:
       BUILD_CMD: *build-command
     ports:
@@ -24,9 +25,34 @@ services:
     volumes: *dev-volumes
     working_dir: /workspaces/cwru_data_marshal
 
+  # Robot Data Marshal (Specialized RAM Hub)
+  robot-marshal:
+    build: *build-dev
+    command: bash -lc "chmod +x scripts/tools/get_robot_marshal.sh && ./scripts/tools/get_robot_marshal.sh && ./build/robot_marshal_demo 8081"
+    ports:
+      - "8081:8081"
+    volumes: *dev-volumes
+    working_dir: /workspaces/cwru_data_marshal
+
+  # The Safety Bridge (Coordinator)
+  coordinator:
+    build: *build-dev
+    command: bash -lc "python3 -u clients/bridge/coordinator.py"
+    environment:
+      # Pass internal container addresses to the bridge
+      MRI_WS_URI: "ws://marshal:8090/ws"
+      MRI_HTTP_BASE: "http://marshal:8080"
+      ROBOT_HTTP_BASE: "http://robot-marshal:8081"
+    depends_on:
+      - marshal
+      - robot-marshal
+    volumes: *dev-volumes
+    working_dir: /workspaces/cwru_data_marshal
+
+  # Example Visualizer
   viz:
     build: *build-dev
-    command: bash -lc "${BUILD_CMD:-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build} && ./build/viz_client --ws ws://marshal:8090/ws --data /data"
+    command: bash -lc "${BUILD_CMD} && ./build/viz_client --ws ws://marshal:8090/ws --data /data"
     environment:
       BUILD_CMD: *build-command
     depends_on:
@@ -34,33 +60,12 @@ services:
     volumes: *dev-volumes
     working_dir: /workspaces/cwru_data_marshal
 
-  fk:
-    build: *build-dev
-    command: bash -lc "${BUILD_CMD:-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build} && ./build/fk_client --http http://marshal:8080 --pretty"
-    environment:
-      BUILD_CMD: *build-command
-    depends_on:
-      - marshal
-    volumes: *dev-volumes
-    working_dir: /workspaces/cwru_data_marshal
-
+  # Synthetic Data Generator
   image_streamer:
     build: *build-dev
-    command: bash -lc "${BUILD_CMD:-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build} && ./build/image_streamer --http http://marshal:8080 --stream compose_demo --nx 128 --ny 128 --nslices 8 --dt-ms 500"
+    command: bash -lc "${BUILD_CMD} && ./build/image_streamer --http http://marshal:8080 --stream compose_demo --frames 0 --dt-ms 500"
     environment:
       BUILD_CMD: *build-command
-    depends_on:
-      - marshal
-    volumes: *dev-volumes
-    working_dir: /workspaces/cwru_data_marshal
-
-  fs_tail:
-    build: *build-dev
-    command: bash -lc "${BUILD_CMD:-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build} && ./build/fs_tail_client"
-    environment:
-      BUILD_CMD: *build-command
-      DM_INDEX: /data/mrd/index.jsonl
-      DM_TAIL_OFFSET: /data/mrd/.fs_tail_offset
     depends_on:
       - marshal
     volumes: *dev-volumes

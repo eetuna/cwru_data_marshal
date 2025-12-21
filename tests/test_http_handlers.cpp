@@ -215,47 +215,46 @@ TEST_CASE("HTTP Handler: ISMRMRD Frame", "[http][ismrmrd]")
     // Fill payload with dummy data
     std::fill(body_data.begin() + sizeof(ISMRMRD::ImageHeader), body_data.end(), 0);
 
-    SECTION("Valid Frame Append")
-    {
-        http::request<http::string_body> req{http::verb::post, "/v1/ismrmrd/frame", 11};
-        req.set("X-MRD-Stream", "test_stream");
-        req.body() = std::string(body_data.begin(), body_data.end());
-        req.prepare_payload();
-
-        auto res = handle_http_request(req, state);
-        REQUIRE(res.result() == http::status::ok);
-        auto j = json::parse(res.body());
-        CHECK(j["status"] == "ok");
-        CHECK(j["stream"] == "test_stream");
-    }
-
-    SECTION("Missing Stream Header")
-    {
-        http::request<http::string_body> req{http::verb::post, "/v1/ismrmrd/frame", 11};
-        // No X-MRD-Stream
-        req.body() = std::string(body_data.begin(), body_data.end());
-        req.prepare_payload();
-
-        auto res = handle_http_request(req, state);
-        REQUIRE(res.result() == http::status::bad_request);
-        auto j = json::parse(res.body());
-        CHECK(j["error"] == "missing X-MRD-Stream header");
-    }
-
-    SECTION("Invalid Payload Size")
-    {
-        http::request<http::string_body> req{http::verb::post, "/v1/ismrmrd/frame", 11};
-        req.set("X-MRD-Stream", "test_stream");
-        // Body too short for declared dimensions
-        req.body() = std::string(body_data.begin(), body_data.end() - 1); 
-        req.prepare_payload();
-
-        auto res = handle_http_request(req, state);
-        REQUIRE(res.result() == http::status::bad_request);
-        auto j = json::parse(res.body());
-        CHECK(j["error"] == "payload size does not match header");
-    }
-
+        SECTION("Valid Frame Append")
+        {
+            http::request<http::string_body> req{http::verb::post, "/v1/mrd/frame", 11};
+            req.set("X-MRD-Stream", "test_stream");
+            req.body() = std::string(body_data.begin(), body_data.end());
+            req.prepare_payload();
+    
+            auto res = handle_http_request(req, state);
+            REQUIRE(res.result() == http::status::ok);
+            auto j = json::parse(res.body());
+            CHECK(j["status"] == "ok");
+            CHECK(j["stream"] == "test_stream");
+        }
+    
+        SECTION("Missing Stream Header")
+        {
+            http::request<http::string_body> req{http::verb::post, "/v1/mrd/frame", 11};
+            // No X-MRD-Stream
+            req.body() = std::string(body_data.begin(), body_data.end());
+            req.prepare_payload();
+    
+            auto res = handle_http_request(req, state);
+            REQUIRE(res.result() == http::status::bad_request);
+            auto j = json::parse(res.body());
+            CHECK(j["error"] == "missing X-MRD-Stream header");
+        }
+    
+        SECTION("Invalid Payload Size")
+        {
+            http::request<http::string_body> req{http::verb::post, "/v1/mrd/frame", 11};
+            req.set("X-MRD-Stream", "test_stream");
+            // Body too short for declared dimensions
+            req.body() = std::string(body_data.begin(), body_data.end() - 1);
+            req.prepare_payload();
+    
+            auto res = handle_http_request(req, state);
+            REQUIRE(res.result() == http::status::bad_request);
+            auto j = json::parse(res.body());
+            CHECK(j["error"] == "payload size does not match header");
+        }
     fs::remove_all(temp);
 }
 

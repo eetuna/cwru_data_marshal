@@ -22,6 +22,17 @@
 
 namespace fs = std::filesystem;
 
+inline std::string sanitize_session(const std::string &s)
+{
+    std::string out;
+    for (char c : s)
+    {
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')
+            out.push_back(c);
+    }
+    return out.empty() ? mrd::iso8601_now_ms() : out;
+}
+
 int main(int argc, char **argv)
 {
     // Defaults aligned with devcontainer: everything under /src/data (via --data ./data)
@@ -33,6 +44,8 @@ int main(int argc, char **argv)
     std::string dumpbox_session = "";
     std::size_t flush_max_frames = 4;
     int flush_max_ms = 50;
+    std::size_t max_body_size = 128ULL * 1024ULL * 1024ULL;
+
     // Parse CLI
     for (int i = 1; i < argc; ++i)
     {
@@ -48,7 +61,9 @@ int main(int argc, char **argv)
         else if (a == "--dumpbox-root" && i + 1 < argc)
             dumpbox_root = argv[++i];
         else if (a == "--dumpbox-session" && i + 1 < argc)
-            dumpbox_session = argv[++i];
+            dumpbox_session = sanitize_session(argv[++i]);
+        else if (a == "--max-body-size" && i + 1 < argc)
+            max_body_size = static_cast<std::size_t>(std::stoull(argv[++i]));
         else if (a == "--flush-max-frames" && i + 1 < argc)
             flush_max_frames = static_cast<std::size_t>(std::stoull(argv[++i]));
         else if (a == "--flush-max-ms" && i + 1 < argc)
@@ -67,6 +82,7 @@ int main(int argc, char **argv)
     boost::asio::io_context ioc{1};
     MarshalState state;
     state.io = &ioc;
+    state.max_body_bytes = max_body_size;
 
     // Apply CLI to state FIRST
     state.sink_mode = (sink == "dumpbox") ? SinkMode::DUMPBOX : SinkMode::MRD;
@@ -115,7 +131,8 @@ int main(int argc, char **argv)
     // Log effective config
     std::cout << "marshal listening http=" << http_bind
               << " ws=" << ws_bind
-              << " data=" << state.data_dir;
+              << " data=" << state.data_dir
+              << " max_body=" << state.max_body_bytes;
     if (state.sink_mode == SinkMode::DUMPBOX)
     {
         std::cout << " dumpbox_root=" << state.dumpbox_root

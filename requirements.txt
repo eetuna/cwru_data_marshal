@@ -1,0 +1,8 @@
+# Core dependencies for MRD and HDF5 handling
+numpy
+ismrmrd
+h5py
+
+# Networking for mock clients and tests
+websockets
+requests

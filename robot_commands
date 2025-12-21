@@ -1,0 +1,11 @@
+{
+    "client_id": "coordinator_bridge",
+    "received_at": 1766206388087426034,
+    "sent_at": 1766206388084566272,
+    "values": [
+        {
+            "command": "HALT",
+            "reason": "FAULT"
+        }
+    ]
+}

@@ -52,7 +52,7 @@ RUN apt-get update && \
   && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
-  python3 -m pip install --no-cache-dir ismrmrd h5py numpy
+  python3 -m pip install --no-cache-dir ismrmrd h5py numpy websockets requests
 
 ENV CMAKE_GENERATOR=Ninja
 ENV CMAKE_EXE_LINKER_FLAGS_INIT="-fuse-ld=lld"
@@ -166,7 +166,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
-  python3 -m pip install --no-cache-dir ismrmrd h5py numpy
+  python3 -m pip install --no-cache-dir ismrmrd h5py numpy websockets requests
 
 # Optional: install websocat in runtime too
 ARG WEBSOCAT_VERSION=v1.13.0

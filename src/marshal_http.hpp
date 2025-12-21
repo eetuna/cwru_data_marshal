@@ -29,6 +29,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <iostream>
 #include <vector>
 #include <cctype>
 
@@ -42,17 +43,10 @@ namespace fs = std::filesystem;
 
 inline constexpr std::size_t kMaxHttpBodyBytes = 128ULL * 1024ULL * 1024ULL; // 128 MiB ceiling for inbound payloads
 
-// Seconds-precision ISO8601 for pose endpoint (keeps your original behavior)
+// Milliseconds-precision ISO8601 for all endpoints
 inline std::string iso8601_now()
 {
-    using namespace std::chrono;
-    auto now = system_clock::now();
-    auto t = system_clock::to_time_t(now);
-    char buf[64];
-    std::tm tm;
-    gmtime_r(&t, &tm);
-    std::strftime(buf, sizeof(buf), "%FT%TZ", &tm);
-    return buf;
+    return mrd::iso8601_now_ms();
 }
 
 inline bool read_file_all(const fs::path &p, std::string &out)
@@ -169,9 +163,9 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                 j_persist["ts"] = mrd::iso8601_now_ms();
                 mrd::append_line(pose_log, j_persist.dump());
             }
-            catch (...)
+            catch (const std::exception &e)
             {
-                // non-fatal persistence error
+                std::cerr << "Pose persistence failed: " << e.what() << "\n";
             }
 
             // WS: broadcast pose (non-fatal if WS not set)
@@ -182,11 +176,13 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                     {"p", {pose.p[0], pose.p[1], pose.p[2]}},
                     {"R", {pose.R[0], pose.R[1], pose.R[2], pose.R[3], pose.R[4], pose.R[5], pose.R[6], pose.R[7], pose.R[8]}},
                     {"ts", mrd::iso8601_now_ms()}};
-                state.ws_emit(evt.dump());
+                if (state.ws_emit_topic) {
+                    state.ws_emit_topic(evt.dump(), "pose");
+                }
             }
-            catch (...)
+            catch (const std::exception &e)
             {
-                // ignore WS errors
+                std::cerr << "Pose WS broadcast failed: " << e.what() << "\n";
             }
 
             auto jpose = pose_to_json(pose);
@@ -200,14 +196,72 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
         }
     }
 
+    // POST /v1/bio/signal
+    // Body (JSON): { "ts": "...", "source": "ecg", "data": [...], "rate_hz": 100.0 }
+    if (req.method() == http::verb::post && req.target() == "/v1/bio/signal")
+    {
+        try
+        {
+            auto body = json::parse(req.body());
+
+            if (!body.contains("ts") || !body.contains("source") || !body.contains("data") || !body.contains("rate_hz"))
+            {
+                return make_response(http::status::bad_request, 
+                    {{"error", "missing fields"}, {"required", {"ts", "source", "data", "rate_hz"}}});
+            }
+
+            if (!body["data"].is_array())
+            {
+                return make_response(http::status::bad_request, {{"error", "data must be an array"}});
+            }
+
+            // Persist to disk
+            try
+            {
+                auto paths = mrd::resolve_sink_paths(state);
+                fs::path bio_log = paths.index_root / "bio.jsonl";
+                mrd::append_line(bio_log, body.dump());
+            }
+            catch (const std::exception &e)
+            {
+                std::cerr << "Bio persistence failed: " << e.what() << "\n";
+                // Continue to broadcast even if disk fails? Or fail? 
+                // Following pose pattern: catch and continue, but we log it now.
+            }
+
+            // WS: broadcast (topic="bio")
+            try
+            {
+                // Ensure the message has a type for consumers who don't use topics yet
+                json evt = body;
+                evt["type"] = "bio";
+                
+                // Broadcast to "bio" topic specifically
+                if (state.ws_emit_topic) {
+                    state.ws_emit_topic(evt.dump(), "bio");
+                }
+            }
+            catch (const std::exception &e)
+            {
+                std::cerr << "Bio WS broadcast failed: " << e.what() << "\n";
+            }
+
+            return make_response(http::status::ok, {{"status", "ok"}, {"count", body["data"].size()}});
+        }
+        catch (const std::exception &e)
+        {
+            return make_response(http::status::bad_request, {{"error", "bad json"}, {"what", e.what()}});
+        }
+    }
+
     // GET /v1/config
     if (req.method() == http::verb::get && req.target() == "/v1/config")
     {
         return make_response(http::status::ok, {{"data_dir", state.data_dir}, {"ws_port", 8090}, {"max_entries", 100000}});
     }
 
-    // POST /v1/ismrmrd/frame  (append ISMRMRD Image to SWMR dataset)
-    if (req.method() == http::verb::post && req.target() == "/v1/ismrmrd/frame")
+    // POST /v1/mrd/frame  (append ISMRMRD Image to SWMR dataset)
+    if (req.method() == http::verb::post && req.target() == "/v1/mrd/frame")
     {
         using namespace std::string_literals;
         try
@@ -286,7 +340,9 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
             }
 
             auto entry = mrd::ingest_payload(state, body.data(), body.size(), "http");
-            return make_response(http::status::created, entry);
+            json resp = entry;
+            resp["status"] = "ok";
+            return make_response(http::status::created, resp);
         }
         catch (const std::exception &e)
         {
@@ -422,7 +478,7 @@ private:
             auto self = shared_from_this();
             self->req = {};
             auto parser = std::make_shared<http::request_parser<http::string_body>>();
-            parser->body_limit(kMaxHttpBodyBytes);
+            parser->body_limit(state.max_body_bytes);
 
             http::async_read(socket, buffer, *parser, [self, parser](auto ec, auto)
                              {
@@ -433,7 +489,7 @@ private:
                         using nlohmann::json;
                         http::response<http::string_body> res{http::status::payload_too_large, 11};
                         res.set(http::field::content_type, "application/json");
-                        res.body() = json{{"error", "request body exceeds limit"}, {"limit_bytes", kMaxHttpBodyBytes}}.dump();
+                        res.body() = json{{"error", "request body exceeds limit"}, {"limit_bytes", self->state.max_body_bytes}}.dump();
                         res.prepare_payload();
                         res.keep_alive(false);
                         self->respond(std::move(res));

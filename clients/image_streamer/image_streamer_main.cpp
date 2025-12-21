@@ -201,7 +201,7 @@ int main(int argc, char **argv) {
             http::status ack_status = http::status::ok;
 
             for (int attempt = 0; attempt < 3 && !delivered; ++attempt) {
-                http::request<http::vector_body<uint8_t>> req{http::verb::post, "/v1/ismrmrd/frame", 11};
+                http::request<http::vector_body<uint8_t>> req{http::verb::post, "/v1/mrd/frame", 11};
                 req.set(http::field::host, http_target.host);
                 req.set(http::field::content_type, "application/octet-stream");
                 req.set("X-MRD-Stream", opt.stream);

@@ -61,6 +61,8 @@ struct MarshalState
     PoseStore poses;
     std::string data_dir{"./data"};
     std::mutex ws_mtx;
+    std::mutex session_mtx; // Protects dumpbox_session initialization
+    std::size_t max_body_bytes{128ULL * 1024ULL * 1024ULL}; // Default 128 MiB
     std::unordered_set<void *> ws_clients; // track raw ptr keys
     boost::asio::io_context *io = nullptr;
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();

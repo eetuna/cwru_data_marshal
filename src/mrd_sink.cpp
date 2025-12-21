@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdint>
 #include <iomanip>
+#include <iostream>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -539,8 +540,9 @@ FrameAppendResult MrdSink::append_frame(const std::string &stream_id,
         state_.ws_emit(entry.dump());
         state_.ws_emit_topic(entry.dump(), "mrd");
     }
-    catch (...)
+    catch (const std::exception &e)
     {
+        std::cerr << "MRD sink WS emit failed: " << e.what() << "\n";
     }
 
     return result;

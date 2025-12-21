@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <string>
+#include <iostream>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -26,19 +27,6 @@
 // shared by both the HTTP and WebSocket ingestion paths, so any new ingest
 // surface can call into the same helpers without reimplementing the
 // filesystem choreography.
-//
-// The helpers provide a few building blocks:
-//   * iso8601_now_ms: generate timestamps for filenames and metadata.
-//   * ensure_dir: create sink directories on demand.
-//   * write_atomic: durably write a blob via fsync + rename semantics.
-//   * append_line: append to the index log with the same durability
-//     guarantees.
-//   * ingest_payload: given a payload and a MarshalState, create the target
-//     MRD file, update index/metadata files, and emit WebSocket notifications.
-//
-// The ingest helper handles both live MRD sinks and dumpbox sessions.  It also
-// keeps a process-wide sequence counter so files are unique even when multiple
-// sources ingest concurrently.
 namespace mrd
 {
 inline std::string iso8601_now_ms()
@@ -90,6 +78,7 @@ inline SinkPaths resolve_sink_paths(MarshalState &state)
     }
     else
     {
+        std::lock_guard<std::mutex> lock(state.session_mtx);
         std::string session = state.dumpbox_session.empty() ? iso8601_now_ms() : state.dumpbox_session;
         fs::path session_dir = fs::path(state.dumpbox_root) / session;
         paths.index_root = session_dir;
@@ -218,13 +207,15 @@ inline nlohmann::json ingest_payload(MarshalState &state,
     if (ec2)
         size_bytes = size;
 
-    nlohmann::json entry = {
+    nlohmann::json entry =
+    {
         {"path", out_path.string()},
         {"ts", ts},
         {"size_bytes", size_bytes},
         {"type", "mrd"},
         {"seq", seq},
-        {"source", source}};
+        {"source", source}
+    };
 
     append_line(index_root / "index.jsonl", entry.dump());
     const std::string latest_dump = entry.dump();
@@ -235,26 +226,29 @@ inline nlohmann::json ingest_payload(MarshalState &state,
         state.ws_emit(entry.dump());
         state.ws_emit_topic(entry.dump(), "mrd.ingest");
     }
-    catch (...)
+    catch (const std::exception &e)
     {
+        std::cerr << "WS emit failed: " << e.what() << "\n";
     }
 
     try
     {
-        nlohmann::json evt = {
+        nlohmann::json evt =
+        {
             {"type", "acq"},
             {"path", out_path.string()},
             {"seq", seq},
             {"size_bytes", size_bytes},
             {"ts", ts},
-            {"source", source}};
+            {"source", source}
+        };
         state.ws_emit(evt.dump());
     }
-    catch (...)
+    catch (const std::exception &e)
     {
+        std::cerr << "WS legacy emit failed: " << e.what() << "\n";
     }
 
     return entry;
 }
 } // namespace mrd
-

@@ -66,7 +66,7 @@ def main() -> int:
     port = url.port or 80
 
     conn = http.client.HTTPConnection(host, port)
-    path = "/v1/ismrmrd/frame"
+    path = "/v1/mrd/frame"
 
     nx = args.nx if args.nx is not None else args.size
     ny = args.ny if args.ny is not None else args.size

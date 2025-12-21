@@ -1,298 +1,79 @@
 # CWRU Data Marshal
 
-The marshal is a tiny, fast HTTP/WebSocket hub for reconstructed MRI data (ISMRMRD).
-It always runs in exactly **one** of two modes:
-
-- **Mode A – Live file access:** scanner → `marshal` → **MRD files** → clients read files.
-- **Mode B – Record → Replay:**
-  - **Record now:** scanner → `marshal` → **dumpbox session** (no `/data/mrd` writes).
-  - **Replay later:** `playback` → `marshal` → **MRD files** → clients read files using the same interface as live.
-
-Keeping the sink explicit makes operations predictable, observability trivial, and
-failure handling much easier.
+A high-performance, dual-marshal architecture for synchronized MRI and robotic data management. Designed for clinical reliability, real-time feedback, and high-throughput imaging data streams.
 
 ---
 
-## Why you might want this
+## 🛠️ Operational Modes
 
-- 🚦 **Two explicit sinks** keep live and replay data flows separate and auditable.
-- 🔁 **Playback utility** replays dumpbox sessions by re-posting them to the marshal.
-- 🔓 **HDF5 SWMR streaming** (`POST /v1/ismrmrd/frame`) lets clients open growing MRD
-  files safely while the marshal appends new frames.
-- 🧩 **Clients stay simple:** they only ever read MRD files on disk.
-- ⚙️ **No heavy dependencies:** Boost.Asio/Beast and nlohmann/json do the heavy lifting.
+The marshal runs in one of two explicit modes to ensure data integrity:
 
----
+### [Mode A: Live Mode](docs/guides/README_MODE_A.md)
+*   **Purpose:** Real-time data streaming and feedback.
+*   **Workflow:** Scanner → Marshal → **Live Files** → Clients.
+*   **Storage:** Data is written to `./data/mrd`.
 
-## First-time setup (10 minutes)
-
-1. **Install build tools and SDKs** (Ubuntu/Debian):
-   ```bash
-   sudo apt-get update
-   sudo apt-get install -y \
-     build-essential cmake ninja-build pkg-config \
-     libboost-all-dev libhdf5-dev libismrmrd-dev
-   ```
-   These match the toolchain baked into `.devcontainer/Dockerfile` so local builds
-   have the HDF5, Boost, and ISMRMRD headers needed for SWMR support.
-   Install the lightweight Python runtime used by the helpers:
-   ```bash
-   sudo apt-get install -y python3 python3-pip python3-venv python3-numpy
-   python3 -m pip install --user --upgrade pip
-   python3 -m pip install --user ismrmrd h5py numpy
-   ```
-2. **Configure + build** the binaries:
-   ```bash
-   mkdir -p build
-   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF
-   cmake --build build -j"$(nproc)"
-   ```
-3. **Pick a sink:**
-   - Live MRD files: `./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink mrd --flush-max-frames 4 --flush-max-ms 50`.
-   - Record-only dumpbox: `./build/marshal --http ... --sink dumpbox --dumpbox-root ./data/dumpbox`.
-   - Use `--flush-max-frames 1 --flush-max-ms 0` with the MRD sink to force single-frame flushing when latency outweighs throughput.
-4. **Ingest data:**
-   - Upload MRD files via `POST /v1/mrd/ingest` (curl examples below).
-   - Append SWMR frames via `POST /v1/ismrmrd/frame` with ISMRMRD image
-     messages to stream voxels into a growing dataset that readers can follow in
-     near real time.
-5. **Inspect outputs:** MRD sink writes to `./data/mrd`; dumpbox sink writes to
-   `./data/dumpbox/<session>/files`. Metadata is mirrored in `index.jsonl` and
-   `latest.json` for simple polling clients.
-
-The step-by-step runbooks in [`README_MODE_A.md`](README_MODE_A.md) and
-[`README_MODE_B.md`](README_MODE_B.md) expand on these steps with copy/paste-able
-commands, cleanup instructions, and verification tips.
-
-Prefer containerized workflows? See [`docs/CONTAINERS.md`](docs/CONTAINERS.md) for
-a deep dive into the devcontainer image, the multi-stage Dockerfile, and the
-`docker compose` demo stack that spins up the marshal alongside example clients.
+### [Mode B: Dumpbox Mode](docs/guides/README_MODE_B.md)
+*   **Purpose:** High-integrity archival recording and offline playback.
+*   **Workflow:** Scanner → Marshal → **Session Folders** → Playback → Live.
+*   **Storage:** Data is siloed into `./data/dumpbox/<session>`.
 
 ---
 
-## Storage layout
+## 🚀 Getting Started
 
-**Live (MRD sink)**
-```
-/data/mrd/
-├─ streamA.mrd
-├─ streamB.mrd
-├─ index.jsonl
-└─ latest.json
-```
-
-**Record (Dumpbox sink)**
-```
-/data/dumpbox/2025-09-20T01:23:00Z/
-├─ files/
-│  ├─ streamA.mrd
-│  └─ streamB.mrd
-├─ index.jsonl
-└─ latest.json
-```
-
----
-
-## Build
-
-### Binaries produced
-
-- `build/marshal` — HTTP/WebSocket server.
-- `build/playback` — HTTP-only session replayer (feeds dumpbox sessions back to the marshal).
-- `build/viz_client` — simple HDF5 SWMR-aware visualization client with ASCII slice preview.
-- `build/image_streamer` — synthetic multi-slice generator that posts frames to the marshal.
-- `build/mk_mrd` — utility that creates valid placeholder MRD files for smoke tests.
-
-### Tests
-
-Enable `BUILD_TESTING` during configuration and run `ctest` to exercise the Catch2
-suite. [`docs/TESTS_OVERVIEW.md`](docs/TESTS_OVERVIEW.md) lists each test module
-and the focused commands needed to run them individually.
-
----
-
-## Quick start
-
-> Full, copy-pasteable runbooks are in `README_MODE_A.md` (Live) and `README_MODE_B.md` (Record→Replay).
-> Below are minimal one-liners.
-
-### Live (Mode A) — scanner → MRD → clients
+### 1. Interactive Demo
+To see the system in action (including real-time streaming, bio-signals, and the safety bridge), run the interactive demo:
 ```bash
-# Ensure no previous marshal instance is running
-pkill -f "/build/marshal" >/dev/null 2>&1 || true
-
-# Start server in MRD sink
-./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink mrd --flush-max-frames 4 --flush-max-ms 50 &
-sleep 1
-# Use `--flush-max-frames 1 --flush-max-ms 0` if you need the legacy single-frame flush baseline.
-curl -s http://localhost:8080/health    # expect JSON {"status":"ok","uptime_s":...}
-
-# Ingest two files (dummy fallback shown)
-mkdir -p ./data/mrd
-head -c 8192 </dev/urandom > ./data/mrd/a.mrd
-head -c 12288 </dev/urandom > ./data/mrd/b.mrd
-curl -s -H "Content-Type: application/octet-stream" --data-binary @./data/mrd/a.mrd http://localhost:8080/v1/mrd/ingest
-curl -s -H "Content-Type: application/octet-stream" --data-binary @./data/mrd/b.mrd http://localhost:8080/v1/mrd/ingest
-
-# Verify client-visible files
-ls -l ./data/mrd
-tail -n 5 ./data/mrd/index.jsonl || true
-cat ./data/mrd/latest.json
-
-# Stop the marshal when finished (fallback if background PID was lost)
-pkill -f "/build/marshal" >/dev/null 2>&1 || true
+./scripts/run_demo.sh
 ```
 
-#### Stream frames with SWMR
-
-The marshal accepts ISMRMRD Image messages. Each POST body is an
-`ISMRMRD::ImageHeader` immediately followed by the raw voxel payload. See
-[`docs/API_REFERENCE.md`](docs/API_REFERENCE.md#post-v1ismrmrdframe) for the
-exact layout. Two helper utilities now live in-tree:
-
-- **C++ (`image_streamer`)** — builds with the rest of the project. Generates a
-  multi-slice, single-channel float32 series with subtle temporal wobble. The
-  MRD sink automatically rolls to a new file if `nx`, `ny`, or slice counts
-  change mid-stream, stamping the geometry into the filename.
-- **Python (`tools/stream_image_series.py`)** — mirrors the C++ generator using
-  `numpy`/`ismrmrd`. Both land their temporary `.bin` artifacts under `./data`.
-  Width/height, slice count, and cadence can be overridden with flags such as
-  `--nx 128 --ny 128 --nslices 8 --dt-ms 50`.
-
-Single-frame helpers (handy for testing payloads):
-
+### 2. Run All Tests
+To verify the entire system (Unit, Integration, and Stress tests):
 ```bash
-# C++
-./build/make_image_message --out ./data/image_message.bin
-
-# Python (same output path)
-python3 tools/make_image_message.py
-
-curl -fsS \
-  -H 'Content-Type: application/octet-stream' \
-  -H 'X-MRD-Stream: demo_stream' \
-  --data-binary @./data/image_message.bin \
-  http://localhost:8080/v1/ismrmrd/frame | jq
-```
-
-Continuous generator:
-
-```bash
-# C++ streaming client (Ctrl+C to stop)
-./build/image_streamer --http http://localhost:8080 --stream demo_stream --nx 128 --ny 128 --nslices 8 --dt-ms 200
-
-# Python variant (same CLI flags)
-python3 tools/stream_image_series.py --http http://localhost:8080 --stream demo_stream --nx 128 --ny 128 --nslices 8 --dt-ms 200
-
-# Follow the growing dataset (ASCII preview per slice)
-./build/viz_client --ws ws://localhost:8090/ws --data ./data/mrd
-```
-
-### Record→Replay (Mode B)
-```bash
-# RECORD: start server in dumpbox sink; session auto-named
-./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink dumpbox --dumpbox-root ./data/dumpbox &
-sleep 1
-curl -s http://localhost:8080/health    # -> {"status":"ok","uptime_s":...}
-
-# Post two files (dummy shown)
-head -c 16384 </dev/urandom > ./data/tmp1.mrd
-head -c 24576 </dev/urandom > ./data/tmp2.mrd
-curl -s -H "Content-Type: application/octet-stream" --data-binary @./data/tmp1.mrd http://localhost:8080/v1/mrd/ingest
-curl -s -H "Content-Type: application/octet-stream" --data-binary @./data/tmp2.mrd http://localhost:8080/v1/mrd/ingest
-
-# Locate newest session (no placeholders)
-SESSION_DIR=$(ls -dt ./data/dumpbox/* | head -n1)
-echo "$SESSION_DIR"
-find "$SESSION_DIR" -maxdepth 2 -type f -print
-
-# REPLAY: restart server in MRD sink and play back the session
-pkill -f "/build/marshal" >/dev/null 2>&1 || true
-./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data ./data --sink mrd --flush-max-frames 4 --flush-max-ms 50 &
-sleep 1
-# Legacy single-flush behavior is available with `--flush-max-frames 1 --flush-max-ms 0` if required for latency-sensitive runs.
-./build/playback --http http://localhost:8080 --data "$SESSION_DIR" --speed 1.0
-
-# Verify MRDs rebuilt for clients
-ls -l ./data/mrd
-tail -n 5 ./data/mrd/index.jsonl || true
-cat ./data/mrd/latest.json
+./scripts/run_all_tests.sh
 ```
 
 ---
 
-## Developer note: MRD ingestion helper
+## 📖 Documentation Map
 
-Both the HTTP (`POST /v1/mrd/ingest`) and WebSocket binary ingest paths share
-`include/mrd_io.hpp`.  The helper writes the payload to a temporary file,
-`fsync`s it, and atomically renames it into place before appending to
-`index.jsonl` and rewriting `latest.json`.  It then emits the corresponding
-metadata JSON over the WebSocket fan-out.  Reusing this helper keeps the HTTP
-and WebSocket behaviours identical and guarantees clients only ever see fully
-flushed MRD artifacts.
+### Core Guides
+- **[Setup & Ingest](docs/guides/USAGE_WITH_CLIENTS.md):** How to install and start ingesting data.
+- **[Mode A: Live Mode](docs/guides/README_MODE_A.md):** Real-time SWMR streaming documentation.
+- **[Mode B: Dumpbox Mode](docs/guides/README_MODE_B.md):** Archival recording and playback documentation.
+- **[Troubleshooting](docs/guides/TROUBLESHOOTING.md):** Common issues and solutions.
 
-## HTTP API
+### Technical Architecture
+- **[System Architecture](docs/technical/ARCHITECTURE.md):** High-level design and data flow.
+- **[API Reference](docs/technical/API_REFERENCE.md):** REST and WebSocket endpoint specifications.
+- **[Branch Comparison](docs/technical/BRANCH_COMPARISON.md):** MRI Marshal (SWMR) vs. Robot Marshal (RAM Buffer).
 
-- **`POST /v1/mrd/ingest`** — Body: MRD bytes (`application/octet-stream`)
-  - **MRD mode:** writes to `/data/mrd`, updates global `index.jsonl`/`latest.json`.
-  - **Dumpbox mode:** writes to session under `/data/dumpbox/<SESSION>`, updates session `index.jsonl`/`latest.json`.
-- **`POST /v1/ismrmrd/frame`** — Body: ISMRMRD Image header + voxels
-  - `X-MRD-Stream`: logical identifier; the marshal will keep a matching `.mrd` file open
-  - Appends into `/images/data` using HDF5 SWMR so readers can open the file while it grows
-- **`POST /v1/pose/update`** — JSON body `{ "p": [x,y,z], "R": [9] }`; records pose and broadcasts it.
-- **`GET /v1/pose/current`** — Latest pose (if any) in JSON.
-- **`GET /health`** — returns JSON `{ "status": "ok", "uptime_s": <seconds> }`.
-- **(If present) `GET /v1/mrd/since?ts=...&limit=...`** — convenience reader over `index.jsonl`.
-
-See [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) for details, payload examples,
-and error semantics aimed at new integrators. Pose handling and WebSocket
-broadcast topics are covered there as well.
+### Reports & Performance
+- **[Performance Report](docs/reports/PERFORMANCE_REPORT.md):** Throughput and latency benchmarks.
+- **[Verification Report](docs/reports/REFACTORING_AND_TESTING_REPORT.md):** Audit of current implementation vs. DataFlow design.
+- **[Project Roadmap](docs/ROADMAP_IMPROVEMENTS.md):** Current status and planned enhancements.
 
 ---
 
-## CLI flags
+## 📂 Repository Structure
 
-**marshal**
-- `--http <addr:port>` (e.g., `0.0.0.0:8080`)
-- `--ws <addr:port>` (e.g., `0.0.0.0:8090`)
-- `--data <path>` (root data dir)
-- `--sink <mrd|dumpbox>`
-- `--dumpbox-root <path>` (only in dumpbox mode; default `/data/dumpbox`)
-- `--dumpbox-session <name>` (optional; auto UTC ISO if omitted)
-- `--flush-max-frames <N>` (default `4`) — coalesce up to *N* frames before
-  forcing an HDF5 flush when running in MRD mode.
-- `--flush-max-ms <ms>` (default `50`) — maximum wall-clock delay before the
-  marshal flushes pending SWMR data.
-
-**playback**
-- `--http http://host:port` (marshal base)
-- `--data /path/to/dumpbox/session` (must contain `index.jsonl` and `files/`)
-- `--speed <float>` (`1.0` ≈ real-time by timestamps; omit for fastest)
+- `scripts/`: Main entry points for demo and testing.
+  - `scripts/benchmarks/`: Exhaustive performance and chaos tests.
+  - `scripts/tools/`: Auxiliary helper and dev scripts.
+- `src/`: MRI Marshal core implementation (Boost.Asio/Beast).
+- `clients/`: Reference clients including the **Coordinator Bridge**, trackers, and streamers.
+- `tests/`: Comprehensive C++ test suites (9/9 pass).
+- `data/`: Default directory for MRI session logs and artifacts.
 
 ---
 
-## Repo layout (high level)
-
-```
-src/
-  marshal_main.cpp       # flags, startup, sinks
-  marshal_http.hpp       # /v1/mrd/ingest (+ index/latest management)
-  marshal_ws.hpp         # WS broker (for clients/viz if needed)
-  marshal_state.hpp      # SinkMode + state
-services/
-  playback/
-    playback_main.cpp    # HTTP-only dumpbox → /v1/mrd/ingest
-include/
-  atomic_write.hpp       # safe file writes (tmp + rename)
-docs/
-  ARCHITECTURE.md        # Internal components and data flow
-```
-
----
-
-## Usage runbooks
-
-- See `README_MODE_A.md` for Live (copy-pasteable).
-- See `README_MODE_B.md` for Record→Replay (copy-pasteable).
-- See `docs/USAGE_WITH_CLIENTS.md` for end-to-end walkthroughs that include the
-  sample clients (`fk_client`, `viz_client`, `ws_producer`).
+## 🛡️ Key Features
+- **HDF5 SWMR:** Concurrent read/write for real-time MRI visualization.
+- **Volume Support:** Native handling of **2D Multislice** series and **Full 3D Volumes**.
+- **Flexible Ingestion:** 
+    -   Use **Streaming Mode** (`/v1/mrd/frame`) for low-latency live feedback.
+    -   Use **Bulk Mode** (`/v1/mrd/ingest`) for efficient 3D volume archival.
+- **Process Isolation:** Decoupled Safety (Robot) and Volume (MRI) marshals.
+- **Clinical Readiness:** Standardized `/v1/mrd/` API with millisecond precision and error logging.
+- **Software E-Stop:** Active bridge monitoring for automated safety responses.

@@ -41,7 +41,7 @@ inline WsResult handle_ws_message(MarshalState &state, const std::string &text_d
     // 1. Text Message Handling
     if (!text_data.empty())
     {
-        // Try to parse control JSON: {"subscribe":"<topic>"}
+        // Try to parse control JSON: {"subscribe":"<topic>"} or {"unsubscribe":"<topic>"}
         try
         {
             nlohmann::json j = nlohmann::json::parse(text_data, nullptr, false);
@@ -52,6 +52,14 @@ inline WsResult handle_ws_message(MarshalState &state, const std::string &text_d
                     res.topic = j["subscribe"].get<std::string>();
                     res.is_subscription = true;
                     res.response = "{\"ok\":true,\"subscribed\":\"" + res.topic + "\"}";
+                    return res;
+                }
+                if (j.contains("unsubscribe") && j["unsubscribe"].is_string())
+                {
+                    // Revert to default system topic
+                    res.topic = "_system_"; 
+                    res.is_subscription = true;
+                    res.response = "{\"ok\":true,\"unsubscribed\":true}";
                     return res;
                 }
             }
@@ -129,9 +137,9 @@ public:
         for (auto h : state_.ws_clients)
         {
             auto *s = static_cast<Session *>(h);
-            // deliver if the session is subscribed to this topic or to ALL (empty)
-            if (topic.empty() || s->topic.empty() || s->topic == topic)
+            if (topic.empty() || s->topic == topic) {
                 s->send(msg);
+            }
         }
     }
 
@@ -150,7 +158,7 @@ do_accept(); });
         MarshalState &state;
         WsServer &server;
         std::mutex send_mtx;
-        std::string topic; // empty = receive ALL broadcasts
+        std::string topic = "_system_"; // Default topic, receives only global broadcasts
         Session(boost::asio::ip::tcp::socket &&s, MarshalState &st, WsServer &sv)
             : ws(std::move(s)), state(st), server(sv) {}
         void run()
