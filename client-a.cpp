@@ -108,7 +108,7 @@ int main() {
         std::cerr << "Failed to POST result2 to server.\n";
     }
     //Step 7: Use GET to read k last entries from same read file as used in Step 2
-    int k = 5;
+    /*int k = 5;
     std::string read_endpoint_mult = "/read/" + read_file + "?last=" + std::to_string(k);
     auto res_mult = cli.Get(read_endpoint_mult.c_str());
 
@@ -123,7 +123,7 @@ int main() {
     // Check that "entries" exists and is an array
 
     if (!input_data_mult.contains("entries") || !input_data_mult["entries"].is_array() || input_data_mult["entries"].empty()) {
-        std::cerr << "Invalid data in server file\n";
+        std::cerr << "Invalid data in server file (mult data)\n";
         return 1;
     }
     
@@ -154,7 +154,7 @@ int main() {
         }
         std::cout << "\n";
     }
-    
+    */
     // Wait 5 milliseconds before the next request
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
 }

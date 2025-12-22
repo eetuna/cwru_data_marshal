@@ -5,6 +5,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.server
+    volumes:
+      - /home/rza3/cwru_data_marshal/log_files/:/log_files/
     container_name: cpp_server
     ports:
       - "8080:8080"

@@ -40,6 +40,9 @@ std::shared_mutex map_mutex;
 //size of cahches
 int cache_capacity = 1000;
 
+//output file stream
+std::ofstream myfile;
+
 // Access mutex for a file, assuming it exists in file_mutexes
 std::shared_mutex& get_mutex_for_file(const std::string& filename) {
     std::shared_lock<std::shared_mutex> lock(map_mutex);
@@ -203,9 +206,12 @@ bool load_config(const std::string& config_path) {
     return true;
 }
 int main() {
+
     httplib::Server server;
     const std::string storage_dir = "./";
     const std::string config_path = "files.json";
+    myfile.open ("/log_files/error_log.txt");
+    //myfile << "Started.\n";
 
     if (!load_config(config_path)) {
         return 1;
@@ -266,7 +272,11 @@ int main() {
                     return;
                 }
                 std::cerr << "Queuing entry for " << filename << ": " << json_output << "\n";
-
+                //myfile << "Writing this to a file.\n";
+                if(it->second.is_full()){
+                    myfile << "Warning: Write queue for " << filename << " is full. Overwriting oldest entries.\n";
+                }
+                //myfile << "Testing.\n";
                 it->second.push(json_output);
             }
             write_condition.notify_all(); // Notify the background worker
@@ -363,4 +373,6 @@ int main() {
     stop_worker = true;
     write_condition.notify_all();
     worker_thread.join();
+    // Close error log file
+    myfile.close();
 }
