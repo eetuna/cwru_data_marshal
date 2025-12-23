@@ -1,6 +1,7 @@
 {
     "client-a": {
       "read_from": "file1.json",
+      "read_from2": "file3.json",
       "write_to1": "file2.json",
       "write_to2": "file3.json"
     },

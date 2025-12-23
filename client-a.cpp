@@ -35,6 +35,7 @@ int main() {
     }
 
     std::string read_file = routes_config[client_id]["read_from"];
+    std::string read_file_2 = routes_config[client_id]["read_from2"];
     std::string write_file = routes_config[client_id]["write_to1"];
     std::string write_file_2 = routes_config[client_id]["write_to2"];
 
@@ -108,8 +109,8 @@ int main() {
         std::cerr << "Failed to POST result2 to server.\n";
     }
     //Step 7: Use GET to read k last entries from same read file as used in Step 2
-    /*int k = 5;
-    std::string read_endpoint_mult = "/read/" + read_file + "?last=" + std::to_string(k);
+    int k = 10000;
+    std::string read_endpoint_mult = "/read/" + read_file_2+ "?last=" + std::to_string(k);
     auto res_mult = cli.Get(read_endpoint_mult.c_str());
 
     if (!res_mult || res_mult->status != 200) {
@@ -154,7 +155,7 @@ int main() {
         }
         std::cout << "\n";
     }
-    */
+    
     // Wait 5 milliseconds before the next request
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
 }
