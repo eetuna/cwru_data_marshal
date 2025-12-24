@@ -11,6 +11,6 @@ docker-compose up --build --force-recreate --remove-orphans
 The docker container can be run on both Windows and Ubuntu host systems. Make sure the line endings are appropriate for the host system you are using.
 #### File Path Changes
 Because container directories are mounted to the host system (for logging/archival purposes), the following file paths should be modified for your system:
-file: docker-compose.yml
-lines: 9, 10
-change: D:\rza3\cwru_data_marshal to the filepath for cwru_data_marshal (this repository) on your system.
+<br>file: docker-compose.yml
+<br>lines: 9, 10
+<br>change: D:\rza3\cwru_data_marshal to the filepath for cwru_data_marshal (this repository) on your system.
