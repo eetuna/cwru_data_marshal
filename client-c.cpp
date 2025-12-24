@@ -59,17 +59,17 @@ int main() {
     std::cout << "Read values: " << values.dump(2) << "\n";
 
     double result = 1.0;
-    for (size_t i = 0; i < values.size(); ++i) {
+    /*for (size_t i = 0; i < values.size(); ++i) {
         result += values[i].get<double>();
         result += i;
-    }
+    }*/
 
     // Step 4: Build output JSON
     json out_data = {
         {"client_id", client_id},
         {"sent_at", current_time_ns()},
         //{"tags", {"computed", "example"}},
-        {"values", {result,1}}
+        {"values", {result}}
     };
 
     // Step 5: Send POST to server to write result

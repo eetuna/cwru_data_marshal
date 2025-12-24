@@ -94,19 +94,19 @@ void background_worker(const std::string& storage_dir) {
 
         // Write the data to the file
         try {
-            std::string path = storage_dir + filename;
-            std::string tmp_path = path + ".tmp";
-            std::ofstream ofs(tmp_path);
+            std::string path =  "/files/" + filename;
+            //std::string tmp_path = path + ".tmp";
+            std::ofstream ofs(path,std::ios::out | std::ios::app);
 
             if (!ofs) {
-                std::cerr << "Failed to open temporary file for writing: " << tmp_path << "\n";
+                std::cerr << "Failed to open file for writing: " << path << "\n";
                 continue;
             }
 
             ofs << entry_str;
             ofs.close();
 
-            std::filesystem::rename(tmp_path, path);
+           // std::filesystem::rename(tmp_path, path);
         } catch (const std::filesystem::filesystem_error& e) {
             std::cerr << "Failed to write file " << filename << ": " << e.what() << "\n";
         } catch (const std::exception& e) {
@@ -157,7 +157,7 @@ bool load_config(const std::string& config_path) {
         write_queue_mutexes.try_emplace(filename);
         //write_queues.try_emplace(filename);
         const std::string storage_dir = "./";
-        std::string path = storage_dir + filename;
+        std::string path =  "/files/" + filename;
         // Use the per-file mutex for thread safety
        // std::shared_mutex& mtx = it->second;
       /*  std::shared_mutex* mtx = nullptr;

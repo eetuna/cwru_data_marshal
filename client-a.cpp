@@ -58,11 +58,12 @@ int main() {
 
     // Step 3: Compute result = multiply values + index sum
     const auto& values = input_data["values"];
-    double result = 1.0;
-    for (size_t i = 0; i < values.size(); ++i) {
+    std::cout << "Read values: " << values.dump(2) << "\n";
+    double result = 2.0;
+    /*for (size_t i = 0; i < values.size(); ++i) {
         result += values[i].get<double>();
         result += i;
-    }
+    }*/
 
     // Step 4: Build output JSON
     json out_data = {
@@ -85,15 +86,16 @@ int main() {
     // Step 6: Send POST to server to write to other write file
     std::string write_endpoint_2 = "/write/" + write_file_2;
     //const auto& values = input_data["values"];
+    
     std::vector<double> result2;
 
-    for (size_t i = 0; i < values.size(); ++i) {
+    /*for (size_t i = 0; i < values.size(); ++i) {
         double val = values[i].get<double>();
         result2.push_back(val + i);  // or any computation you want
-    }
+    }*/
     for (size_t i = 0; i < 5;++i) {
         double val = 5;
-        result2.push_back(val + i);  // or any computation you want
+        result2.push_back(3.0);//val + i);  // or any computation you want
     }
     json out_data2 = {
         {"client_id", client_id},

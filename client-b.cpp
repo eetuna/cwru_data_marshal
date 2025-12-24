@@ -56,11 +56,12 @@ int main() {
 
     // Step 3: Compute result = multiply values + index sum
     const auto& values = input_data["values"];
-    double result = 1.0;
-    for (size_t i = 0; i < values.size(); ++i) {
+    std::cout << "Read values: " << values.dump(2) << "\n";
+    double result = 3.2;
+    /*for (size_t i = 0; i < values.size(); ++i) {
         result += values[i].get<double>();
         result += i;
-    }
+    }*/
 
     // Step 4: Build output JSON
     json out_data = {

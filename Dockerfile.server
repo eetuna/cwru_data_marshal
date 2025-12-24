@@ -4,7 +4,8 @@ FROM gcc:latest
 WORKDIR /app
 
 # Copy source files
-COPY server.cpp files.json file1.json file2.json file3.json httplib.h json.hpp circularBuffer.hpp ./
+COPY server.cpp files.json httplib.h json.hpp circularBuffer.hpp ./
+COPY  file1.json file2.json file3.json  /files/
 
 # Build server
 RUN g++ server.cpp -o server -pthread
