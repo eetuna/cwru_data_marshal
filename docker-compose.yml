@@ -46,6 +46,26 @@ services:
     networks:
       cppnet:
         ipv4_address: 172.28.1.13
+  client-planning:
+    build:
+      context: .
+      dockerfile: Dockerfile.client-planning
+    container_name: cpp_client-planning
+    depends_on:
+      - server
+    networks:
+      cppnet:
+        ipv4_address: 172.28.1.14
+  client-controller:
+    build:
+      context: .
+      dockerfile: Dockerfile.client-controller
+    container_name: cpp_client-controller
+    depends_on:
+      - server
+    networks:
+      cppnet:
+        ipv4_address: 172.28.1.15
 networks:
   cppnet:
     driver: bridge

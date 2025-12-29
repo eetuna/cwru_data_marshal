@@ -1,1 +1,2666 @@
 { "values": [2, 3, 4] }
+{
+    "client_id": "client-controller",
+    "received_at": 1767041003998538799,
+    "sent_at": 1767041003996522180,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004011741999,
+    "sent_at": 1767041004011221193,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004022469843,
+    "sent_at": 1767041004021971737,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004033117081,
+    "sent_at": 1767041004032554884,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004043423241,
+    "sent_at": 1767041004042902116,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004054113420,
+    "sent_at": 1767041004053628638,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004065562419,
+    "sent_at": 1767041004064740983,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004077893495,
+    "sent_at": 1767041004077398175,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004092279560,
+    "sent_at": 1767041004091164018,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004104317507,
+    "sent_at": 1767041004103771697,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004120024494,
+    "sent_at": 1767041004118721651,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004134123776,
+    "sent_at": 1767041004131172415,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004147525426,
+    "sent_at": 1767041004146846450,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004158991299,
+    "sent_at": 1767041004158405312,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004170913474,
+    "sent_at": 1767041004169120369,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004181827355,
+    "sent_at": 1767041004181338147,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004193151180,
+    "sent_at": 1767041004192526032,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004204355875,
+    "sent_at": 1767041004203826737,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004214619270,
+    "sent_at": 1767041004214084321,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004225378819,
+    "sent_at": 1767041004224906827,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004235821208,
+    "sent_at": 1767041004235086157,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004248767482,
+    "sent_at": 1767041004247930592,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004260445448,
+    "sent_at": 1767041004259837536,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004273247632,
+    "sent_at": 1767041004272721585,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004285788031,
+    "sent_at": 1767041004285131940,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004297039122,
+    "sent_at": 1767041004296496971,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004307940563,
+    "sent_at": 1767041004307297746,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004318513057,
+    "sent_at": 1767041004317973238,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004329400514,
+    "sent_at": 1767041004328754176,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004342265448,
+    "sent_at": 1767041004341648978,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004353051874,
+    "sent_at": 1767041004352453367,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004364033467,
+    "sent_at": 1767041004363516903,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004375482064,
+    "sent_at": 1767041004374874235,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004387011723,
+    "sent_at": 1767041004386513357,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004398262279,
+    "sent_at": 1767041004397697740,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004413535300,
+    "sent_at": 1767041004412861038,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004427954454,
+    "sent_at": 1767041004427369369,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004442035154,
+    "sent_at": 1767041004440827782,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004453456131,
+    "sent_at": 1767041004452837243,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004464770814,
+    "sent_at": 1767041004464207289,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004476559211,
+    "sent_at": 1767041004475600012,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004487174401,
+    "sent_at": 1767041004486647297,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004497596433,
+    "sent_at": 1767041004497111726,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004508579280,
+    "sent_at": 1767041004508023483,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004520889231,
+    "sent_at": 1767041004520339414,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004533383337,
+    "sent_at": 1767041004532370723,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004544357000,
+    "sent_at": 1767041004543789080,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004557810439,
+    "sent_at": 1767041004556998304,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004569461114,
+    "sent_at": 1767041004568683437,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004581295737,
+    "sent_at": 1767041004580688302,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004593373874,
+    "sent_at": 1767041004592871317,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004605062891,
+    "sent_at": 1767041004604268680,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004615756488,
+    "sent_at": 1767041004615228541,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004626600885,
+    "sent_at": 1767041004626129371,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004636859848,
+    "sent_at": 1767041004636376643,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004647099249,
+    "sent_at": 1767041004646587954,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004658302338,
+    "sent_at": 1767041004657683011,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004673537687,
+    "sent_at": 1767041004673066811,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004686320684,
+    "sent_at": 1767041004685679038,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004702900537,
+    "sent_at": 1767041004702284866,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004714275049,
+    "sent_at": 1767041004713533926,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004725187880,
+    "sent_at": 1767041004724505640,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004735691149,
+    "sent_at": 1767041004735154873,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004746088904,
+    "sent_at": 1767041004745552242,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004756831052,
+    "sent_at": 1767041004756231538,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004769429266,
+    "sent_at": 1767041004768958739,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004780647720,
+    "sent_at": 1767041004780010140,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004791711757,
+    "sent_at": 1767041004791056839,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004803653521,
+    "sent_at": 1767041004803106976,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004814333781,
+    "sent_at": 1767041004813770604,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004828197304,
+    "sent_at": 1767041004827565811,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004846001222,
+    "sent_at": 1767041004845443425,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004858911476,
+    "sent_at": 1767041004857918857,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004869858637,
+    "sent_at": 1767041004869268971,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004883579681,
+    "sent_at": 1767041004882975819,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004896646260,
+    "sent_at": 1767041004896050439,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004907210416,
+    "sent_at": 1767041004906589800,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004917575051,
+    "sent_at": 1767041004917110175,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004928914684,
+    "sent_at": 1767041004928384580,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004940569230,
+    "sent_at": 1767041004939990982,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004951834577,
+    "sent_at": 1767041004951069917,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004966056898,
+    "sent_at": 1767041004965282250,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004978403328,
+    "sent_at": 1767041004977536130,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041004989774617,
+    "sent_at": 1767041004989250049,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005000201601,
+    "sent_at": 1767041004999670449,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005011328712,
+    "sent_at": 1767041005010808540,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005027068837,
+    "sent_at": 1767041005025094498,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005040490342,
+    "sent_at": 1767041005039891544,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005051314173,
+    "sent_at": 1767041005050752605,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005062866364,
+    "sent_at": 1767041005062293145,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005076474093,
+    "sent_at": 1767041005075020988,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005087598267,
+    "sent_at": 1767041005087073550,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005100774950,
+    "sent_at": 1767041005099881713,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005114014977,
+    "sent_at": 1767041005113479807,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005124729128,
+    "sent_at": 1767041005124121718,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005141635639,
+    "sent_at": 1767041005141106858,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005152231797,
+    "sent_at": 1767041005151565739,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005163244622,
+    "sent_at": 1767041005162752879,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005174434552,
+    "sent_at": 1767041005173710137,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005188989852,
+    "sent_at": 1767041005188348197,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005199896923,
+    "sent_at": 1767041005199332620,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005213419469,
+    "sent_at": 1767041005212599523,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005225216273,
+    "sent_at": 1767041005224627820,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005236211006,
+    "sent_at": 1767041005235667916,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005248802732,
+    "sent_at": 1767041005247382223,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005262541420,
+    "sent_at": 1767041005261949877,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005275775782,
+    "sent_at": 1767041005275078081,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005293839826,
+    "sent_at": 1767041005292993850,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005312492373,
+    "sent_at": 1767041005311368006,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005331211604,
+    "sent_at": 1767041005326770594,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005347515679,
+    "sent_at": 1767041005347025705,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005359760769,
+    "sent_at": 1767041005359132799,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005372278279,
+    "sent_at": 1767041005371468177,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005383388701,
+    "sent_at": 1767041005382885344,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005395870196,
+    "sent_at": 1767041005395313165,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005407218597,
+    "sent_at": 1767041005406445918,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005422420822,
+    "sent_at": 1767041005421876871,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005433536331,
+    "sent_at": 1767041005432896100,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005450236444,
+    "sent_at": 1767041005449532162,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005461853718,
+    "sent_at": 1767041005461253357,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005473938400,
+    "sent_at": 1767041005473409598,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005486146248,
+    "sent_at": 1767041005485244728,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005499511820,
+    "sent_at": 1767041005499030879,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005509932246,
+    "sent_at": 1767041005509351232,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005521776546,
+    "sent_at": 1767041005521150173,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005533240361,
+    "sent_at": 1767041005532738453,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005547614814,
+    "sent_at": 1767041005546841301,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005559255243,
+    "sent_at": 1767041005558336019,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005573141448,
+    "sent_at": 1767041005572111143,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005586241011,
+    "sent_at": 1767041005585352627,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005597564821,
+    "sent_at": 1767041005597112375,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005607940099,
+    "sent_at": 1767041005607427961,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005618754625,
+    "sent_at": 1767041005618242376,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005629354251,
+    "sent_at": 1767041005628767893,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005640572047,
+    "sent_at": 1767041005639895479,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005653187091,
+    "sent_at": 1767041005652150637,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005667492813,
+    "sent_at": 1767041005666989199,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005678183070,
+    "sent_at": 1767041005677597925,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005689745531,
+    "sent_at": 1767041005689188601,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005700487087,
+    "sent_at": 1767041005699988850,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005711925001,
+    "sent_at": 1767041005711252454,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005727528787,
+    "sent_at": 1767041005726882082,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005738850152,
+    "sent_at": 1767041005738315044,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005749327782,
+    "sent_at": 1767041005748863819,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005761870708,
+    "sent_at": 1767041005760267275,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005773637252,
+    "sent_at": 1767041005773132821,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005785356625,
+    "sent_at": 1767041005784858198,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005800657302,
+    "sent_at": 1767041005799643088,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005823503659,
+    "sent_at": 1767041005821255584,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005836302754,
+    "sent_at": 1767041005835448797,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005849109463,
+    "sent_at": 1767041005848586446,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005860765003,
+    "sent_at": 1767041005859731637,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005874415898,
+    "sent_at": 1767041005873390811,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005885703267,
+    "sent_at": 1767041005885023135,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005898045747,
+    "sent_at": 1767041005897449369,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005909935340,
+    "sent_at": 1767041005908966031,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005920179516,
+    "sent_at": 1767041005919611493,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005931380798,
+    "sent_at": 1767041005930784573,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005942648638,
+    "sent_at": 1767041005942103464,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005956060600,
+    "sent_at": 1767041005955495809,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005967176005,
+    "sent_at": 1767041005966711906,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005979558249,
+    "sent_at": 1767041005979054993,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041005991147920,
+    "sent_at": 1767041005990431668,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006001707115,
+    "sent_at": 1767041006001207310,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006012705835,
+    "sent_at": 1767041006012068772,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006024171648,
+    "sent_at": 1767041006023643302,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006035354694,
+    "sent_at": 1767041006034313494,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006047462472,
+    "sent_at": 1767041006046811643,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006062367697,
+    "sent_at": 1767041006061553568,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006076171316,
+    "sent_at": 1767041006075616335,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006087010640,
+    "sent_at": 1767041006086365318,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006097900227,
+    "sent_at": 1767041006097377222,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006110844414,
+    "sent_at": 1767041006109477529,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006121949549,
+    "sent_at": 1767041006121411093,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006133008063,
+    "sent_at": 1767041006132390010,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006143872449,
+    "sent_at": 1767041006143376520,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006160341718,
+    "sent_at": 1767041006159848429,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006173022526,
+    "sent_at": 1767041006172411519,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006183427964,
+    "sent_at": 1767041006182899710,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006194471482,
+    "sent_at": 1767041006193359290,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006205650832,
+    "sent_at": 1767041006204872404,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006217120569,
+    "sent_at": 1767041006216493272,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006232819467,
+    "sent_at": 1767041006232137418,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006248944401,
+    "sent_at": 1767041006248301809,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006260091589,
+    "sent_at": 1767041006259185221,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006272193207,
+    "sent_at": 1767041006271571855,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006283059052,
+    "sent_at": 1767041006282604688,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006293634041,
+    "sent_at": 1767041006293133640,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006306825359,
+    "sent_at": 1767041006306344462,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006320420465,
+    "sent_at": 1767041006319920085,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006332440038,
+    "sent_at": 1767041006331934588,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006343257143,
+    "sent_at": 1767041006342693724,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006357776018,
+    "sent_at": 1767041006356997111,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006371786318,
+    "sent_at": 1767041006370279363,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006385999348,
+    "sent_at": 1767041006385416312,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006403189084,
+    "sent_at": 1767041006402256993,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006416006335,
+    "sent_at": 1767041006415130417,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006426532343,
+    "sent_at": 1767041006425952990,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006437112180,
+    "sent_at": 1767041006436629869,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006449118629,
+    "sent_at": 1767041006448533193,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006459360175,
+    "sent_at": 1767041006458873851,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006469994507,
+    "sent_at": 1767041006469453750,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006481636005,
+    "sent_at": 1767041006481080996,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006494938038,
+    "sent_at": 1767041006493505235,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006508421190,
+    "sent_at": 1767041006507373007,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006520548034,
+    "sent_at": 1767041006519991406,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006535900499,
+    "sent_at": 1767041006535496572,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006547881730,
+    "sent_at": 1767041006547135652,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006562888914,
+    "sent_at": 1767041006562028225,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006574136205,
+    "sent_at": 1767041006573426998,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006584851786,
+    "sent_at": 1767041006584276245,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006597136885,
+    "sent_at": 1767041006596593788,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006607402426,
+    "sent_at": 1767041006606919510,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006619368990,
+    "sent_at": 1767041006618857766,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006632290623,
+    "sent_at": 1767041006631723601,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006644546413,
+    "sent_at": 1767041006643982991,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006657815534,
+    "sent_at": 1767041006657167792,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006670254271,
+    "sent_at": 1767041006669700819,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006684676055,
+    "sent_at": 1767041006684086884,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006696586197,
+    "sent_at": 1767041006696056054,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006709012022,
+    "sent_at": 1767041006708437237,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}{
+    "client_id": "client-controller",
+    "received_at": 1767041006722124840,
+    "sent_at": 1767041006721647432,
+    "values": [
+        2.5,
+        3.3,
+        3.6,
+        55.0,
+        40.0,
+        35.0
+    ]
+}

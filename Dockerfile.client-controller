@@ -1,0 +1,17 @@
+
+FROM gcc:latest
+
+# Create app directory
+WORKDIR /app
+
+# Copy all necessary files
+COPY client-controller.cpp file_routes.json httplib.h json.hpp ./
+
+# Build client
+RUN g++ client-controller.cpp -o client-controller -pthread
+
+# Set default command (optional)
+#CMD ["./client"]
+
+COPY entrypoint-controller.sh ./
+CMD ["./entrypoint-controller.sh"]
