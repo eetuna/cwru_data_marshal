@@ -1,0 +1,16 @@
+FROM gcc:latest
+
+# Create app directory
+WORKDIR /app
+
+# Copy all necessary files
+COPY client-surface-tracking.cpp file_routes.json httplib.h json.hpp ./
+
+# Build client
+RUN g++ client-surface-tracking.cpp -o client-surface-tracking -pthread
+
+# Set default command (optional)
+#CMD ["./client"]
+
+COPY entrypoint-surface-tracking.sh ./
+CMD ["./entrypoint-surface-tracking.sh"]
