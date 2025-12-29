@@ -1,17 +1,37 @@
 {
-    "client-a": {
-      "read_from": "file1.json",
-      "read_from2": "file3.json",
-      "write_to1": "file2.json",
-      "write_to2": "file3.json"
+    "client-catheter-tracking": {
+      "read_from": "file_localization_data.json",
+      "read_from2": "file_catheter_base_configuration.json",
+      "read_from3": "file_forward_kinematics.json",
+      "write_to": "file_tip_position_orientation.json"
     },
-    "client-b": {
-      "read_from": "file2.json",
-      "write_to": "file3.json"
+    "client-front-end": {
+      "read_from": "file_streaming_2D_images.json",
+      "read_from2": "file_3D_images.json",
+      "read_from3": "file_tip_position_orientation.json",
+      "write_to": "file_user_input.json",
+      "write_to2": "file_catheter_base_configuration.json"
     },
-    "client-c": {
-      "read_from": "file3.json",
-      "write_to": "file1.json"
+    "client-surface-tracking": {
+      "read_from": "file_biological_signals.json",
+      "read_from2": "file_streaming_2D_images.json",
+      "write_to": "file_surface_model_parameters.json"
+    },
+    "client-planning": {
+      "read_from": "file_catheter_base_configuration.json",
+      "read_from2": "file_tip_position_orientation.json",
+      "read_from3": "file_surface_model_parameters.json",
+      "read_from4": "file_user_input.json",
+      "read_from5": "file_3D_images.json",
+      "read_from6": "file_biological_signals.json",
+      "write_to": "file_desired_planned_motion.json"
+    },
+    "client-controller": {
+      "read_from": "file_desired_planned_motion.json",
+      "read_from2": "file_catheter_base_configuration.json",
+      "read_from3": "file_tip_position_orientation.json",
+      "read_from4": "file_biological_signals.json",
+      "write_to": "file_forward_kinematics.json"
     }
   }
   

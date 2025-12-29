@@ -14,33 +14,33 @@ services:
     networks:
       cppnet:
         ipv4_address: 172.28.1.10
-  client-a:
+  client-catheter-tracking:
     build:
       context: .
-      dockerfile: Dockerfile.client-a
-    container_name: cpp_client-a
+      dockerfile: Dockerfile.client-catheter-tracking
+    container_name: cpp_client-catheter-tracking
     depends_on:
       - server
     networks:
       cppnet:
         ipv4_address: 172.28.1.11
 
-  client-b:
+  client-front-end:
     build:
       context: .
-      dockerfile: Dockerfile.client-b
-    container_name: cpp_client-b
+      dockerfile: Dockerfile.client-front-end
+    container_name: cpp_client-front-end
     depends_on:
       - server   
     networks:
       cppnet:
         ipv4_address: 172.28.1.12
 
-  client-c:
+  client-surface-tracking:
     build:
       context: .
-      dockerfile: Dockerfile.client-c
-    container_name: cpp_client-c
+      dockerfile: Dockerfile.client-surface-tracking
+    container_name: cpp_client-surface-tracking
     depends_on:
       - server
     networks:
