@@ -6,8 +6,8 @@ File routing (i.e. which files each clients read/writes to) is specified in the 
 For archival purposes, data written to files is saved in the files directory.
 
 ## Build and Run with Docker Compose:
-<br>Copy the data files into the files directory (every time - delete/replace exisiting files in the files director)
-<br>In the cwru_data_marshal run
+<br>Copy the data files into the files directory (every time - delete/replace exisiting files in the files directory)
+<br>In the cwru_data_marshal directory run
 <br>docker-compose up --build --force-recreate --remove-orphans
 
 ### Notes about System Comfiguration
