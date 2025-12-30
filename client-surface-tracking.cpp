@@ -34,31 +34,49 @@ int main() {
         return 1;
     }
 
-    std::string read_file = routes_config[client_id]["read_from"];
+    std::string read_file_biological_signals = routes_config[client_id]["read_from"];
+    std::string read_file_streaming_2D_images = routes_config[client_id]["read_from2"];
     std::string write_file = routes_config[client_id]["write_to"];
 
     // Step 2: Read from server file via GET
-    std::string read_endpoint = "/read/" + read_file;
-    auto res = cli.Get(read_endpoint.c_str());
+    std::string read_endpoint_biological_signals = "/read/" + read_file_biological_signals;
+    auto res_biological_signals = cli.Get(read_endpoint_biological_signals.c_str());
 
-    if (!res || res->status != 200) {
-        std::cerr << "Failed to read from server file: " << read_file << "\n";
-        std::cerr << "GET request response status: " << res->status << "\n";
-        std::cerr << "GET request response body: " << res->body << "\n";
+    if (!res_biological_signals || res_biological_signals->status != 200) {
+        std::cerr << "Failed to read from server file: " << read_file_biological_signals << "\n";
+        std::cerr << "GET request response status: " << res_biological_signals->status << "\n";
+        std::cerr << "GET request response body: " << res_biological_signals->body << "\n";
         return 1;
     }
 
-    json input_data = json::parse(res->body);
-    if (!input_data.contains("values") || !input_data["values"].is_array()) {
+    json input_data_biological_signals = json::parse(res_biological_signals->body);
+    if (!input_data_biological_signals.contains("values") || !input_data_biological_signals["values"].is_array()) {
+        std::cerr << "Invalid data in server file\n";
+        return 1;
+    }
+     // Step 2a: Read from server file via GET
+    std::string read_endpoint_streaming_2D_images = "/read/" + read_file_streaming_2D_images;
+    auto res_streaming_2D_images = cli.Get(read_endpoint_streaming_2D_images.c_str());
+
+    if (!res_streaming_2D_images || res_streaming_2D_images->status != 200) {
+        std::cerr << "Failed to read from server file: " << read_file_streaming_2D_images << "\n";
+        std::cerr << "GET request response status: " << res_streaming_2D_images->status << "\n";
+        std::cerr << "GET request response body: " << res_streaming_2D_images->body << "\n";
+        return 1;
+    }
+
+    json input_data_streaming_2D_images = json::parse(res_streaming_2D_images->body);
+    if (!input_data_streaming_2D_images.contains("values") || !input_data_streaming_2D_images["values"].is_array()) {
         std::cerr << "Invalid data in server file\n";
         return 1;
     }
 
     // Step 3: Compute result = multiply values + index sum
-    const auto& values = input_data["values"];
+    const auto& values = input_data_biological_signals["values"];
     std::cout << "Read values: " << values.dump(2) << "\n";
 
-    double result = 1.0;
+    //double result = 1.0;
+    std::vector<double> result = {1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0};
     /*for (size_t i = 0; i < values.size(); ++i) {
         result += values[i].get<double>();
         result += i;
@@ -69,7 +87,7 @@ int main() {
         {"client_id", client_id},
         {"sent_at", current_time_ns()},
         //{"tags", {"computed", "example"}},
-        {"values", {result}}
+        {"values", result}
     };
 
     // Step 5: Send POST to server to write result
