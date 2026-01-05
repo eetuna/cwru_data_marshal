@@ -110,8 +110,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
   apt-get install -y --no-install-recommends nodejs && \
   rm -rf /var/lib/apt/lists/*
 
-RUN node -v && npm -v && \
-  npm install -g @google/gemini-cli @openai/codex @anthropic-ai/claude-code
+# Install global CLIs
+RUN npm install -g \
+    @google/gemini-cli@latest \
+    @openai/codex@latest \
+    @anthropic-ai/claude-code@latest
 
 # Install websocat (static musl build, works on amd64/arm64)
 ARG WEBSOCAT_VERSION=v1.13.0
