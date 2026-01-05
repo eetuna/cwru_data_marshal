@@ -7,10 +7,10 @@ This guide provides a structured narrative and technical script for demonstratin
 ## 1. The Presentation Context (The "Why")
 **Objective:** Explain the necessity of the Dual-Marshal architecture.
 
-*   **The Problem:** MRI scanners generate high-bandwidth image data ("The Firehose"). Robots require ultra-low latency control signals ("The Nervous System"). A single server handling both risks "stuttering"—if a large 3D volume write blocks the event loop for even a few milliseconds, a high-frequency robot control loop might miss a safety deadline.
-*   **The Solution:** 
+*   **The Problem:** MRI scanners generate high-bandwidth image data ("The Firehose"). Robots require simple state synchronization ("The State Board"). A single server handling both risks complexity—mixing high-throughput streaming with lightweight state updates increases code complexity and testing burden.
+*   **The Solution:**
     *   **MRI Data Marshal (Current Branch):** The hardened, SWMR-enabled hub designed for high-throughput persistent journaling of MRI images, Bio-signals, and session tracking.
-    *   **Robot Data Marshal (Branch: robot-data-marshal):** A lightweight implementation optimized for nanosecond-latency state exchange using simple RAM buffers.
+    *   **Robot Data Marshal (Branch: robot-data-marshal):** A lightweight generic server with RAM-based caching for simple state synchronization.
 *   **Logical Decoupling:** This separation ensures that an MRI reconstruction crash or network bottleneck cannot physically affect the robot's ability to receive a safety HALT command.
 
 ---

@@ -2,24 +2,25 @@
 
 ## Executive Summary
 
-This document provides a comprehensive technical comparison between two divergent branches of the "Data Marshal" project. 
+This document provides a comprehensive technical comparison between two divergent branches of the "Data Marshal" project.
 
-- **`robot-data-marshal`**: A legacy or alternative implementation focused on **generic, low-frequency state synchronization** for robotics systems. It acts like a "mailbox" where robots leave brief status notes (JSON) for each other, prioritizing simplicity and strict validation.
-- **`swmr` (Single Writer Multiple Reader)**: The modern, high-performance evolution used in this hardened branch. It acts like a "firehose" for massive amounts of medical imaging data, prioritizing raw speed, zero-locking, and durable history.
+- **`robot-data-marshal`**: A lightweight generic server with RAM-based caching for simple state synchronization. It acts like a "bulletin board" where clients post and read JSON state updates, prioritizing simplicity and mutex-based thread safety.
+- **`swmr` (Single Writer Multiple Reader)**: The modern, high-performance evolution used in this hardened branch. It acts like a "firehose" for massive amounts of medical imaging data, prioritizing raw throughput, lock-free concurrent access, and durable history.
 
 ## Feature Comparison Matrix
 
 | Feature | `robot-data-marshal` | Hardened SWMR |
 | :--- | :--- | :--- |
-| **Primary Domain** | Robotics / Generic State Sync | Medical Imaging (MRI) / Streaming |
+| **Primary Domain** | Generic State Sync | Medical Imaging (MRI) / Streaming |
 | **Data Format** | JSON (Text) | ISMRMRD (Binary), HDF5 |
 | **Network Stack** | `httplib.h` (Synchronous) | `Boost.Asio/Beast` (Asynchronous) |
-| **Concurrency** | Mutex-based (Blocking) | SWMR-based (Lock-free) |
-| **History Model** | RAM (Circular Buffer, last 1000) | Disk (HDF5 / JSONL, unlimited) |
-| **Persistence** | Snapshot (Latest value only) | Journal (Full append-only log) |
+| **Concurrency** | Mutex-based (Thread-safe) | SWMR-based (Lock-free reads) |
+| **History Model** | RAM (Circular Buffer, 1000 entries) | Disk (HDF5 / JSONL, unlimited) |
+| **Persistence** | Async Background Writer | Immediate Flush-to-Disk |
 | **Interaction** | Pull-only (Polling `GET`) | Push (WebSocket) + Pull (HTTP) |
 | **Validation** | Strict Schema (Field checks) | Transparent (Pass-through) |
 | **Dependencies** | Minimal (`httplib`, `json.hpp`) | Heavy (`HDF5`, `Boost`, `OpenCV`) |
+| **Code Size** | ~400 lines | ~2000+ lines |
 
 ---
 
@@ -35,7 +36,7 @@ The server starts by loading a static configuration file (`files.json`) which de
 ### 2. POST Requests (Writing Data)
 **Endpoint:** `POST /write/<filename>`
 1.  **Validation:** It parses the request body as JSON. It strictly checks for three required fields: `sent_at`, `values`, and `client_id`.
-2.  **Timestamp:** It injects a `received_at` timestamp (**nanoseconds since epoch**) into the JSON.
+2.  **Timestamp:** It injects a `received_at` timestamp (nanosecond-precision clock) into the JSON.
 3.  **Cache Update:** It acquires a unique lock on the buffer and pushes the JSON string.
 4.  **Disk Queueing:** It notifies a background worker thread via a condition variable.
 

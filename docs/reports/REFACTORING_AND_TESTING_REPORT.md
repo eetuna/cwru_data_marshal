@@ -9,7 +9,7 @@ The `DataFlow.drawio` diagram outlines a dual-marshal architecture designed to h
 > "The idea for two data marshals is that the **Robot Data Marshall** can handle faster communication between the robotic parts of the system where the data size is smaller. The **MRI Data Marshal** will handle larger data but will likely not need to process things at as high a frequency. This should help avoid overloading a single data marshal. This will also separate some of the processing from the part of the system that communicates with the MRI and must remain online or the scanner will crash. The dashed lines represent connections that might be used but we aren't certain of yet."
 
 This architectural split is fully realized in the codebase:
--   **Robot Data Marshal:** Implemented in the `robot-data-marshal` branch using **RAM-based Circular Buffers** for nanosecond-latency control loops.
+-   **Robot Data Marshal:** Implemented in the `robot-data-marshal` branch using **RAM-based Circular Buffers** with mutex-based thread safety for lightweight state caching.
 -   **MRI Data Marshal:** Implemented in the current hardened branch using **HDF5 Single Writer Multiple Reader** for gigabyte-scale data throughput and crash resilience.
 
 ### 3. Component Analysis
@@ -22,7 +22,7 @@ This architectural split is fully realized in the codebase:
 
 **Current Implementation (`robot-data-marshal` branch):**
 *   **Status:** ✅ **Fully Implemented**
-*   **Evidence:** `server.cpp` implements a `CircularBuffer` (RAM cache) that is updated immediately upon a `POST /write` request, satisfying the "low latency" requirement. A separate background worker thread asynchronously writes these updates to disk (`.tmp` -> rename), satisfying the "archival" requirement without blocking the real-time control loop.
+*   **Evidence:** `server.cpp` implements a `CircularBuffer` (RAM cache) that is updated immediately upon a `POST /write` request, enabling fast synchronous writes. A separate background worker thread asynchronously writes these updates to disk, satisfying the "archival" requirement without blocking the main request handler.
 *   **Protocol:** Uses `httplib` for synchronous HTTP POST/GET, exactly as requested.
 
 #### B. MRI Data Marshal
@@ -45,7 +45,7 @@ This architectural split is fully realized in the codebase:
 ### 4. Architecture Alignment
 The repository has successfully bifurcated into the two specialized systems envisioned in the diagram:
 
-1.  **The "Blackboard" (Robot Marshal):** Optimized for nanosecond-latency state exchange using RAM buffers.
+1.  **The "State Board" (Robot Marshal):** Lightweight generic server with RAM-based caching for simple state synchronization.
 2.  **The "Firehose" (MRI Marshal):** Optimized for gigabyte-scale throughput using HDF5/SWMR.
 
 ### 5. Missing or "Dashed Line" Features

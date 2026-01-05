@@ -47,7 +47,7 @@ To verify the entire system (Unit, Integration, and Stress tests):
 ### Technical Architecture
 - **[System Architecture](docs/technical/ARCHITECTURE.md):** High-level design and data flow.
 - **[API Reference](docs/technical/API_REFERENCE.md):** REST and WebSocket endpoint specifications.
-- **[Branch Comparison](docs/technical/BRANCH_COMPARISON.md):** MRI Marshal (SWMR) vs. Robot Marshal (RAM Buffer).
+- **[Branch Comparison](docs/technical/BRANCH_COMPARISON.md):** MRI Marshal (SWMR) vs. Robot Marshal (Lightweight Cache).
 
 ### Reports & Performance
 - **[Performance Report](docs/reports/PERFORMANCE_REPORT.md):** Throughput and latency benchmarks.
