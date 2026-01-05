@@ -8,12 +8,27 @@
 /cmake_install.cmake
 /compile_commands.json
 
+# Robot marshal client binaries (compiled from scripts/robot_marshal_clients/*.cpp)
+scripts/robot_marshal_clients/client-a
+scripts/robot_marshal_clients/client-b
+scripts/robot_marshal_clients/client-c
+scripts/robot_marshal_clients/build/
+
 # Data & logs
 *.bin
 data/
+data_*/
 /*.log
 *.jsonl
 *.json.tmp
+files/
+log_files/
+files.json
+file_routes.json
+
+# Temporary build directories
+robot_marshal_build_tmp/
+robot_marshal_tmp_src/
 
 # IDE/editor
 .vscode/

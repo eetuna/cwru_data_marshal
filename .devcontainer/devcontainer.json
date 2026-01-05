@@ -20,7 +20,10 @@
     "CMAKE_LINK_PARALLEL_JOBS": "1",
     "CMAKE_EXE_LINKER_FLAGS_INIT": "-fuse-ld=lld",
     "CMAKE_SHARED_LINKER_FLAGS_INIT": "-fuse-ld=lld",
-    "CMAKE_BUILD_PARALLEL_LEVEL": "6"
+    "CMAKE_BUILD_PARALLEL_LEVEL": "6",
+    "PYTHONUNBUFFERED": "1",
+     "PYTHONPATH": "/workspaces/catheter/cwru_data_marshal",
+    "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
   },
   "customizations": {
     "vscode": {
@@ -50,5 +53,5 @@
     "source=${localEnv:HOME}/.cache/google-vscode-extension,target=/home/vscode/.cache/google-vscode-extension,type=bind,consistency=cached"
   ],
   "remoteUser": "vscode",
-  "postCreateCommand": "bash -lc 'set -euo pipefail; mkdir -p /workspaces/cwru_data_marshal/data/mrd /workspaces/cwru_data_marshal/data/dumpbox; echo \"Data root: /workspaces/cwru_data_marshal/data\"; printf \"Devcontainer built using %s\\nGenerator=%s LinkParallel=%s\\n\" \".devcontainer/Dockerfile\" \"$CMAKE_GENERATOR\" \"$CMAKE_LINK_PARALLEL_JOBS\"'"
+  "postCreateCommand": "bash -lc 'set -euo pipefail; mkdir -p /workspaces/cwru_data_marshal/data/mrd /workspaces/cwru_data_marshal/data/dumpbox; echo \"Data root: /workspaces/cwru_data_marshal/data\"; printf \"Devcontainer built using %s\\nGenerator=%s LinkParallel=%s\\n\" \".devcontainer/Dockerfile\" \"$CMAKE_GENERATOR\" \"$CMAKE_LINK_PARALLEL_JOBS\"; ls -ld /home/vscode/.claude || true; sudo chown -R vscode:vscode /home/vscode/.claude || true''"
 }
