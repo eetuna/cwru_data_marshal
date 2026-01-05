@@ -27,14 +27,16 @@ mkdir -p "$DATA_MRI" "$DATA_ROBOT"
 echo "[1/5] Starting MRI Marshal (Current Branch) on $MRI_PORT..."
 ./build/marshal --http 127.0.0.1:$MRI_PORT --ws 127.0.0.1:$MRI_WS --data "$DATA_MRI" --sink mrd > "$DATA_MRI/server.log" 2>&1 &
 
-echo "[2/5] Starting Robot Marshal (robot-data-marshal branch) on $ROBOT_PORT..."
+echo "[2/5] Starting Robot Marshal (upstream/robot-data-marshal branch) on $ROBOT_PORT..."
 # Pull and build the real robot marshal
+echo "[*] Fetching latest upstream/robot-data-marshal..."
+git fetch upstream
 mkdir -p ./robot_marshal_tmp_src
-git show robot-data-marshal:server.cpp > ./robot_marshal_tmp_src/server.cpp
-git show robot-data-marshal:httplib.h > ./robot_marshal_tmp_src/httplib.h
-git show robot-data-marshal:json.hpp > ./robot_marshal_tmp_src/json.hpp
-git show robot-data-marshal:circularBuffer.hpp > ./robot_marshal_tmp_src/circularBuffer.hpp
-git show robot-data-marshal:files.json > ./files.json
+git show upstream/robot-data-marshal:server.cpp > ./robot_marshal_tmp_src/server.cpp
+git show upstream/robot-data-marshal:httplib.h > ./robot_marshal_tmp_src/httplib.h
+git show upstream/robot-data-marshal:json.hpp > ./robot_marshal_tmp_src/json.hpp
+git show upstream/robot-data-marshal:circularBuffer.hpp > ./robot_marshal_tmp_src/circularBuffer.hpp
+git show upstream/robot-data-marshal:files.json > ./files.json
 # Patch port and allowed files
 sed -i 's/server.listen("172.28.1.10", 8080);/server.listen("0.0.0.0", 8081);/g' ./robot_marshal_tmp_src/server.cpp
 echo '["file1.json", "robot_status", "robot_commands"]' > ./files.json

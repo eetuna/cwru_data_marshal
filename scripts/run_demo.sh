@@ -57,7 +57,7 @@ header
 echo -e "${GREEN}CONCEPT:${NC}"
 echo "This demo showcases the Dual-Marshal architecture from DataFlow.drawio."
 echo "1. MRI Marshal (Current Branch): High-throughput 'Firehose'."
-echo "2. Robot Marshal (robot-data-marshal branch): Low-latency RAM buffer."
+echo "2. Robot Marshal (upstream/robot-data-marshal branch): Low-latency RAM buffer."
 echo "3. Coordinator: The 'Brain' bridging the two safely."
 pause
 
@@ -71,18 +71,20 @@ mkdir -p "$DATA_MRI" "$DATA_ROBOT"
 echo -e "${CYAN}[PROVENANCE]${NC} Identifying source code..."
 CURRENT_BRANCH=$(git branch --show-current)
 echo -e "  - MRI Marshal: Running from branch [ ${YELLOW}${CURRENT_BRANCH}${NC} ]"
-echo -e "  - Robot Marshal: Pulling from branch [ ${YELLOW}robot-data-marshal${NC} ]"
+echo -e "  - Robot Marshal: Pulling from branch [ ${YELLOW}upstream/robot-data-marshal${NC} ]"
 echo ""
 
 # AUTO-PREPARE: Pull real robot marshal code from the other branch
 if [ ! -f "./build/robot_marshal_demo" ]; then
     echo -e "${YELLOW}[AUTO]${NC} Extracting specialized Robot Marshal files..."
+    echo -e "${YELLOW}[AUTO]${NC} Fetching latest upstream/robot-data-marshal..."
+    git fetch upstream
     mkdir -p ./robot_marshal_tmp_src
-    git show robot-data-marshal:server.cpp > ./robot_marshal_tmp_src/server.cpp
-    git show robot-data-marshal:httplib.h > ./robot_marshal_tmp_src/httplib.h
-    git show robot-data-marshal:json.hpp > ./robot_marshal_tmp_src/json.hpp
-    git show robot-data-marshal:circularBuffer.hpp > ./robot_marshal_tmp_src/circularBuffer.hpp
-    git show robot-data-marshal:files.json > ./files.json
+    git show upstream/robot-data-marshal:server.cpp > ./robot_marshal_tmp_src/server.cpp
+    git show upstream/robot-data-marshal:httplib.h > ./robot_marshal_tmp_src/httplib.h
+    git show upstream/robot-data-marshal:json.hpp > ./robot_marshal_tmp_src/json.hpp
+    git show upstream/robot-data-marshal:circularBuffer.hpp > ./robot_marshal_tmp_src/circularBuffer.hpp
+    git show upstream/robot-data-marshal:files.json > ./files.json
     
     # PATCH: Add robot_status and robot_commands to the allowed files list
     echo '["file1.json", "file2.json", "file3.json", "robot_status", "robot_commands"]' > ./files.json

@@ -6,13 +6,16 @@ set -e
 
 TEMP_DIR="./robot_marshal_tmp_src"
 
-echo "[*] Extracting Robot Data Marshal from branch 'robot-data-marshal'..."
+echo "[*] Fetching latest upstream/robot-data-marshal..."
+git fetch upstream
+
+echo "[*] Extracting Robot Data Marshal from branch 'upstream/robot-data-marshal'..."
 
 mkdir -p "$TEMP_DIR"
-git show robot-data-marshal:server.cpp > "$TEMP_DIR/server.cpp"
-git show robot-data-marshal:httplib.h > "$TEMP_DIR/httplib.h"
-git show robot-data-marshal:json.hpp > "$TEMP_DIR/json.hpp"
-git show robot-data-marshal:circularBuffer.hpp > "$TEMP_DIR/circularBuffer.hpp"
+git show upstream/robot-data-marshal:server.cpp > "$TEMP_DIR/server.cpp"
+git show upstream/robot-data-marshal:httplib.h > "$TEMP_DIR/httplib.h"
+git show upstream/robot-data-marshal:json.hpp > "$TEMP_DIR/json.hpp"
+git show upstream/robot-data-marshal:circularBuffer.hpp > "$TEMP_DIR/circularBuffer.hpp"
 
 echo "[*] Compiling Robot Marshal..."
 # Use -I so the compiler can find the extracted headers

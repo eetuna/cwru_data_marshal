@@ -29,12 +29,14 @@ echo "=== Automated Feature Verification ==="
 mkdir -p "$DATA_MRI" "$DATA_ROBOT"
 
 # AUTO-PREPARE: Pull real robot marshal code
+echo "[*] Fetching latest upstream/robot-data-marshal..."
+git fetch upstream
 mkdir -p ./robot_marshal_tmp_src
-git show robot-data-marshal:server.cpp > ./robot_marshal_tmp_src/server.cpp
-git show robot-data-marshal:httplib.h > ./robot_marshal_tmp_src/httplib.h
-git show robot-data-marshal:json.hpp > ./robot_marshal_tmp_src/json.hpp
-git show robot-data-marshal:circularBuffer.hpp > ./robot_marshal_tmp_src/circularBuffer.hpp
-git show robot-data-marshal:files.json > ./files.json
+git show upstream/robot-data-marshal:server.cpp > ./robot_marshal_tmp_src/server.cpp
+git show upstream/robot-data-marshal:httplib.h > ./robot_marshal_tmp_src/httplib.h
+git show upstream/robot-data-marshal:json.hpp > ./robot_marshal_tmp_src/json.hpp
+git show upstream/robot-data-marshal:circularBuffer.hpp > ./robot_marshal_tmp_src/circularBuffer.hpp
+git show upstream/robot-data-marshal:files.json > ./files.json
 echo '["file1.json", "robot_status", "robot_commands"]' > ./files.json
 sed -i 's/server.listen("172.28.1.10", 8080);/server.listen("0.0.0.0", 8081);/g' ./robot_marshal_tmp_src/server.cpp
 g++ -I ./robot_marshal_tmp_src ./robot_marshal_tmp_src/server.cpp -o ./build/robot_marshal_demo -lpthread
