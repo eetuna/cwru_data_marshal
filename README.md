@@ -65,6 +65,10 @@ To verify the entire system (Unit, Integration, and Stress tests):
 - `clients/`: Reference clients including the **Coordinator Bridge**, trackers, and streamers.
 - `tests/`: Comprehensive C++ test suites (9/9 pass).
 - `data/`: Default directory for MRI session logs and artifacts.
+- `archive/`: Archived test data and historical documentation (preserved, not needed for current work).
+  - `archive/root_docs/`: Previous markdown documentation
+  - `archive/docs_backup/`: Previous docs folder contents
+  - `archive/test_data/`: Test data and experiment directories
 
 ---
 

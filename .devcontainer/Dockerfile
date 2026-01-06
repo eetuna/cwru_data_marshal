@@ -102,6 +102,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   lldb \
   gnupg \
   wget \
+  libx11-6 \
+  libx11-dev \
+  x11-apps \
+  x11-xserver-utils \
+  xauth \
   && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 22 (NodeSource) + global CLIs
@@ -167,6 +172,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libopencv-imgcodecs4.5d \
   libopencv-imgproc4.5d \
   libopencv-viz4.5d \
+  libx11-6 \
+  x11-apps \
   python3 \
   python3-pip \
   && rm -rf /var/lib/apt/lists/*

@@ -206,11 +206,22 @@ bool load_config(const std::string& config_path) {
     
     return true;
 }
-int main() {
+int main(int argc, char* argv[]) {
 
     httplib::Server server;
     const std::string storage_dir = "./";
     const std::string config_path = "files.json";
+
+    // Parse port from command-line argument
+    int port = 8080;  // Default port
+    if (argc > 1) {
+        try {
+            port = std::stoi(argv[1]);
+        } catch (const std::exception& e) {
+            std::cerr << "Invalid port argument: " << argv[1] << ". Using default port 8080.\n";
+        }
+    }
+
     myfile.open ("./log_files/error_log.txt");
     //myfile << "Started.\n";
 
@@ -366,10 +377,10 @@ int main() {
     
     
 
-    std::cout << "Server running at http://localhost:8080\n";
+    std::cout << "Robot Marshal Server running at http://127.0.0.1:" << port << "\n";
     // Start the background worker
     std::thread worker_thread(background_worker, storage_dir);
-    server.listen("172.28.1.10", 8080);
+    server.listen("127.0.0.1", port);
     // Stop the worker gracefully on shutdown
     stop_worker = true;
     write_condition.notify_all();

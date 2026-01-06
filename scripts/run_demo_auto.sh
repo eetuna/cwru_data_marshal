@@ -12,6 +12,11 @@ DATA_MRI="./data_auto_mri"
 DATA_ROBOT="./data_auto_robot"
 DATA_DUMPBOX="./data_auto_dumpbox"
 
+
+# X11 setup for GUI
+export DISPLAY=:0
+unset XAUTHORITY
+
 cleanup() {
     pkill -f "build/marshal" || true
     pkill -f "coordinator.py" || true
@@ -58,15 +63,15 @@ curl -s -H "Content-Type: application/octet-stream" --data-binary "@$DATA_MRI/te
 echo "[*] Verifying High-Freq Polling & Telemetry..."
 python3 -u clients/mocks/http_tracker.py > "$DATA_MRI/poller.log" 2>&1 &
 POLLER_PID=$!
-curl -s -X POST http://127.0.0.1:$MRI_HTTP/v1/bio/signal -d '{"ts":"now","source":"auto","data":[0.1,0.8,0.1]}' > /dev/null
-sleep 0.5
+curl -s -X POST http://127.0.0.1:$MRI_HTTP/v1/bio/signal -d '{"ts":"now","source":"auto","data":[0.1,0.8,0.1],"rate_hz":100.0}' > /dev/null
+sleep 1
 grep -q "New Data" "$DATA_MRI/poller.log" || echo "Poller check failed"
 kill $POLLER_PID || true
 
 # 4. Stress Test (Reduced count for speed)
 echo "[*] Verifying Concurrency (Parallel Interleaved)..."
 START=$(date +%s%N)
-seq 1 10 | xargs -I{} -P 10 curl -s -X POST http://127.0.0.1:$MRI_HTTP/v1/pose/update -d '{"p":[0,0,0],"R":[1,0,0,0,1,0,0,0,1]}' > /dev/null &
+seq 1 20 | xargs -I{} -P 10 curl -s -X POST http://127.0.0.1:$MRI_HTTP/v1/pose/update -d '{"p":[0,0,0],"R":[1,0,0,0,1,0,0,0,1]}' > /dev/null &
 PID1=$!
 wait $PID1
 END=$(date +%s%N)

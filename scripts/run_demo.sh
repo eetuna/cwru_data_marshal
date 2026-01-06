@@ -149,7 +149,7 @@ HTTP_TRACKER_PID=$!
 sleep 1
 
 # Ingest via HTTP POST
-curl -s -X POST http://127.0.0.1:8080/v1/bio/signal -d '{"ts":"now","source":"http_demo","data":[0.5]}' > /dev/null
+curl -s -X POST http://127.0.0.1:8080/v1/bio/signal -d '{"ts":"now","source":"http_demo","data":[0.5],"rate_hz":100.0}' > /dev/null
 sleep 1
 echo "    - Data ingested via POST. Verifying arrival in HTTP Polling client..."
 tail -n 1 "$DATA_MRI/http_tracker.log"
@@ -194,7 +194,7 @@ START=$(date +%s%N)
 # Bombardment (collect PIDs)
 seq 1 5 | xargs -I{} -P 15 curl -s -X POST http://127.0.0.1:$MRI_HTTP/v1/pose/update -d '{"p":[0,0,0],"R":[1,0,0,0,1,0,0,0,1]}' > /dev/null &
 PID1=$!
-seq 1 5 | xargs -I{} -P 15 curl -s -X POST http://127.0.0.1:$MRI_HTTP/v1/bio/signal -d '{"ts":"now","source":"demo","data":[0.1,0.8,0.1]}' > /dev/null &
+seq 1 5 | xargs -I{} -P 15 curl -s -X POST http://127.0.0.1:$MRI_HTTP/v1/bio/signal -d '{"ts":"now","source":"demo","data":[0.1,0.8,0.1],"rate_hz":100.0}' > /dev/null &
 PID2=$!
 seq 1 5 | xargs -I{} -P 15 curl -s -H "Content-Type: application/octet-stream" --data-binary "@$DATA_MRI/volume_128_10.mrd" http://127.0.0.1:$MRI_HTTP/v1/mrd/ingest > /dev/null &
 PID3=$!

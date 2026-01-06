@@ -181,14 +181,19 @@ int main(int argc, char **argv) {
 
             const double t = static_cast<double>(frame_index);
             for (std::size_t z = 0; z < opt.nz; ++z) {
+                // Make each Z slice visually distinct
+                const double z_brightness = static_cast<double>(z) / std::max<std::size_t>(1, opt.nz - 1);
                 const double z_term = z * 0.35;
+
                 for (std::size_t y = 0; y < opt.ny; ++y) {
                     const double y_term = y * 0.07;
                     for (std::size_t x = 0; x < opt.nx; ++x) {
                         const std::size_t idx = z * opt.ny * opt.nx + y * opt.nx + x;
                         const double base = static_cast<double>(x + y) / std::max<std::size_t>(1, opt.nx + opt.ny);
                         const double wave = std::sin(t * 0.25 + z_term + x * 0.05 + y_term);
-                        data[idx] = static_cast<float>(base + 0.25 * wave);
+
+                        // Add Z-dependent brightness gradient (darker at z=0, brighter at z=max)
+                        data[idx] = static_cast<float>(base * (0.3 + 0.7 * z_brightness) + 0.25 * wave);
                     }
                 }
             }

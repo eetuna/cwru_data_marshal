@@ -60,11 +60,12 @@ inline bool read_file_all(const fs::path &p, std::string &out)
     return true;
 }
 
-// crude parser for ?ts=…&limit=…
-inline void parse_ts_limit(const std::string &target, std::string &ts, size_t &limit)
+// crude parser for ?ts=…&limit=…&last=…
+inline void parse_ts_limit(const std::string &target, std::string &ts, size_t &limit, size_t &last)
 {
     ts.clear();
     limit = 0;
+    last = 0;
     auto qpos = target.find('?');
     if (qpos == std::string::npos)
         return;
@@ -86,6 +87,17 @@ inline void parse_ts_limit(const std::string &target, std::string &ts, size_t &l
         try
         {
             limit = static_cast<size_t>(std::stoull(lim));
+        }
+        catch (...)
+        {
+        }
+    }
+    auto lst = get("last");
+    if (!lst.empty())
+    {
+        try
+        {
+            last = static_cast<size_t>(std::stoull(lst));
         }
         catch (...)
         {
@@ -221,23 +233,27 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
     }
 
     // POST /v1/bio/signal
-    // Body (JSON): { "ts": "...", "source": "ecg", "data": [...], "rate_hz": 100.0 }
+    // Body (JSON): { "source": "ecg", "data": [...], "rate_hz": 100.0 }
+    // Server generates ts automatically
     if (req.method() == http::verb::post && req.target() == "/v1/bio/signal")
     {
         try
         {
             auto body = json::parse(req.body());
 
-            if (!body.contains("ts") || !body.contains("source") || !body.contains("data") || !body.contains("rate_hz"))
+            if (!body.contains("source") || !body.contains("data") || !body.contains("rate_hz"))
             {
-                return make_response(http::status::bad_request, 
-                    {{"error", "missing fields"}, {"required", {"ts", "source", "data", "rate_hz"}}});
+                return make_response(http::status::bad_request,
+                    {{"error", "missing fields"}, {"required", {"source", "data", "rate_hz"}}});
             }
 
             if (!body["data"].is_array())
             {
                 return make_response(http::status::bad_request, {{"error", "data must be an array"}});
             }
+
+            // Server generates timestamp
+            body["ts"] = mrd::iso8601_now_ms();
 
             // Persist to disk
             try
@@ -276,6 +292,45 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
         catch (const std::exception &e)
         {
             return make_response(http::status::bad_request, {{"error", "bad json"}, {"what", e.what()}});
+        }
+    }
+
+    // GET /v1/bio/latest
+    // Returns the most recent bio signal entry from bio.jsonl
+    if (req.method() == http::verb::get && req.target() == "/v1/bio/latest")
+    {
+        try
+        {
+            auto paths = mrd::resolve_sink_paths(state);
+            fs::path bio_log = paths.index_root / "bio.jsonl";
+
+            if (!fs::exists(bio_log))
+            {
+                return make_response(http::status::no_content, json::object());
+            }
+
+            // Read the last line from bio.jsonl
+            std::ifstream ifs(bio_log);
+            std::string last_line;
+            std::string line;
+            while (std::getline(ifs, line))
+            {
+                if (!line.empty())
+                    last_line = line;
+            }
+
+            if (last_line.empty())
+            {
+                return make_response(http::status::no_content, json::object());
+            }
+
+            auto bio_entry = json::parse(last_line);
+            return make_response(http::status::ok, bio_entry);
+        }
+        catch (const std::exception &e)
+        {
+            return make_response(http::status::internal_server_error,
+                {{"error", "failed to read bio log"}, {"what", e.what()}});
         }
     }
 
@@ -392,17 +447,21 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
         return make_response(http::status::no_content, {});
     }
 
-    // GET /v1/mrd/since?ts=...&limit=...  (reads ${data_dir}/mrd/index.jsonl)
+    // GET /v1/mrd/since?ts=...&limit=...&last=...  (reads ${data_dir}/mrd/index.jsonl)
+    // - ts + limit: return frames where ts > provided_ts, up to limit
+    // - last: return the last N frames (most recent)
     if (req.method() == http::verb::get && std::string(req.target()).rfind("/v1/mrd/since", 0) == 0)
     {
         try
         {
             std::string ts;
             size_t limit = 0;
-            parse_ts_limit(std::string(req.target()), ts, limit);
-            if (ts.empty())
+            size_t last = 0;
+            parse_ts_limit(std::string(req.target()), ts, limit, last);
+
+            if (ts.empty() && last == 0)
             {
-                return make_response(http::status::bad_request, {{"error", "missing ts param"}});
+                return make_response(http::status::bad_request, {{"error", "missing ts or last param"}});
             }
 
             fs::path index = fs::path(state.data_dir) / "mrd" / "index.jsonl";
@@ -411,23 +470,45 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
             std::ifstream f(index);
             if (f)
             {
-                std::string line;
-                while (std::getline(f, line))
+                if (!ts.empty())
                 {
-                    if (line.empty())
-                        continue;
-                    nlohmann::json j = nlohmann::json::parse(line, nullptr, false);
-                    if (j.is_discarded())
-                        continue;
-                    if (j.value("ts", std::string()) > ts)
+                    // ts-based filtering: return frames after timestamp
+                    std::string line;
+                    while (std::getline(f, line))
                     {
-                        out.push_back(j);
-                        if (limit && out.size() >= limit)
-                            break;
+                        if (line.empty())
+                            continue;
+                        nlohmann::json j = nlohmann::json::parse(line, nullptr, false);
+                        if (j.is_discarded())
+                            continue;
+                        if (j.value("ts", std::string()) > ts)
+                        {
+                            out.push_back(j);
+                            if (limit && out.size() >= limit)
+                                break;
+                        }
                     }
                 }
+                else
+                {
+                    // last-based: return the last N frames
+                    std::vector<nlohmann::json> all_entries;
+                    std::string line;
+                    while (std::getline(f, line))
+                    {
+                        if (line.empty())
+                            continue;
+                        nlohmann::json j = nlohmann::json::parse(line, nullptr, false);
+                        if (j.is_discarded())
+                            continue;
+                        all_entries.push_back(std::move(j));
+                    }
+                    size_t start = (all_entries.size() > last) ? all_entries.size() - last : 0;
+                    for (size_t i = start; i < all_entries.size(); ++i)
+                        out.push_back(all_entries[i]);
+                }
             }
-            
+
             return make_response(http::status::ok, out);
         }
         catch (const std::exception &e)
