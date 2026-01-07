@@ -35,8 +35,9 @@ POSE_COUNT_TARGET=$((DEMO_DURATION_SEC * 1000 / POSE_INTERVAL_MS))
 MONITOR_INTERVAL=0.1              # Seconds between robot stats prints (can be 0.5, 0.1, etc.)
 
 # Graceful shutdown configuration
-SHUTDOWN_TIMEOUT_SEC=30           # Marshal's internal timeout for flushing HDF5 (passed to --shutdown-timeout-sec)
-SHUTDOWN_WAIT_SEC=35              # Demo script wait time (should be > SHUTDOWN_TIMEOUT_SEC)
+SHUTDOWN_TIMEOUT_SEC=30           # How long to wait for marshal to flush HDF5 before force-kill
+                                   # - Passed to marshal via --shutdown-timeout-sec
+                                   # - Demo script adds 5s buffer (waits SHUTDOWN_TIMEOUT_SEC + 5)
 
 # X11 setup for GUI (handles WSL2 + devcontainer)
 if [ -z "$DISPLAY" ]; then
@@ -64,8 +65,8 @@ cleanup() {
     if [ -n "$MRI_PID" ] && kill -0 $MRI_PID 2>/dev/null; then
         echo "  → Sending SIGTERM to MRI Marshal (PID: $MRI_PID) for graceful shutdown..."
         kill -TERM $MRI_PID 2>/dev/null || true
-        # Wait for graceful shutdown (uses SHUTDOWN_WAIT_SEC from config)
-        WAIT_LOOPS=$((SHUTDOWN_WAIT_SEC * 2))
+        # Wait for graceful shutdown (SHUTDOWN_TIMEOUT_SEC + 5 second buffer)
+        WAIT_LOOPS=$(((SHUTDOWN_TIMEOUT_SEC + 5) * 2))
         for i in $(seq 1 $WAIT_LOOPS); do
             if ! kill -0 $MRI_PID 2>/dev/null; then
                 echo "  ✓ MRI Marshal shut down gracefully"
