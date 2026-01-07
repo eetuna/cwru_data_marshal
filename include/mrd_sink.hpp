@@ -118,6 +118,7 @@ class MrdSink
         size_t generation{0};
         FlushPolicy flush_policy;
         std::string active_session;
+        std::chrono::steady_clock::time_point last_accessed{std::chrono::steady_clock::now()};
     };
 
     MarshalState &state_;
@@ -130,6 +131,7 @@ class MrdSink
                                                const std::filesystem::path &sink_root,
                                                std::string_view header_xml,
                                                std::string_view session_token);
+    void cleanup_idle_streams(std::chrono::seconds idle_timeout = std::chrono::seconds(600));
     static std::string canonical_scan_name(const std::string &stream_id);
     static std::string element_type_string(ElementType t);
     nlohmann::json make_entry_json(const FrameAppendResult &result) const;

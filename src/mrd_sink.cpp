@@ -501,6 +501,31 @@ std::shared_ptr<MrdSink::StreamState> MrdSink::ensure_stream(const std::string &
     return state;
 }
 
+void MrdSink::cleanup_idle_streams(std::chrono::seconds idle_timeout)
+{
+    auto now = std::chrono::steady_clock::now();
+    std::vector<std::string> streams_to_erase;
+
+    {
+        std::lock_guard<std::mutex> lk(map_mutex_);
+        for (const auto& [stream_id, stream_state] : streams_)
+        {
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                now - stream_state->last_accessed);
+            if (age > idle_timeout)
+            {
+                streams_to_erase.push_back(stream_id);
+            }
+        }
+
+        // Remove idle streams
+        for (const auto& stream_id : streams_to_erase)
+        {
+            streams_.erase(stream_id);
+        }
+    }
+}
+
 FrameAppendResult MrdSink::append_frame(const std::string &stream_id,
                                         const ImageDimensions &dims,
                                         ElementType type,
@@ -525,6 +550,9 @@ FrameAppendResult MrdSink::append_frame(const std::string &stream_id,
         }
     }
 
+    // Update last_accessed timestamp for LRU eviction tracking
+    stream_state->last_accessed = std::chrono::steady_clock::now();
+
     auto result = stream_state->file->append_frame(data, bytes);
 
     auto seq = ingest_sequence().fetch_add(1);
@@ -537,7 +565,6 @@ FrameAppendResult MrdSink::append_frame(const std::string &stream_id,
 
     try
     {
-        state_.ws_emit(entry.dump());
         state_.ws_emit_topic(entry.dump(), "mrd");
     }
     catch (const std::exception &e)

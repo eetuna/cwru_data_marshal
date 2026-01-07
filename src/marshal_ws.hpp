@@ -124,8 +124,14 @@ public:
     }
     void broadcast(const std::string &msg)
     {
-        std::scoped_lock lk(state_.ws_mtx);
-        for (auto h : state_.ws_clients)
+        // Copy client list under lock, then release lock before sending
+        std::vector<void *> clients_copy;
+        {
+            std::scoped_lock lk(state_.ws_mtx);
+            clients_copy.assign(state_.ws_clients.begin(), state_.ws_clients.end());
+        }
+
+        for (auto h : clients_copy)
         {
             try {
                 auto *s = static_cast<Session *>(h);
@@ -137,8 +143,14 @@ public:
     }
     void broadcast_to(const std::string &msg, const std::string &topic)
     {
-        std::scoped_lock lk(state_.ws_mtx);
-        for (auto h : state_.ws_clients)
+        // Copy client list under lock, then release lock before sending
+        std::vector<void *> clients_copy;
+        {
+            std::scoped_lock lk(state_.ws_mtx);
+            clients_copy.assign(state_.ws_clients.begin(), state_.ws_clients.end());
+        }
+
+        for (auto h : clients_copy)
         {
             try {
                 auto *s = static_cast<Session *>(h);
@@ -180,6 +192,9 @@ do_accept(); });
         }
         ~Session()
         {
+            // Remove self from clients list
+            // Since broadcast() now copies the list and releases the lock before sending,
+            // the destructor taking the lock is safe (broadcast won't call methods on us)
             std::scoped_lock lk(state.ws_mtx);
             state.ws_clients.erase(this);
         }
