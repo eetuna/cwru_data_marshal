@@ -35,7 +35,8 @@ POSE_COUNT_TARGET=$((DEMO_DURATION_SEC * 1000 / POSE_INTERVAL_MS))
 MONITOR_INTERVAL=0.1              # Seconds between robot stats prints (can be 0.5, 0.1, etc.)
 
 # Graceful shutdown configuration
-SHUTDOWN_WAIT_SEC=3               # How long demo script waits for marshal to flush before force-kill (seconds)
+SHUTDOWN_TIMEOUT_SEC=30           # Marshal's internal timeout for flushing HDF5 (passed to --shutdown-timeout-sec)
+SHUTDOWN_WAIT_SEC=35              # Demo script wait time (should be > SHUTDOWN_TIMEOUT_SEC)
 
 # X11 setup for GUI (handles WSL2 + devcontainer)
 if [ -z "$DISPLAY" ]; then
@@ -135,6 +136,7 @@ echo "Starting MRI Marshal (HTTP:$MRI_HTTP, WebSocket:$MRI_WS)..."
                 --ws 127.0.0.1:$MRI_WS \
                 --data "$DATA_MRI" \
                 --flush-frames 1 \
+                --shutdown-timeout-sec $SHUTDOWN_TIMEOUT_SEC \
                 > "$DATA_MRI/server.log" 2>&1 &
 MRI_PID=$!
 
