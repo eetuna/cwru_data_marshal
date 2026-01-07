@@ -17,7 +17,7 @@ DATA_ROBOT="./data_demo_robot"
 DEMO_DURATION_SEC=60              # Total demo duration (seconds)
 
 # Image streamer / Visualizer (MRI frames)
-IMAGE_INTERVAL_MS=10          # Milliseconds between MRI frames (1/IMAGE_INTERVAL_MS fps target)
+IMAGE_INTERVAL_MS=100          # Milliseconds between MRI frames (1/IMAGE_INTERVAL_MS fps target)
 IMAGE_FRAME_COUNT=$((DEMO_DURATION_SEC * 1000 / IMAGE_INTERVAL_MS))
 IMAGE_SIZE=64
 IMAGE_NSLICES=3
