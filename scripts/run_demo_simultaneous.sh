@@ -34,6 +34,9 @@ POSE_COUNT_TARGET=$((DEMO_DURATION_SEC * 1000 / POSE_INTERVAL_MS))
 # ==============================================
 MONITOR_INTERVAL=0.1              # Seconds between robot stats prints (can be 0.5, 0.1, etc.)
 
+# Graceful shutdown configuration
+SHUTDOWN_WAIT_SEC=3               # How long demo script waits for marshal to flush before force-kill (seconds)
+
 # X11 setup for GUI (handles WSL2 + devcontainer)
 if [ -z "$DISPLAY" ]; then
     # Try WSLg first
@@ -55,7 +58,27 @@ echo "Using DISPLAY=$DISPLAY"
 cleanup() {
     echo ""
     echo "[CLEANUP] Terminating all demo processes..."
-    pkill -f "build/marshal" 2>/dev/null || true
+
+    # Send SIGTERM first to allow graceful shutdown (marshal will flush HDF5)
+    if [ -n "$MRI_PID" ] && kill -0 $MRI_PID 2>/dev/null; then
+        echo "  → Sending SIGTERM to MRI Marshal (PID: $MRI_PID) for graceful shutdown..."
+        kill -TERM $MRI_PID 2>/dev/null || true
+        # Wait for graceful shutdown (uses SHUTDOWN_WAIT_SEC from config)
+        WAIT_LOOPS=$((SHUTDOWN_WAIT_SEC * 2))
+        for i in $(seq 1 $WAIT_LOOPS); do
+            if ! kill -0 $MRI_PID 2>/dev/null; then
+                echo "  ✓ MRI Marshal shut down gracefully"
+                break
+            fi
+            sleep 0.5
+        done
+        # Force kill if still running
+        if kill -0 $MRI_PID 2>/dev/null; then
+            echo "  → Force killing MRI Marshal..."
+            kill -9 $MRI_PID 2>/dev/null || true
+        fi
+    fi
+
     pkill -f "robot_marshal_demo" 2>/dev/null || true
     pkill -f "viz_client" 2>/dev/null || true
     pkill -f "image_streamer" 2>/dev/null || true

@@ -157,6 +157,12 @@ void MrdFile::set_flush_policy(FlushPolicy policy)
     last_flush_ = std::chrono::steady_clock::now();
 }
 
+void MrdFile::flush()
+{
+    std::lock_guard<std::mutex> lk(write_mutex_);
+    perform_flush(true);
+}
+
 void MrdFile::open()
 {
     namespace fs = std::filesystem;
@@ -522,6 +528,31 @@ void MrdSink::cleanup_idle_streams(std::chrono::seconds idle_timeout)
         for (const auto& stream_id : streams_to_erase)
         {
             streams_.erase(stream_id);
+        }
+    }
+}
+
+void MrdSink::flush_all()
+{
+    std::vector<std::shared_ptr<StreamState>> streams_copy;
+    {
+        std::lock_guard<std::mutex> lk(map_mutex_);
+        for (const auto& [stream_id, stream_state] : streams_)
+        {
+            streams_copy.push_back(stream_state);
+        }
+    }
+
+    for (const auto& stream_state : streams_copy)
+    {
+        std::lock_guard<std::mutex> state_lk(stream_state->mutex);
+        if (stream_state->file)
+        {
+            try {
+                stream_state->file->flush();
+            } catch (const std::exception& e) {
+                std::cerr << "flush_all: failed to flush stream: " << e.what() << "\n";
+            }
         }
     }
 }

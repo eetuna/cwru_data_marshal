@@ -45,6 +45,7 @@ int main(int argc, char **argv)
     std::size_t flush_max_frames = 4;
     int flush_max_ms = 50;
     std::size_t max_body_size = 128ULL * 1024ULL * 1024ULL;
+    int shutdown_timeout_sec = 30;
 
     // Parse CLI
     for (int i = 1; i < argc; ++i)
@@ -68,6 +69,8 @@ int main(int argc, char **argv)
             flush_max_frames = static_cast<std::size_t>(std::stoull(argv[++i]));
         else if (a == "--flush-max-ms" && i + 1 < argc)
             flush_max_ms = std::stoi(argv[++i]);
+        else if (a == "--shutdown-timeout-sec" && i + 1 < argc)
+            shutdown_timeout_sec = std::stoi(argv[++i]);
     }
 
     auto split = [](const std::string &s)
@@ -128,6 +131,35 @@ int main(int argc, char **argv)
     HttpServer http{ioc, http_ep, state};
     WsServer ws{ioc, ws_ep, state};
 
+    // Graceful shutdown handler (async)
+    boost::asio::signal_set signals(ioc, SIGINT, SIGTERM);
+    auto shutdown_timer = std::make_shared<boost::asio::steady_timer>(ioc);
+
+    signals.async_wait([&, shutdown_timer](const boost::system::error_code &ec, int signum) {
+        if (!ec)
+        {
+            std::cerr << "\n[SHUTDOWN] Received signal " << signum
+                      << ", shutting down (timeout: " << shutdown_timeout_sec << "s)...\n";
+
+            // Start timeout timer
+            shutdown_timer->expires_after(std::chrono::seconds(shutdown_timeout_sec));
+            shutdown_timer->async_wait([&](const boost::system::error_code &) {
+                std::cerr << "[SHUTDOWN] Timeout reached, forcing exit.\n";
+                std::exit(1);
+            });
+
+            // Flush all HDF5 data
+            if (state.mrd_sink)
+            {
+                std::cerr << "[SHUTDOWN] Flushing all HDF5 streams...\n";
+                state.mrd_sink->flush_all();
+                std::cerr << "[SHUTDOWN] Flush complete.\n";
+            }
+
+            ioc.stop();
+        }
+    });
+
     // Log effective config
     std::cout << "marshal listening http=" << http_bind
               << " ws=" << ws_bind
@@ -144,8 +176,10 @@ int main(int argc, char **argv)
                   << " flush_frames=" << state.flush_policy.max_pending_frames
                   << " flush_ms=" << state.flush_policy.max_pending_interval.count();
     }
-    std::cout << "\n";
+    std::cout << " shutdown_timeout=" << shutdown_timeout_sec << "s\n";
 
     ioc.run();
+
+    std::cerr << "[SHUTDOWN] Server stopped.\n";
     return 0;
 }

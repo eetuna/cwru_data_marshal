@@ -62,6 +62,7 @@ class MrdFile
 
     FrameAppendResult append_frame(const void *data, size_t bytes);
     void set_flush_policy(FlushPolicy policy);
+    void flush();
 
     const std::filesystem::path &path() const noexcept { return path_; }
     ElementType element_type() const noexcept { return type_; }
@@ -105,6 +106,9 @@ class MrdSink
                                    size_t bytes,
                                    std::string_view session_token = {});
 
+    void cleanup_idle_streams(std::chrono::seconds idle_timeout = std::chrono::seconds(600));
+    void flush_all();
+
   private:
     struct StreamState
     {
@@ -131,7 +135,6 @@ class MrdSink
                                                const std::filesystem::path &sink_root,
                                                std::string_view header_xml,
                                                std::string_view session_token);
-    void cleanup_idle_streams(std::chrono::seconds idle_timeout = std::chrono::seconds(600));
     static std::string canonical_scan_name(const std::string &stream_id);
     static std::string element_type_string(ElementType t);
     nlohmann::json make_entry_json(const FrameAppendResult &result) const;
