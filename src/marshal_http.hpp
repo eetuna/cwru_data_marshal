@@ -450,6 +450,7 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
     // GET /v1/mrd/since?ts=...&limit=...&last=...  (reads ${data_dir}/mrd/index.jsonl)
     // - ts + limit: return frames where ts > provided_ts, up to limit
     // - last: return the last N frames (most recent)
+    // PERFORMANCE FIX: Uses efficient reverse reading for last=N queries
     if (req.method() == http::verb::get && std::string(req.target()).rfind("/v1/mrd/since", 0) == 0)
     {
         try
@@ -467,12 +468,12 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
             fs::path index = fs::path(state.data_dir) / "mrd" / "index.jsonl";
             nlohmann::json out = nlohmann::json::array();
 
-            std::ifstream f(index);
-            if (f)
+            if (!ts.empty())
             {
-                if (!ts.empty())
+                // ts-based filtering: return frames after timestamp (forward scan)
+                std::ifstream f(index);
+                if (f)
                 {
-                    // ts-based filtering: return frames after timestamp
                     std::string line;
                     while (std::getline(f, line))
                     {
@@ -489,23 +490,69 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                         }
                     }
                 }
-                else
+            }
+            else
+            {
+                // last-based: return the last N frames
+                // OPTIMIZATION: Read from end of file to avoid loading entire file into memory
+                std::ifstream f(index, std::ios::ate | std::ios::binary);
+                if (f)
                 {
-                    // last-based: return the last N frames
-                    std::vector<nlohmann::json> all_entries;
-                    std::string line;
-                    while (std::getline(f, line))
+                    auto file_size = f.tellg();
+                    if (file_size > 0)
                     {
-                        if (line.empty())
-                            continue;
-                        nlohmann::json j = nlohmann::json::parse(line, nullptr, false);
-                        if (j.is_discarded())
-                            continue;
-                        all_entries.push_back(std::move(j));
+                        std::vector<std::string> lines;
+                        lines.reserve(last);
+
+                        // Read backwards from end of file
+                        std::streamoff pos = file_size;
+                        std::string current_line;
+
+                        // Start from end - 1 to skip potential trailing newline
+                        pos--;
+                        while (pos >= 0 && lines.size() < last)
+                        {
+                            f.seekg(pos);
+                            char c;
+                            f.get(c);
+
+                            if (c == '\n')
+                            {
+                                if (!current_line.empty())
+                                {
+                                    // Reverse the line since we read it backwards
+                                    std::reverse(current_line.begin(), current_line.end());
+                                    lines.push_back(std::move(current_line));
+                                    current_line.clear();
+                                }
+                            }
+                            else
+                            {
+                                current_line.push_back(c);
+                            }
+                            pos--;
+                        }
+
+                        // Handle last line (at start of file)
+                        if (!current_line.empty() && lines.size() < last)
+                        {
+                            std::reverse(current_line.begin(), current_line.end());
+                            lines.push_back(std::move(current_line));
+                        }
+
+                        // Reverse to get chronological order
+                        std::reverse(lines.begin(), lines.end());
+
+                        // Parse and add to output
+                        for (const auto &line : lines)
+                        {
+                            if (line.empty())
+                                continue;
+                            nlohmann::json j = nlohmann::json::parse(line, nullptr, false);
+                            if (!j.is_discarded())
+                                out.push_back(std::move(j));
+                        }
                     }
-                    size_t start = (all_entries.size() > last) ? all_entries.size() - last : 0;
-                    for (size_t i = start; i < all_entries.size(); ++i)
-                        out.push_back(all_entries[i]);
                 }
             }
 

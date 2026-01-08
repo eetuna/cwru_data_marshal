@@ -7,7 +7,8 @@
  *  - Atomic file writes via include/atomic_write.hpp
  *  - /health returns constant JSON; no shared state
  *  - WebSocket ping/pong keepalive recommended
- * Last updated: 2025-09-15
+ *  - PERFORMANCE FIX: Uses async writes with queue to prevent blocking
+ * Last updated: 2025-09-21
  */
 
 #pragma once
@@ -17,6 +18,8 @@
 #include <memory>
 #include <set>
 #include <mutex>
+#include <queue>
+#include <atomic>
 #include "marshal_state.hpp"
 #include <boost/asio/buffer.hpp>
 #include <nlohmann/json.hpp>
@@ -176,10 +179,20 @@ do_accept(); });
         boost::beast::flat_buffer buffer;
         MarshalState &state;
         WsServer &server;
-        std::mutex send_mtx;
         std::string topic = "_system_"; // Default topic, receives only global broadcasts
+
+        // Async write queue to prevent blocking
+        std::mutex queue_mtx_;
+        std::queue<std::string> write_queue_;
+        std::atomic<bool> write_in_progress_{false};
+        std::atomic<bool> closed_{false};
+
+        // Maximum queue size to prevent memory bloat from slow clients
+        static constexpr size_t kMaxQueueSize = 1000;
+
         Session(boost::asio::ip::tcp::socket &&s, MarshalState &st, WsServer &sv)
             : ws(std::move(s)), state(st), server(sv) {}
+
         void run()
         {
             ws.set_option(websocket::stream_base::timeout::suggested(boost::beast::role_type::server));
@@ -190,20 +203,24 @@ do_accept(); });
             }
             do_read();
         }
+
         ~Session()
         {
+            closed_ = true;
             // Remove self from clients list
             // Since broadcast() now copies the list and releases the lock before sending,
             // the destructor taking the lock is safe (broadcast won't call methods on us)
             std::scoped_lock lk(state.ws_mtx);
             state.ws_clients.erase(this);
         }
+
         void do_read()
         {
             auto self = shared_from_this();
             ws.async_read(buffer, [self](auto ec, auto)
                           { if(!ec){ self->on_msg(); self->do_read(); } });
         }
+
         void on_msg()
         {
             std::string text_data;
@@ -244,14 +261,78 @@ do_accept(); });
                 server.broadcast(res.broadcast);
             }
         }
+
+        // Non-blocking send - queues message for async delivery
         void send(const std::string &s)
         {
-            std::scoped_lock lk(send_mtx);
-            ws.text(true);
-            // Send one text frame that ends with a newline so CLIs and pipes flush immediately
-            std::string line = s;
-            line.push_back('\n');
-            ws.write(boost::asio::buffer(line));
+            if (closed_)
+                return;
+
+            std::string line = s + "\n";
+
+            {
+                std::lock_guard<std::mutex> lk(queue_mtx_);
+
+                // Drop messages if queue is too large (slow client protection)
+                if (write_queue_.size() >= kMaxQueueSize)
+                {
+                    // Log dropped message but don't block
+                    std::cerr << "WS: dropping message, queue full for slow client\n";
+                    return;
+                }
+
+                write_queue_.push(std::move(line));
+            }
+
+            // Start async write chain if not already in progress
+            maybe_start_write();
         }
-        };
+
+    private:
+        void maybe_start_write()
+        {
+            // Only one write can be in progress at a time
+            bool expected = false;
+            if (!write_in_progress_.compare_exchange_strong(expected, true))
+                return;
+
+            do_write();
+        }
+
+        void do_write()
+        {
+            if (closed_)
+            {
+                write_in_progress_ = false;
+                return;
+            }
+
+            std::string msg;
+            {
+                std::lock_guard<std::mutex> lk(queue_mtx_);
+                if (write_queue_.empty())
+                {
+                    write_in_progress_ = false;
+                    return;
+                }
+                msg = std::move(write_queue_.front());
+                write_queue_.pop();
+            }
+
+            auto self = shared_from_this();
+            ws.text(true);
+            ws.async_write(boost::asio::buffer(msg),
+                [self, msg_copy = std::move(msg)](boost::beast::error_code ec, std::size_t) {
+                    if (ec)
+                    {
+                        // Connection error, stop writing
+                        self->closed_ = true;
+                        self->write_in_progress_ = false;
+                        return;
+                    }
+                    // Continue writing if more messages in queue
+                    self->do_write();
+                });
+        }
+    };
 };
