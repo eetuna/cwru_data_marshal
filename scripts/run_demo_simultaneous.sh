@@ -7,6 +7,7 @@ set -e
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "$SCRIPT_DIR/tools/robot_marshal_env.sh"
+source "$SCRIPT_DIR/tools/mri_marshal_env.sh"
 
 # Configuration
 MRI_HTTP=8080
@@ -195,7 +196,12 @@ fi
 
 # Start MRI Marshal
 echo "Starting MRI Marshal (HTTP:$MRI_HTTP, WebSocket:$MRI_WS)..."
-./build/marshal --http 127.0.0.1:$MRI_HTTP \
+if ! ensure_mri_ready; then
+    echo "MRI marshal binaries not found. Set MRI_MARSHAL_DIR."
+    exit 1
+fi
+echo "MRI Marshal binary: $MRI_MARSHAL_BIN"
+"$MRI_MARSHAL_BIN" --http 127.0.0.1:$MRI_HTTP \
                 --ws 127.0.0.1:$MRI_WS \
                 --data "$DATA_MRI" \
                 --shutdown-timeout-sec $SHUTDOWN_TIMEOUT_SEC \
@@ -302,14 +308,14 @@ echo "[STEP 2] Launching Visualizer"
 echo "───────────────────────────────────────────────────────"
 echo ""
 
-if [ -f "./build/viz_client" ]; then
+if [ -f "$MRI_VIZ_CLIENT_BIN" ]; then
     echo "Starting C++ OpenCV visualizer..."
     echo "  • HTTP polling every ${IMAGE_INTERVAL_MS}ms"
     echo "  • Simple single-loop design"
     echo "  • Controls: UP/DOWN for slices, ESC to exit"
     echo ""
 
-    ./build/viz_client --http http://127.0.0.1:$MRI_HTTP/v1/mrd/latest \
+    "$MRI_VIZ_CLIENT_BIN" --http http://127.0.0.1:$MRI_HTTP/v1/mrd/latest \
         > "$DATA_MRI/viz.log" 2>&1 &
     VIZ_PID=$!
 
@@ -337,7 +343,7 @@ echo ""
 # Start image_streamer in background
 echo "Starting image_streamer ($IMAGE_FRAME_COUNT frames @ ${IMAGE_INTERVAL_MS}ms = ${DEMO_DURATION_SEC}s)..."
 echo "  • Volume: ${IMAGE_SIZE}x${IMAGE_SIZE}x${IMAGE_NSLICES} slices"
-./build/image_streamer --http http://127.0.0.1:$MRI_HTTP \
+"$MRI_IMAGE_STREAMER_BIN" --http http://127.0.0.1:$MRI_HTTP \
                        --frames $IMAGE_FRAME_COUNT \
                        --dt-ms $IMAGE_INTERVAL_MS \
                        --size $IMAGE_SIZE \

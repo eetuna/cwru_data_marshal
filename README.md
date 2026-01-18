@@ -1,38 +1,31 @@
-# CWRU Data Marshal
+# CWRU Data Marshal (Umbrella Runner)
 
-A high-performance, dual-marshal architecture for synchronized MRI and robotic data management. Designed for clinical reliability, real-time feedback, and high-throughput imaging data streams.
-
----
-
-## 🛠️ Operational Modes
-
-The marshal runs in one of two explicit modes to ensure data integrity:
-
-### [Mode A: Live Mode](docs/guides/README_MODE_A.md)
-*   **Purpose:** Real-time data streaming and feedback.
-*   **Workflow:** Scanner → Marshal → **Live Files** → Clients.
-*   **Storage:** Data is written to `./data/mrd`.
-
-### [Mode B: Dumpbox Mode](docs/guides/README_MODE_B.md)
-*   **Purpose:** High-integrity archival recording and offline playback.
-*   **Workflow:** Scanner → Marshal → **Session Folders** → Playback → Live.
-*   **Storage:** Data is siloed into `./data/dumpbox/<session>`.
+This branch is an **umbrella** that runs the MRI marshal and robot marshal from their dedicated branches/repos. It does not vendor marshal source code; it orchestrates builds, demos, and Docker packaging.
 
 ---
 
 ## 🚀 Getting Started
 
-### 1. Interactive Demo
-To see the system in action (including real-time streaming, bio-signals, and the safety bridge), run the interactive demo:
+### 1. Interactive Demo (umbrella)
+To see the system in action (real-time streaming, bio-signals, and the safety bridge), run the interactive demo:
 ```bash
 ./scripts/run_demo.sh
 ```
-Robot marshal binaries are expected from an external repo. By default, the demo looks for `../robot_data_marshal_with_catheter_system_components`. If it is missing, the demo will create a git worktree from the `robot_data_marshal_with_catheter_system_components` branch in this repo. You can also set `ROBOT_MARSHAL_DIR` (and optional `ROBOT_MARSHAL_BIN` / `ROBOT_CLIENTS`) before running the demo.
+The demo uses worktrees for both marshals:
+- MRI marshal: `mri-data-marhsal` branch (worktree created at `../mri_data_marshal_worktree`)
+- Robot marshal: `robot_data_marshal_with_catheter_system_components` branch (worktree created at `../robot_data_marshal_catheter_worktree`)
 
-### 2. Run All Tests
-To verify the entire system (Unit, Integration, and Stress tests):
+You can override with `MRI_MARSHAL_DIR` and `ROBOT_MARSHAL_DIR` if you keep the repos elsewhere.
+
+### 2. Docker Compose (umbrella)
+Build and run both marshals as containers:
 ```bash
-./scripts/run_all_tests.sh
+docker compose up --build
+```
+
+To export images for offline use (USB transfer):
+```bash
+./scripts/export_images.sh
 ```
 
 ---
@@ -40,36 +33,25 @@ To verify the entire system (Unit, Integration, and Stress tests):
 ## 📖 Documentation Map
 
 ### Core Guides
-- **[Setup & Ingest](docs/guides/USAGE_WITH_CLIENTS.md):** How to install and start ingesting data.
-- **[Mode A: Live Mode](docs/guides/README_MODE_A.md):** Real-time SWMR streaming documentation.
-- **[Mode B: Dumpbox Mode](docs/guides/README_MODE_B.md):** Archival recording and playback documentation.
-- **[Troubleshooting](docs/guides/TROUBLESHOOTING.md):** Common issues and solutions.
+- **[Usage & API](docs/USAGE_AND_API.md):** How to ingest data and use endpoints.
+- **[Client API Reference](docs/CLIENT_API_REFERENCE.md):** Client request/response schema details.
+- **[Demo Guide](docs/DEMO_GUIDE.md):** Walkthrough of the demo flows.
 
 ### Technical Architecture
-- **[System Architecture](docs/technical/ARCHITECTURE.md):** High-level design and data flow.
-- **[API Reference](docs/technical/API_REFERENCE.md):** REST and WebSocket endpoint specifications.
-- **[Branch Comparison](docs/technical/BRANCH_COMPARISON.md):** MRI Marshal (SWMR) vs. Robot Marshal (Lightweight Cache).
+- **[SWMR vs Robot Marshal](docs/SWMR_AND_ROBOT_MARSHAL_OVERVIEW.md):** MRI SWMR vs robot cache overview.
 
 ### Reports & Performance
-- **[Performance Report](docs/reports/PERFORMANCE_REPORT.md):** Throughput and latency benchmarks.
-- **[Verification Report](docs/reports/REFACTORING_AND_TESTING_REPORT.md):** Audit of current implementation vs. DataFlow design.
-- **[Project Roadmap](docs/ROADMAP_IMPROVEMENTS.md):** Current status and planned enhancements.
+- **[SWMR Bench Analysis](docs/SWMR_CONTINUOUS_BENCH_ANALYSIS.md):** SWMR throughput/latency analysis.
+- **[Improvements & Optimization](docs/IMPROVEMENTS_AND_OPTIMIZATION.md):** Design notes and optimization ideas.
 
 ---
 
 ## 📂 Repository Structure
 
-- `scripts/`: Main entry points for demo and testing.
-  - `scripts/benchmarks/`: Exhaustive performance and chaos tests.
-  - `scripts/tools/`: Auxiliary helper and dev scripts.
-- `src/`: MRI Marshal core implementation (Boost.Asio/Beast).
-- `clients/`: Reference clients including the **Coordinator Bridge**, trackers, and streamers.
-- `tests/`: Comprehensive C++ test suites (9/9 pass).
-- `data/`: Default directory for MRI session logs and artifacts.
-- `archive/`: Archived test data and historical documentation (preserved, not needed for current work).
-  - `archive/root_docs/`: Previous markdown documentation
-  - `archive/docs_backup/`: Previous docs folder contents
-  - `archive/test_data/`: Test data and experiment directories
+- `scripts/`: Umbrella entry points for demos and packaging.
+- `scripts/tools/`: Worktree helpers for MRI/robot marshals.
+- `docker/`: Dockerfiles that build images from the upstream branches.
+- `docs/`: Documentation and handoffs (historical and current).
 
 ---
 

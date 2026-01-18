@@ -6,6 +6,7 @@ set -e
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "$SCRIPT_DIR/tools/robot_marshal_env.sh"
+source "$SCRIPT_DIR/tools/mri_marshal_env.sh"
 
 # Configuration
 MRI_HTTP=8080
@@ -99,7 +100,11 @@ else
 fi
 
 echo -e "[*] Starting Hardened MRI Marshal on port $MRI_HTTP (Limit: 1GB)..."
-./build/marshal --http 127.0.0.1:$MRI_HTTP --ws 127.0.0.1:$MRI_WS --data "$DATA_MRI" --sink mrd --max-body-size $((1024*1024*1024)) > "$DATA_MRI/server.log" 2>&1 &
+if ! ensure_mri_ready; then
+    echo -e "${RED}[ERROR]${NC} MRI marshal binaries not found. Set MRI_MARSHAL_DIR."
+    exit 1
+fi
+"$MRI_MARSHAL_BIN" --http 127.0.0.1:$MRI_HTTP --ws 127.0.0.1:$MRI_WS --data "$DATA_MRI" --sink mrd --max-body-size $((1024*1024*1024)) > "$DATA_MRI/server.log" 2>&1 &
 
 echo -e "[*] Starting Specialized Robot Marshal on port $ROBOT_HTTP..."
 export ROBOT_MARSHAL_PORT="$ROBOT_HTTP"
@@ -164,12 +169,12 @@ echo "We will now demonstrate the two primary ways to move MRI data."
 
 echo -e "\n${CYAN}[A] Real-time Frame Streaming (Append Mode):${NC}"
 echo "Simulating a scanner sending 20 frames slice-by-slice to /v1/mrd/frame."
-./build/image_streamer --http http://127.0.0.1:$MRI_HTTP --frames 20 --dt-ms 50
+"$MRI_IMAGE_STREAMER_BIN" --http http://127.0.0.1:$MRI_HTTP --frames 20 --dt-ms 50
 echo "    [CHECK] Index tracks growing stream: $(tail -n 1 $DATA_MRI/mrd/index.jsonl | cut -c1-60)..."
 
 echo -e "\n${CYAN}[B] Full File Ingestion (Atomic Mode):${NC}"
 echo "Uploading a completed scan file (.mrd) via /v1/mrd/ingest."
-./build/mk_mrd "$DATA_MRI/full_scan_demo.mrd" > /dev/null
+"$MRI_MK_MRD_BIN" "$DATA_MRI/full_scan_demo.mrd" > /dev/null
 curl -s -H "Content-Type: application/octet-stream" \
      --data-binary "@$DATA_MRI/full_scan_demo.mrd" \
      http://127.0.0.1:$MRI_HTTP/v1/mrd/ingest > /dev/null
@@ -186,7 +191,7 @@ echo "Demonstrating that clients can operate via HTTP GET/POST without WebSocket
 
 # Part A: HTTP-Only Pull (MRI Marshal)
 echo -e "\n${CYAN}[A] MRI Marshal (Port 8080):${NC} HTTP Polling"
-python3 -u clients/mocks/http_tracker.py > "$DATA_MRI/http_tracker.log" 2>&1 &
+python3 -u "$MRI_MARSHAL_DIR/clients/mocks/http_tracker.py" > "$DATA_MRI/http_tracker.log" 2>&1 &
 HTTP_TRACKER_PID=$!
 sleep 1
 
@@ -358,7 +363,7 @@ pause
 header
 echo -e "${GREEN}STEP 6: Inter-Marshal Safety (Software E-Stop)${NC}"
 echo "Starting the Coordinator Bridge..."
-python3 -u clients/bridge/coordinator.py > "$DATA_MRI/coordinator.log" 2>&1 &
+python3 -u "$MRI_MARSHAL_DIR/clients/bridge/coordinator.py" > "$DATA_MRI/coordinator.log" 2>&1 &
 sleep 2
 
 echo -e "${RED}[SIMULATION]${NC} Triggering a fault in the MRI Marshal WebSocket..."
@@ -387,20 +392,20 @@ echo "Capturing data into a timestamped 'Dumpbox' session..."
 pkill -f "build/marshal" || true
 mkdir -p "$DATA_DUMPBOX"
 
-./build/marshal --http 127.0.0.1:8080 --data "$DATA_DUMPBOX" --sink dumpbox --dumpbox-root "$DATA_DUMPBOX" > "$DATA_DUMPBOX/server.log" 2>&1 &
+"$MRI_MARSHAL_BIN" --http 127.0.0.1:8080 --data "$DATA_DUMPBOX" --sink dumpbox --dumpbox-root "$DATA_DUMPBOX" > "$DATA_DUMPBOX/server.log" 2>&1 &
 sleep 2
 
 # Record one frame
-./build/image_streamer --http http://127.0.0.1:$MRI_HTTP --frames 1 --stream dumpbox_stream > /dev/null
+"$MRI_IMAGE_STREAMER_BIN" --http http://127.0.0.1:$MRI_HTTP --frames 1 --stream dumpbox_stream > /dev/null
 
 SESSION_DIR=$(ls -dt $DATA_DUMPBOX/202* | head -n 1)
 echo -e "${GREEN}[RECORDED]${NC} Session: $SESSION_DIR"
 
 echo -e "\n[*] Replaying into Live Marshal..."
 pkill -f "build/marshal" || true
-./build/marshal --http 127.0.0.1:$MRI_HTTP --data "$DATA_MRI" --sink mrd > "$DATA_MRI/server.log" 2>&1 &
+"$MRI_MARSHAL_BIN" --http 127.0.0.1:$MRI_HTTP --data "$DATA_MRI" --sink mrd > "$DATA_MRI/server.log" 2>&1 &
 sleep 2
-./build/playback --http http://127.0.0.1:$MRI_HTTP --data "$SESSION_DIR" --speed 1.0
+"$MRI_PLAYBACK_BIN" --http http://127.0.0.1:$MRI_HTTP --data "$SESSION_DIR" --speed 1.0
 
 echo -e "${GREEN}[SUCCESS]${NC} Replay complete."
 pause
