@@ -84,7 +84,7 @@ echo -e "[*] Starting Hardened MRI Marshal on port $MRI_HTTP (Limit: 1GB)..."
 ./build/marshal --http 127.0.0.1:$MRI_HTTP --ws 127.0.0.1:$MRI_WS --data "$DATA_MRI" --sink mrd --max-body-size $((1024*1024*1024)) > "$DATA_MRI/server.log" 2>&1 &
 
 echo -e "[*] Starting Specialized Robot Marshal on port $ROBOT_HTTP..."
-if ! ensure_robot_marshal_bins "$ROBOT_MARSHAL_BIN"; then
+if ! ensure_robot_marshal_ready; then
     echo -e "${RED}[ERROR]${NC} Robot marshal binary not found. Set ROBOT_MARSHAL_DIR/ROBOT_MARSHAL_BIN."
     exit 1
 fi
