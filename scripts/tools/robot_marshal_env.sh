@@ -4,11 +4,16 @@
 set -e
 
 ROBOT_MARSHAL_DIR="${ROBOT_MARSHAL_DIR:-}"
+ROBOT_MARSHAL_BRANCH="${ROBOT_MARSHAL_BRANCH:-robot-data-marshal}"
+ROBOT_MARSHAL_WORKTREE="${ROBOT_MARSHAL_WORKTREE:-../robot_data_marshal_worktree}"
+
 if [ -z "$ROBOT_MARSHAL_DIR" ]; then
     if [ -d "../robot_data_marshal_with_catheter_system_components" ]; then
         ROBOT_MARSHAL_DIR="../robot_data_marshal_with_catheter_system_components"
-    else
+    elif [ -d "../robot_data_marshal" ]; then
         ROBOT_MARSHAL_DIR="../robot_data_marshal"
+    else
+        ROBOT_MARSHAL_DIR="$ROBOT_MARSHAL_WORKTREE"
     fi
 fi
 
@@ -45,9 +50,26 @@ try_build_robot_marshal() {
     return 0
 }
 
+ensure_robot_marshal_checkout() {
+    if [ -d "$ROBOT_MARSHAL_DIR" ]; then
+        return 0
+    fi
+
+    if git rev-parse --verify "$ROBOT_MARSHAL_BRANCH" >/dev/null 2>&1; then
+        git worktree add "$ROBOT_MARSHAL_DIR" "$ROBOT_MARSHAL_BRANCH" >/dev/null
+        return 0
+    fi
+
+    return 1
+}
+
 ensure_robot_marshal_ready() {
     if ensure_robot_marshal_bins "$ROBOT_MARSHAL_BIN"; then
         return 0
+    fi
+
+    if ! ensure_robot_marshal_checkout; then
+        return 1
     fi
 
     if ! try_build_robot_marshal; then
