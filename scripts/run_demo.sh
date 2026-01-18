@@ -4,6 +4,9 @@
 
 set -e
 
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+source "$SCRIPT_DIR/tools/robot_marshal_env.sh"
+
 # Configuration
 MRI_HTTP=8080
 MRI_WS=8090
@@ -44,9 +47,7 @@ cleanup() {
     pkill -f "curl.*127.0.0.1:808" || true
     # Remove data
     rm -rf "$DATA_MRI" "$DATA_ROBOT" "$DATA_DUMPBOX"
-    # Remove temporary robot marshal code and binary (legacy cleanup)
-    rm -rf "./robot_marshal_tmp_src"
-    rm -f "./build/robot_marshal_demo"
+    # External robot marshal binaries are not removed here.
     rm -f "./files.json"
 }
 
@@ -59,7 +60,7 @@ header
 echo -e "${GREEN}CONCEPT:${NC}"
 echo "This demo showcases the Dual-Marshal architecture from DataFlow.drawio."
 echo "1. MRI Marshal (Current Branch): High-throughput 'Firehose'."
-echo "2. Robot Marshal (upstream/robot-data-marshal branch): Lightweight state cache."
+echo "2. Robot Marshal (external repo): Lightweight state cache."
 echo "3. Coordinator: The 'Brain' bridging the two safely."
 pause
 
@@ -73,30 +74,21 @@ mkdir -p "$DATA_MRI" "$DATA_ROBOT"
 echo -e "${CYAN}[PROVENANCE]${NC} Identifying source code..."
 CURRENT_BRANCH=$(git branch --show-current)
 echo -e "  - MRI Marshal: Running from branch [ ${YELLOW}${CURRENT_BRANCH}${NC} ]"
-echo -e "  - Robot Marshal: Pulling from branch [ ${YELLOW}upstream/robot-data-marshal${NC} ] (Generic State Server)"
+echo -e "  - Robot Marshal: External repo at [ ${YELLOW}${ROBOT_MARSHAL_DIR}${NC} ]"
 echo ""
 
-# AUTO-PREPARE: Build robot marshal from local thread-safe sources
-# NOTE: Using local fixed sources instead of upstream to fix thread-safety issues
-# that cause deadlocks during concurrent access (see scripts/robot_marshal_src/)
-if [ ! -f "./build/robot_marshal_demo" ]; then
-    echo -e "${YELLOW}[AUTO]${NC} Building Robot Marshal from local thread-safe sources..."
-
-    # Create files.json with allowed file list
-    echo '["file1.json", "file2.json", "file3.json", "robot_status", "robot_commands"]' > ./files.json
-
-    echo -e "[*] Compiling Thread-Safe Robot Marshal..."
-    g++ -std=c++17 -I ./scripts/robot_marshal_src ./scripts/robot_marshal_src/server.cpp \
-        -o ./build/robot_marshal_demo -lpthread
-
-    echo -e "${GREEN}[SUCCESS]${NC} Robot Marshal compiled with thread-safe CircularBuffer."
-fi
+# Prepare file routing for robot clients
+echo '["file1.json", "file2.json", "file3.json", "robot_status", "robot_commands"]' > ./files.json
 
 echo -e "[*] Starting Hardened MRI Marshal on port $MRI_HTTP (Limit: 1GB)..."
 ./build/marshal --http 127.0.0.1:$MRI_HTTP --ws 127.0.0.1:$MRI_WS --data "$DATA_MRI" --sink mrd --max-body-size $((1024*1024*1024)) > "$DATA_MRI/server.log" 2>&1 &
 
 echo -e "[*] Starting Specialized Robot Marshal on port $ROBOT_HTTP..."
-./build/robot_marshal_demo 8081 > "$DATA_ROBOT/server.log" 2>&1 &
+if ! ensure_robot_marshal_bins "$ROBOT_MARSHAL_BIN"; then
+    echo -e "${RED}[ERROR]${NC} Robot marshal binary not found. Set ROBOT_MARSHAL_DIR/ROBOT_MARSHAL_BIN."
+    exit 1
+fi
+"$ROBOT_MARSHAL_BIN" 8081 > "$DATA_ROBOT/server.log" 2>&1 &
 
 sleep 2
 
@@ -224,15 +216,19 @@ echo ""
 
 # Setup for C++ clients
 echo "[*] Setting up file routing configuration..."
-cp scripts/robot_marshal_src/file_routes.json ./file_routes.json 2>/dev/null || true
+echo '["file1.json", "file2.json", "file3.json", "robot_status", "robot_commands"]' > ./file_routes.json
 
 echo "[*] Running 3 C++ clients for 5 seconds while MRI marshal is active..."
 START=$(date +%s%N)
-timeout 5 ./scripts/robot_marshal_src/client-a > /tmp/demo_client_a.log 2>&1 &
+if ! ensure_robot_marshal_bins "$ROBOT_CLIENT_A" "$ROBOT_CLIENT_B" "$ROBOT_CLIENT_C"; then
+    echo -e "${RED}[ERROR]${NC} Robot client binaries not found. Set ROBOT_CLIENT_A/B/C."
+    exit 1
+fi
+timeout 5 "$ROBOT_CLIENT_A" > /tmp/demo_client_a.log 2>&1 &
 PID_A=$!
-timeout 5 ./scripts/robot_marshal_src/client-b > /tmp/demo_client_b.log 2>&1 &
+timeout 5 "$ROBOT_CLIENT_B" > /tmp/demo_client_b.log 2>&1 &
 PID_B=$!
-timeout 5 ./scripts/robot_marshal_src/client-c > /tmp/demo_client_c.log 2>&1 &
+timeout 5 "$ROBOT_CLIENT_C" > /tmp/demo_client_c.log 2>&1 &
 PID_C=$!
 
 echo -e "    - Launched client-a (PID: ${YELLOW}$PID_A${NC})"
@@ -326,4 +322,3 @@ pause
 header
 echo -e "${GREEN}DEMO COMPLETE${NC}"
 echo "Architecture verified: High-throughput images, clinical telemetry, and safety bridges."
-

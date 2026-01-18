@@ -27,6 +27,7 @@ To see the system in action (including real-time streaming, bio-signals, and the
 ```bash
 ./scripts/run_demo.sh
 ```
+Robot marshal binaries are expected from an external repo. Set `ROBOT_MARSHAL_DIR` (and optional `ROBOT_MARSHAL_BIN` / `ROBOT_CLIENT_A/B/C`) before running the demo.
 
 ### 2. Run All Tests
 To verify the entire system (Unit, Integration, and Stress tests):

@@ -21,7 +21,7 @@ The MRI marshal writes imaging frames to HDF5 and the visualizer (or external cl
 
 ## 2) How the MRI Marshal and Robot Marshal Work Together
 
-The MRI marshal and robot marshal are **separate services** that run side-by-side. They are not tightly coupled in code, but they are **coordinated by the demo/test workflows** and can be consumed together by external clients.
+The MRI marshal and robot marshal are **separate services** that run side-by-side. They are not tightly coupled in code, but they are **coordinated by the demo/test workflows** and can be consumed together by external clients. Robot marshal code is expected to live in an external repo and is referenced via environment variables in demo scripts.
 
 ### Interaction Model
 
@@ -79,4 +79,3 @@ The services are **not inherently synchronized** by shared code; synchronization
 ## 4) Summary
 
 SWMR enables safe, concurrent reading of MRI data while it is being written. The MRI marshal uses this to serve real-time data to clients without blocking ingestion. The robot marshal is a separate service used for robot state updates; the integration between the two is operational (scripts + client workflows) rather than a single merged service. External clients can interact with both services concurrently and align them via timestamps.
-

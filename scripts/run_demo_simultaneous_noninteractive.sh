@@ -5,6 +5,9 @@
 
 set -e
 
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+source "$SCRIPT_DIR/tools/robot_marshal_env.sh"
+
 # Configuration
 MRI_HTTP=8080
 MRI_WS=8090
@@ -133,8 +136,8 @@ echo ""
 
 mkdir -p "$DATA_MRI" "$DATA_ROBOT"
 
-# Copy file_routes.json for robot clients (required by client code)
-cp ./scripts/robot_marshal_src/file_routes.json ./
+# Create file_routes.json for robot clients
+echo '["file1.json", "file2.json", "file3.json", "robot_status", "robot_commands"]' > ./file_routes.json
 
 # Start MRI Marshal
 echo "Starting MRI Marshal (HTTP:$MRI_HTTP, WebSocket:$MRI_WS)..."
@@ -158,7 +161,11 @@ echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./files/file2.j
 echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./files/file3.json
 
 echo "Starting Robot Marshal (HTTP:$ROBOT_HTTP)..."
-./build/robot_marshal_demo $ROBOT_HTTP > "$DATA_ROBOT/server.log" 2>&1 &
+if ! ensure_robot_marshal_bins "$ROBOT_MARSHAL_BIN"; then
+    echo "Robot marshal binary not found. Set ROBOT_MARSHAL_DIR/ROBOT_MARSHAL_BIN."
+    exit 1
+fi
+"$ROBOT_MARSHAL_BIN" $ROBOT_HTTP > "$DATA_ROBOT/server.log" 2>&1 &
 ROBOT_PID=$!
 
 sleep 2
@@ -234,24 +241,20 @@ echo "  • Volume: ${IMAGE_SIZE}x${IMAGE_SIZE}x${IMAGE_NSLICES} slices"
                        --nslices $IMAGE_NSLICES > /tmp/streamer.log 2>&1 &
 STREAMER_PID=$!
 
-# Build robot clients only if needed (compilation is slow due to header-only libs)
-if [ ! -f ./build/client-a ] || [ ! -f ./build/client-b ] || [ ! -f ./build/client-c ]; then
-    echo "  Compiling robot clients (this may take ~60s due to large headers)..."
-    g++ -std=c++17 -I ./scripts/robot_marshal_src ./scripts/robot_marshal_src/client-a.cpp -o ./build/client-a -lpthread
-    g++ -std=c++17 -I ./scripts/robot_marshal_src ./scripts/robot_marshal_src/client-b.cpp -o ./build/client-b -lpthread
-    g++ -std=c++17 -I ./scripts/robot_marshal_src ./scripts/robot_marshal_src/client-c.cpp -o ./build/client-c -lpthread
-    echo "  Robot clients compiled."
-else
-    echo "  Robot clients already built."
+# Ensure robot client binaries exist (from external repo).
+if ! ensure_robot_marshal_bins "$ROBOT_CLIENT_A" "$ROBOT_CLIENT_B" "$ROBOT_CLIENT_C"; then
+    echo "Robot client binaries not found. Set ROBOT_CLIENT_A/B/C."
+    exit 1
 fi
+echo "  Robot clients already built."
 
 # Start the 3 robot clients in background
 echo "Starting 3 Robot Marshal clients (circular data flow)..."
-./build/client-a > /tmp/client-a.log 2>&1 &
+"$ROBOT_CLIENT_A" > /tmp/client-a.log 2>&1 &
 CLIENT_A_PID=$!
-./build/client-b > /tmp/client-b.log 2>&1 &
+"$ROBOT_CLIENT_B" > /tmp/client-b.log 2>&1 &
 CLIENT_B_PID=$!
-./build/client-c > /tmp/client-c.log 2>&1 &
+"$ROBOT_CLIENT_C" > /tmp/client-c.log 2>&1 &
 CLIENT_C_PID=$!
 echo "  • client-a (PID: $CLIENT_A_PID) file1 → file2"
 echo "  • client-b (PID: $CLIENT_B_PID) file2 → file3"
