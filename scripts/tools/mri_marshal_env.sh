@@ -73,7 +73,14 @@ ensure_mri_ready() {
             needs_rebuild=1
         fi
         if [ "$needs_rebuild" -eq 0 ]; then
-            return 0
+            if [ -f "$MRI_BUILD_DIR/CMakeCache.txt" ]; then
+                build_type=$(grep -E '^CMAKE_BUILD_TYPE:STRING=' "$MRI_BUILD_DIR/CMakeCache.txt" | cut -d= -f2- || true)
+                if [ "$build_type" = "Release" ]; then
+                    return 0
+                fi
+            fi
+        else
+            : # rebuild below
         fi
     fi
 
