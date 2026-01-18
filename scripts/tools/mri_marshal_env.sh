@@ -49,7 +49,7 @@ try_build_mri() {
         return 1
     fi
 
-    cmake -S "$MRI_MARSHAL_DIR" -B "$MRI_BUILD_DIR" >/dev/null
+    cmake -S "$MRI_MARSHAL_DIR" -B "$MRI_BUILD_DIR" -DCMAKE_BUILD_TYPE=Release >/dev/null
     cmake --build "$MRI_BUILD_DIR" >/dev/null
     return 0
 }
