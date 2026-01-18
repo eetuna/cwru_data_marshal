@@ -1,0 +1,35 @@
+===============================================================================
+COPY AND PASTE THIS INTO THE TERMINAL FOR THE NEXT CLAUDE AGENT:
+===============================================================================
+
+Please perform a comprehensive codebase audit to find bugs, performance issues, non-optimized code, and code quality problems.
+
+First, read the handoff document:
+- Read HANDOFF_NEXT_AUDIT.md for full context on what was just completed
+- Read CODEBASE_AUDIT_REPORT.md for the previous audit findings
+- Focus on areas we haven't fixed yet and code that was recently modified
+
+Your audit should cover:
+1. **Bugs**: Race conditions, memory leaks, undefined behavior, resource leaks
+2. **Performance**: Hot path optimizations, unnecessary allocations, lock contention
+3. **Code Quality**: Error handling, const-correctness, magic numbers, complexity
+4. **Architecture**: Design issues, tight coupling, missing abstractions
+
+Pay special attention to:
+- src/marshal_main.cpp (just added async graceful shutdown)
+- src/marshal_ws.hpp (just fixed WebSocket race conditions)
+- src/mrd_sink.cpp (just added LRU stream cleanup)
+- Blocking fsync operations in the critical path
+- Any remaining race conditions or deadlocks
+- After graceful shutdown occasionaly gui stays open and doesn't show images in the next session - inspect
+- While showing images during the demos (./scripts/run_demo_simultanous.sh) at a very small instant occasionaly the windows goes black and shows image again - inspect
+
+Write your findings to CODEBASE_AUDIT_REPORT_2.md with:
+- Executive summary
+- Critical issues (P0) with file:line references
+- Recommended fixes prioritized by severity
+- Performance optimization opportunities
+
+Start by exploring the codebase structure, then dive deep into the critical files.
+
+===============================================================================
