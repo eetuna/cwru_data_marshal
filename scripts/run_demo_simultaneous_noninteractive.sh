@@ -96,14 +96,26 @@ cleanup() {
     pkill -f "viz_client" 2>/dev/null || true
     pkill -f "image_streamer" 2>/dev/null || true
     if [ "$KEEP_DEMO_DATA" -eq 0 ]; then
-        rm -rf "$DATA_MRI" "$DATA_ROBOT" "./files.json" "./log_files" \
-            ./file1.json ./file2.json ./file3.json ./robot_status \
-            2>/dev/null || true
+        rm -rf "$DATA_MRI" "$DATA_ROBOT" "./log_files" "./files" 2>/dev/null || true
     else
-        rm -rf "./files.json" "./log_files" \
-            ./file1.json ./file2.json ./file3.json ./robot_status \
-            2>/dev/null || true
+        rm -rf "./log_files" "./files" 2>/dev/null || true
     fi
+
+    if [ -f "./files.json" ]; then
+        python3 - <<'PY'
+import json, os
+try:
+    files = json.load(open("files.json"))
+except Exception:
+    files = []
+for name in files:
+    try:
+        os.remove(name)
+    except OSError:
+        pass
+PY
+    fi
+    rm -f ./files.json ./file_routes.json 2>/dev/null || true
     sleep 1
     echo "✓ Cleanup complete"
 }
@@ -146,8 +158,11 @@ echo ""
 
 mkdir -p "$DATA_MRI" "$DATA_ROBOT"
 
-# Create file_routes.json for robot clients
-cat > ./file_routes.json <<'EOF'
+# Create file_routes.json for robot clients (prefer external repo config).
+if [ -f "$ROBOT_MARSHAL_DIR/file_routes.json" ]; then
+    cp "$ROBOT_MARSHAL_DIR/file_routes.json" ./file_routes.json
+else
+    cat > ./file_routes.json <<'EOF'
 {
   "client-a": {
     "read_from": "file1.json",
@@ -164,6 +179,7 @@ cat > ./file_routes.json <<'EOF'
   }
 }
 EOF
+fi
 
 # Start MRI Marshal
 echo "Starting MRI Marshal (HTTP:$MRI_HTTP, WebSocket:$MRI_WS)..."
@@ -175,14 +191,34 @@ echo "Starting MRI Marshal (HTTP:$MRI_HTTP, WebSocket:$MRI_WS)..."
 MRI_PID=$!
 
 # Setup and start Robot Marshal
-echo '["file1.json", "file2.json", "file3.json", "robot_status", "robot_commands"]' > ./files.json
+if [ -f "$ROBOT_MARSHAL_DIR/files.json" ]; then
+    cp "$ROBOT_MARSHAL_DIR/files.json" ./files.json
+else
+    echo '["file1.json", "file2.json", "file3.json", "robot_status", "robot_commands"]' > ./files.json
+fi
 mkdir -p ./log_files
-echo '{}' > ./robot_status
+ROBOT_FILES_DIR="."
+if [ -d "$ROBOT_MARSHAL_DIR/files" ]; then
+    ROBOT_FILES_DIR="./files"
+fi
+export ROBOT_FILES_DIR
+mkdir -p "$ROBOT_FILES_DIR"
 # Initialize client data files BEFORE starting robot marshal
 # Client code expects: sent_at, client_id, values fields
-echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./file1.json
-echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./file2.json
-echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./file3.json
+python3 - <<'PY'
+import json
+import os
+seed = {"client_id": "seed", "sent_at": 1, "values": [1.0, 2.0, 3.0]}
+files_dir = os.environ.get("ROBOT_FILES_DIR", ".")
+try:
+    files = json.load(open("files.json"))
+except Exception:
+    files = []
+for name in files:
+    path = os.path.join(files_dir, name)
+    with open(path, "w") as fh:
+        fh.write(json.dumps(seed))
+PY
 
 echo "Starting Robot Marshal (HTTP:$ROBOT_HTTP)..."
 export ROBOT_MARSHAL_PORT="$ROBOT_HTTP"
@@ -207,7 +243,16 @@ else
 fi
 
 echo -n "Robot Marshal: "
-if curl -s --max-time 2 http://127.0.0.1:$ROBOT_HTTP/read/robot_status > /dev/null 2>&1; then
+ROBOT_HEALTH_FILE=$(python3 - <<'PY'
+import json
+try:
+    files = json.load(open("files.json"))
+except Exception:
+    files = []
+print(files[0] if files else "robot_status")
+PY
+)
+if curl -s --max-time 2 "http://127.0.0.1:$ROBOT_HTTP/read/$ROBOT_HEALTH_FILE" > /dev/null 2>&1; then
     echo "✓ Ready"
 else
     echo "✗ Failed"
@@ -224,7 +269,7 @@ else
     "$ROBOT_MARSHAL_BIN" $ROBOT_HTTP > "$DATA_ROBOT/server.log" 2>&1 &
     ROBOT_PID=$!
     sleep 2
-    if curl -s --max-time 2 http://127.0.0.1:$ROBOT_HTTP/read/robot_status > /dev/null 2>&1; then
+    if curl -s --max-time 2 "http://127.0.0.1:$ROBOT_HTTP/read/$ROBOT_HEALTH_FILE" > /dev/null 2>&1; then
         echo "✓ Ready (after rebuild)"
     else
         echo "✗ Failed (after rebuild)"
@@ -289,22 +334,28 @@ STREAMER_PID=$!
 
 # Ensure robot client binaries exist (from external repo).
 if ! ensure_robot_clients_ready; then
-    echo "Robot client binaries not found. Set ROBOT_CLIENT_A/B/C."
+    echo "Robot client binaries not found. Set ROBOT_MARSHAL_DIR or ROBOT_CLIENTS."
     exit 1
 fi
 echo "  Robot clients already built."
 
-# Start the 3 robot clients in background
-echo "Starting 3 Robot Marshal clients (circular data flow)..."
-"$ROBOT_CLIENT_A" > /tmp/client-a.log 2>&1 &
-CLIENT_A_PID=$!
-"$ROBOT_CLIENT_B" > /tmp/client-b.log 2>&1 &
-CLIENT_B_PID=$!
-"$ROBOT_CLIENT_C" > /tmp/client-c.log 2>&1 &
-CLIENT_C_PID=$!
-echo "  • client-a (PID: $CLIENT_A_PID) file1 → file2"
-echo "  • client-b (PID: $CLIENT_B_PID) file2 → file3"
-echo "  • client-c (PID: $CLIENT_C_PID) file3 → file1"
+# Start robot clients in background
+echo "Starting Robot Marshal clients..."
+CLIENT_NAMES=()
+CLIENT_LOGS=()
+CLIENT_PIDS=()
+while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    name=${entry%%:*}
+    bin=${entry#*:}
+    log="/tmp/${name}.log"
+    "$bin" > "$log" 2>&1 &
+    pid=$!
+    CLIENT_NAMES+=("$name")
+    CLIENT_LOGS+=("$log")
+    CLIENT_PIDS+=("$pid")
+    echo "  • $name (PID: $pid)"
+done <<< "$ROBOT_CLIENTS"
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
@@ -361,14 +412,17 @@ echo ""
 # Main monitor loop - runs for DEMO_DURATION_SEC
 MONITOR_ITERATIONS=$(awk "BEGIN {printf \"%d\", $DEMO_DURATION_SEC / $MONITOR_INTERVAL}")
 for i in $(seq 1 $MONITOR_ITERATIONS); do
-    CLIENT_A_OPS=$(grep -cE "Read values|Write" /tmp/client-a.log 2>/dev/null || true)
-    CLIENT_B_OPS=$(grep -cE "Read values|Write" /tmp/client-b.log 2>/dev/null || true)
-    CLIENT_C_OPS=$(grep -cE "Read values|Write" /tmp/client-c.log 2>/dev/null || true)
-    CLIENT_A_OPS=${CLIENT_A_OPS:-0}
-    CLIENT_B_OPS=${CLIENT_B_OPS:-0}
-    CLIENT_C_OPS=${CLIENT_C_OPS:-0}
-    ROBOT_TOTAL=$((CLIENT_A_OPS + CLIENT_B_OPS + CLIENT_C_OPS))
-    echo "[$(date +%T)] Robot clients: $ROBOT_TOTAL ops (A:$CLIENT_A_OPS B:$CLIENT_B_OPS C:$CLIENT_C_OPS)"
+    ROBOT_TOTAL=0
+    DETAILS=""
+    for idx in "${!CLIENT_NAMES[@]}"; do
+        name="${CLIENT_NAMES[$idx]}"
+        log="${CLIENT_LOGS[$idx]}"
+        ops=$(grep -cE "Read|Result sent" "$log" 2>/dev/null || true)
+        ops=${ops:-0}
+        ROBOT_TOTAL=$((ROBOT_TOTAL + ops))
+        DETAILS="${DETAILS} ${name}:${ops}"
+    done
+    echo "[$(date +%T)] Robot clients: $ROBOT_TOTAL ops (${DETAILS# })"
     sleep $MONITOR_INTERVAL
 done
 
@@ -380,22 +434,26 @@ echo "════════════════════════�
 
 # Stop streamer and clients
 kill $STREAMER_PID 2>/dev/null || true
-kill $CLIENT_A_PID 2>/dev/null || true
-kill $CLIENT_B_PID 2>/dev/null || true
-kill $CLIENT_C_PID 2>/dev/null || true
+for pid in "${CLIENT_PIDS[@]}"; do
+    kill "$pid" 2>/dev/null || true
+done
 wait $STREAMER_PID 2>/dev/null || true
-wait $CLIENT_A_PID 2>/dev/null || true
-wait $CLIENT_B_PID 2>/dev/null || true
-wait $CLIENT_C_PID 2>/dev/null || true
+for pid in "${CLIENT_PIDS[@]}"; do
+    wait "$pid" 2>/dev/null || true
+done
 
 # Final robot client stats
-FINAL_A=$(grep -cE "Read values|Write" /tmp/client-a.log 2>/dev/null || true)
-FINAL_B=$(grep -cE "Read values|Write" /tmp/client-b.log 2>/dev/null || true)
-FINAL_C=$(grep -cE "Read values|Write" /tmp/client-c.log 2>/dev/null || true)
-FINAL_A=${FINAL_A:-0}
-FINAL_B=${FINAL_B:-0}
-FINAL_C=${FINAL_C:-0}
-ROBOT_FINAL=$((FINAL_A + FINAL_B + FINAL_C))
+FINAL_TOTAL=0
+FINAL_DETAILS=""
+for idx in "${!CLIENT_NAMES[@]}"; do
+    name="${CLIENT_NAMES[$idx]}"
+    log="${CLIENT_LOGS[$idx]}"
+    ops=$(grep -cE "Read|Result sent" "$log" 2>/dev/null || true)
+    ops=${ops:-0}
+    FINAL_TOTAL=$((FINAL_TOTAL + ops))
+    FINAL_DETAILS="${FINAL_DETAILS} ${name}:${ops}"
+done
+FINAL_TOTAL=${FINAL_TOTAL:-0}
 
 # ============================================================================
 # STEP 4: Summary
@@ -424,7 +482,7 @@ VIZ_FPS=$((1000 / IMAGE_INTERVAL_MS))
 echo "  • Visualizer:   ~$IMAGE_FRAME_COUNT frames @ ${VIZ_FPS}fps displayed"
 echo "  • ECG signals:  ~$ECG_COUNT_TARGET sent @ ${ECG_INTERVAL_MS}ms"
 echo "  • Pose updates: ~$POSE_COUNT_TARGET sent @ ${POSE_INTERVAL_MS}ms"
-echo "  • Robot clients: $ROBOT_FINAL ops (A:$FINAL_A B:$FINAL_B C:$FINAL_C)"
+echo "  • Robot clients: $FINAL_TOTAL ops (${FINAL_DETAILS# })"
 echo ""
 echo "Running Processes:"
 echo "  • MRI Marshal:   PID $MRI_PID (port $MRI_HTTP)"

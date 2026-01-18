@@ -47,9 +47,22 @@ cleanup() {
     pkill -f "curl.*127.0.0.1:808" || true
     # Remove data
     rm -rf "$DATA_MRI" "$DATA_ROBOT" "$DATA_DUMPBOX"
-    rm -f ./files.json ./file1.json ./file2.json ./file3.json ./robot_status
+    if [ -f "./files.json" ]; then
+        python3 - <<'PY'
+import json, os
+try:
+    files = json.load(open("files.json"))
+except Exception:
+    files = []
+for name in files:
+    try:
+        os.remove(name)
+    except OSError:
+        pass
+PY
+    fi
+    rm -f ./files.json ./file_routes.json
     # External robot marshal binaries are not removed here.
-    rm -f "./files.json"
 }
 
 trap cleanup EXIT
@@ -79,7 +92,11 @@ echo -e "  - Robot Marshal: External repo at [ ${YELLOW}${ROBOT_MARSHAL_DIR}${NC
 echo ""
 
 # Prepare file routing for robot clients
-echo '["file1.json", "file2.json", "file3.json", "robot_status", "robot_commands"]' > ./files.json
+if [ -f "$ROBOT_MARSHAL_DIR/files.json" ]; then
+    cp "$ROBOT_MARSHAL_DIR/files.json" ./files.json
+else
+    echo '["file1.json", "file2.json", "file3.json", "robot_status", "robot_commands"]' > ./files.json
+fi
 
 echo -e "[*] Starting Hardened MRI Marshal on port $MRI_HTTP (Limit: 1GB)..."
 ./build/marshal --http 127.0.0.1:$MRI_HTTP --ws 127.0.0.1:$MRI_WS --data "$DATA_MRI" --sink mrd --max-body-size $((1024*1024*1024)) > "$DATA_MRI/server.log" 2>&1 &
@@ -95,15 +112,40 @@ fi
 sleep 2
 
 # Ensure seed files exist for robot marshal (storage_dir = ./)
-echo '{}' > ./robot_status
-echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./file1.json
-echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./file2.json
-echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./file3.json
+ROBOT_FILES_DIR="."
+if [ -d "$ROBOT_MARSHAL_DIR/files" ]; then
+    ROBOT_FILES_DIR="./files"
+fi
+export ROBOT_FILES_DIR
+mkdir -p "$ROBOT_FILES_DIR"
+python3 - <<'PY'
+import json
+import os
+seed = {"client_id": "seed", "sent_at": 1, "values": [1.0, 2.0, 3.0]}
+files_dir = os.environ.get("ROBOT_FILES_DIR", ".")
+try:
+    files = json.load(open("files.json"))
+except Exception:
+    files = []
+for name in files:
+    path = os.path.join(files_dir, name)
+    with open(path, "w") as fh:
+        fh.write(json.dumps(seed))
+PY
 
 # Wait for robot marshal to be ready (with timeout)
 echo -e "[*] Waiting for Robot Marshal to be ready..."
+ROBOT_HEALTH_FILE=$(python3 - <<'PY'
+import json
+try:
+    files = json.load(open("files.json"))
+except Exception:
+    files = []
+print(files[0] if files else "robot_status")
+PY
+)
 for i in $(seq 1 10); do
-    if curl -s --max-time 1 http://127.0.0.1:$ROBOT_HTTP/read/robot_status > /dev/null 2>&1; then
+    if curl -s --max-time 1 "http://127.0.0.1:$ROBOT_HTTP/read/$ROBOT_HEALTH_FILE" > /dev/null 2>&1; then
         echo -e "${GREEN}[READY]${NC} Robot Marshal is responding."
         break
     fi
@@ -156,14 +198,23 @@ tail -n 1 "$DATA_MRI/http_tracker.log"
 
 # Part B: Robot Marshal (Specialized Branch Code)
 echo -e "\n${CYAN}[B] Robot Marshal (Port 8081):${NC} State Blackboard (RAM Buffer)"
-echo "[*] Writing to Robot 'Blackboard' via /write/robot_status..."
+ROBOT_STATUS_FILE=$(python3 - <<'PY'
+import json
+try:
+    files = json.load(open("files.json"))
+except Exception:
+    files = []
+print("robot_status" if "robot_status" in files else (files[0] if files else "robot_status"))
+PY
+)
+echo "[*] Writing to Robot 'Blackboard' via /write/$ROBOT_STATUS_FILE..."
 # Send specialized schema required by robot branch
-curl -s -X POST http://127.0.0.1:8081/write/robot_status \
+curl -s -X POST "http://127.0.0.1:8081/write/$ROBOT_STATUS_FILE" \
   -H "Content-Type: application/json" \
   -d "{\"sent_at\": $(date +%s%N), \"client_id\": \"demo_bot\", \"values\": [{\"pos\": \"SCAN_START\"}]}" > /dev/null
 
-echo "[*] Reading back from Robot 'Blackboard' via /read/robot_status..."
-ROBOT_READ=$(curl -s http://127.0.0.1:8081/read/robot_status)
+echo "[*] Reading back from Robot 'Blackboard' via /read/$ROBOT_STATUS_FILE..."
+ROBOT_READ=$(curl -s "http://127.0.0.1:8081/read/$ROBOT_STATUS_FILE")
 echo -e "    - Robot Reply (RAM content): ${YELLOW}$ROBOT_READ${NC}"
 
 # CLEANUP Step 3 background tasks to prevent 'wait' hangs
@@ -214,17 +265,20 @@ pause
 # ------------------------------------------------------------------------------
 header
 echo -e "${GREEN}STEP 5: Robot Marshal - Concurrent Operation with MRI Marshal${NC}"
-echo "Testing robot-data-marshal with 3 C++ clients while MRI marshal is active."
+echo "Testing robot marshal clients while MRI marshal is active."
 echo ""
 echo -e "${CYAN}Demonstrating:${NC}"
 echo "  - Both marshals running simultaneously (MRI on port 8080, Robot on port 8081)"
-echo "  - 3 C++ clients with circular data flow (as designed by upstream)"
+echo "  - Robot clients running with upstream routing config"
 echo "  - Pattern: file1 → client-a → file2 → client-b → file3 → client-c → file1"
 echo ""
 
 # Setup for C++ clients
 echo "[*] Setting up file routing configuration..."
-cat > ./file_routes.json <<'EOF'
+if [ -f "$ROBOT_MARSHAL_DIR/file_routes.json" ]; then
+    cp "$ROBOT_MARSHAL_DIR/file_routes.json" ./file_routes.json
+else
+    cat > ./file_routes.json <<'EOF'
 {
   "client-a": {
     "read_from": "file1.json",
@@ -241,44 +295,55 @@ cat > ./file_routes.json <<'EOF'
   }
 }
 EOF
+fi
 
-echo "[*] Running 3 C++ clients for 5 seconds while MRI marshal is active..."
+echo "[*] Running robot clients for 5 seconds while MRI marshal is active..."
 START=$(date +%s%N)
 if ! ensure_robot_clients_ready; then
-    echo -e "${RED}[ERROR]${NC} Robot client binaries not found. Set ROBOT_CLIENT_A/B/C."
+    echo -e "${RED}[ERROR]${NC} Robot client binaries not found. Set ROBOT_MARSHAL_DIR or ROBOT_CLIENTS."
     exit 1
 fi
-timeout 5 "$ROBOT_CLIENT_A" > /tmp/demo_client_a.log 2>&1 &
-PID_A=$!
-timeout 5 "$ROBOT_CLIENT_B" > /tmp/demo_client_b.log 2>&1 &
-PID_B=$!
-timeout 5 "$ROBOT_CLIENT_C" > /tmp/demo_client_c.log 2>&1 &
-PID_C=$!
-
-echo -e "    - Launched client-a (PID: ${YELLOW}$PID_A${NC})"
-echo -e "    - Launched client-b (PID: ${YELLOW}$PID_B${NC})"
-echo -e "    - Launched client-c (PID: ${YELLOW}$PID_C${NC})"
+CLIENT_NAMES=()
+CLIENT_LOGS=()
+CLIENT_PIDS=()
+while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    name=${entry%%:*}
+    bin=${entry#*:}
+    log="/tmp/demo_${name}.log"
+    timeout 5 "$bin" > "$log" 2>&1 &
+    pid=$!
+    CLIENT_NAMES+=("$name")
+    CLIENT_LOGS+=("$log")
+    CLIENT_PIDS+=("$pid")
+    echo -e "    - Launched ${name} (PID: ${YELLOW}$pid${NC})"
+done <<< "$ROBOT_CLIENTS"
 echo ""
 echo "[*] Clients running circular data flow..."
 echo "    (This tests thread-safety under continuous concurrent access)"
 
 # Wait for clients
-wait $PID_A $PID_B $PID_C 2>/dev/null || true
+for pid in "${CLIENT_PIDS[@]}"; do
+    wait "$pid" 2>/dev/null || true
+done
 END=$(date +%s%N)
 ELAPSED=$(( (END - START) / 1000000 ))
 
 # Count iterations
-ITERS_A=$(grep -c "Read values" /tmp/demo_client_a.log 2>/dev/null || echo 0)
-ITERS_B=$(grep -c "Read values" /tmp/demo_client_b.log 2>/dev/null || echo 0)
-ITERS_C=$(grep -c "Read values" /tmp/demo_client_c.log 2>/dev/null || echo 0)
-TOTAL=$(( ITERS_A + ITERS_B + ITERS_C ))
+TOTAL=0
+DETAILS=""
+for idx in "${!CLIENT_NAMES[@]}"; do
+    name="${CLIENT_NAMES[$idx]}"
+    log="${CLIENT_LOGS[$idx]}"
+    iters=$(grep -cE "Read|Result sent" "$log" 2>/dev/null || echo 0)
+    TOTAL=$((TOTAL + iters))
+    DETAILS="${DETAILS} ${name}:${iters}"
+done
 RATE=$(( TOTAL * 1000 / ELAPSED ))
 
 echo ""
 echo -e "${GREEN}[RESULTS]${NC}"
-echo -e "    - Client-A: ${YELLOW}${ITERS_A}${NC} iterations"
-echo -e "    - Client-B: ${YELLOW}${ITERS_B}${NC} iterations"
-echo -e "    - Client-C: ${YELLOW}${ITERS_C}${NC} iterations"
+echo -e "    - Clients: ${YELLOW}${DETAILS# }${NC}"
 echo -e "    - Total: ${YELLOW}${TOTAL}${NC} iterations in ${ELAPSED}ms"
 echo -e "    - Throughput: ${YELLOW}${RATE}${NC} operations/sec"
 echo -e "    - Both marshals operational simultaneously: ${GREEN}✓${NC}"

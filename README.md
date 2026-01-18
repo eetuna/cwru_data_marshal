@@ -27,7 +27,7 @@ To see the system in action (including real-time streaming, bio-signals, and the
 ```bash
 ./scripts/run_demo.sh
 ```
-Robot marshal binaries are expected from an external repo. Set `ROBOT_MARSHAL_DIR` (and optional `ROBOT_MARSHAL_BIN` / `ROBOT_CLIENT_A/B/C`) before running the demo.
+Robot marshal binaries are expected from an external repo. By default, the demo looks for `../robot_data_marshal_with_catheter_system_components`. If it is missing, the demo will create a git worktree from the `robot_data_marshal_with_catheter_system_components` branch in this repo. You can also set `ROBOT_MARSHAL_DIR` (and optional `ROBOT_MARSHAL_BIN` / `ROBOT_CLIENTS`) before running the demo.
 
 ### 2. Run All Tests
 To verify the entire system (Unit, Integration, and Stress tests):
