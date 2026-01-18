@@ -72,7 +72,8 @@
       "Bash(./image_streamer:*)",
       "Bash(./scripts/quick_wal_test.sh:*)",
       "Bash(git push:*)",
-      "Bash(git branch:*)"
+      "Bash(git branch:*)",
+      "Bash(git -C /workspaces/cwru_data_marshal log --oneline)"
     ]
   }
 }
