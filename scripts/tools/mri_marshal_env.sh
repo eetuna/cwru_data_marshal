@@ -56,7 +56,25 @@ try_build_mri() {
 
 ensure_mri_ready() {
     if ensure_mri_bins "$MRI_MARSHAL_BIN" "$MRI_IMAGE_STREAMER_BIN" "$MRI_VIZ_CLIENT_BIN" "$MRI_MK_MRD_BIN" "$MRI_PLAYBACK_BIN"; then
-        return 0
+        local needs_rebuild=0
+        if [ -f "$MRI_MARSHAL_DIR/src/marshal_main.cpp" ] && [ "$MRI_MARSHAL_DIR/src/marshal_main.cpp" -nt "$MRI_MARSHAL_BIN" ]; then
+            needs_rebuild=1
+        fi
+        if [ -f "$MRI_MARSHAL_DIR/clients/viz_client/viz_client_main.cpp" ] && [ "$MRI_MARSHAL_DIR/clients/viz_client/viz_client_main.cpp" -nt "$MRI_VIZ_CLIENT_BIN" ]; then
+            needs_rebuild=1
+        fi
+        if [ -f "$MRI_MARSHAL_DIR/clients/image_streamer/image_streamer_main.cpp" ] && [ "$MRI_MARSHAL_DIR/clients/image_streamer/image_streamer_main.cpp" -nt "$MRI_IMAGE_STREAMER_BIN" ]; then
+            needs_rebuild=1
+        fi
+        if [ -f "$MRI_MARSHAL_DIR/src/mk_mrd.cpp" ] && [ "$MRI_MARSHAL_DIR/src/mk_mrd.cpp" -nt "$MRI_MK_MRD_BIN" ]; then
+            needs_rebuild=1
+        fi
+        if [ -f "$MRI_MARSHAL_DIR/services/playback/playback_main.cpp" ] && [ "$MRI_MARSHAL_DIR/services/playback/playback_main.cpp" -nt "$MRI_PLAYBACK_BIN" ]; then
+            needs_rebuild=1
+        fi
+        if [ "$needs_rebuild" -eq 0 ]; then
+            return 0
+        fi
     fi
 
     if ! ensure_mri_checkout; then
