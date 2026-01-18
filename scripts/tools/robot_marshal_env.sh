@@ -104,9 +104,21 @@ try_build_robot_clients() {
     fi
 
     mkdir -p "$ROBOT_MARSHAL_DIR/build"
-    g++ -std=c++17 -I "$ROBOT_MARSHAL_DIR" "$ROBOT_MARSHAL_DIR/client-a.cpp" -o "$ROBOT_MARSHAL_DIR/build/client-a" -lpthread
-    g++ -std=c++17 -I "$ROBOT_MARSHAL_DIR" "$ROBOT_MARSHAL_DIR/client-b.cpp" -o "$ROBOT_MARSHAL_DIR/build/client-b" -lpthread
-    g++ -std=c++17 -I "$ROBOT_MARSHAL_DIR" "$ROBOT_MARSHAL_DIR/client-c.cpp" -o "$ROBOT_MARSHAL_DIR/build/client-c" -lpthread
+    local client_a="$ROBOT_MARSHAL_DIR/build/client-a_patched.cpp"
+    local client_b="$ROBOT_MARSHAL_DIR/build/client-b_patched.cpp"
+    local client_c="$ROBOT_MARSHAL_DIR/build/client-c_patched.cpp"
+    local client_repl="httplib::Client cli(\\\"127.0.0.1\\\", $ROBOT_MARSHAL_PORT);"
+
+    sed -E "s/httplib::Client cli\\(\"[^\"]+\", [0-9]+\\);/$client_repl/" \
+        "$ROBOT_MARSHAL_DIR/client-a.cpp" > "$client_a"
+    sed -E "s/httplib::Client cli\\(\"[^\"]+\", [0-9]+\\);/$client_repl/" \
+        "$ROBOT_MARSHAL_DIR/client-b.cpp" > "$client_b"
+    sed -E "s/httplib::Client cli\\(\"[^\"]+\", [0-9]+\\);/$client_repl/" \
+        "$ROBOT_MARSHAL_DIR/client-c.cpp" > "$client_c"
+
+    g++ -std=c++17 -I "$ROBOT_MARSHAL_DIR" "$client_a" -o "$ROBOT_MARSHAL_DIR/build/client-a" -lpthread
+    g++ -std=c++17 -I "$ROBOT_MARSHAL_DIR" "$client_b" -o "$ROBOT_MARSHAL_DIR/build/client-b" -lpthread
+    g++ -std=c++17 -I "$ROBOT_MARSHAL_DIR" "$client_c" -o "$ROBOT_MARSHAL_DIR/build/client-c" -lpthread
 
     return 0
 }
