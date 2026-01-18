@@ -104,6 +104,7 @@ try_build_robot_clients() {
     fi
 
     mkdir -p "$ROBOT_MARSHAL_DIR/build"
+    local stamp="$ROBOT_MARSHAL_DIR/build/.robot_client_port"
     local client_a="$ROBOT_MARSHAL_DIR/build/client-a_patched.cpp"
     local client_b="$ROBOT_MARSHAL_DIR/build/client-b_patched.cpp"
     local client_c="$ROBOT_MARSHAL_DIR/build/client-c_patched.cpp"
@@ -120,12 +121,20 @@ try_build_robot_clients() {
     g++ -std=c++17 -I "$ROBOT_MARSHAL_DIR" "$client_b" -o "$ROBOT_MARSHAL_DIR/build/client-b" -lpthread
     g++ -std=c++17 -I "$ROBOT_MARSHAL_DIR" "$client_c" -o "$ROBOT_MARSHAL_DIR/build/client-c" -lpthread
 
+    echo "$ROBOT_MARSHAL_PORT" > "$stamp"
     return 0
 }
 
 ensure_robot_clients_ready() {
     if ensure_robot_marshal_bins "$ROBOT_CLIENT_A" "$ROBOT_CLIENT_B" "$ROBOT_CLIENT_C"; then
-        return 0
+        local stamp="$ROBOT_MARSHAL_DIR/build/.robot_client_port"
+        if [ -f "$stamp" ]; then
+            local built_port
+            built_port=$(cat "$stamp" 2>/dev/null || true)
+            if [ "$built_port" = "$ROBOT_MARSHAL_PORT" ]; then
+                return 0
+            fi
+        fi
     fi
 
     if ! ensure_robot_marshal_checkout; then
