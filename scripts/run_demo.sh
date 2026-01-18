@@ -228,7 +228,7 @@ echo '["file1.json", "file2.json", "file3.json", "robot_status", "robot_commands
 
 echo "[*] Running 3 C++ clients for 5 seconds while MRI marshal is active..."
 START=$(date +%s%N)
-if ! ensure_robot_marshal_bins "$ROBOT_CLIENT_A" "$ROBOT_CLIENT_B" "$ROBOT_CLIENT_C"; then
+if ! ensure_robot_clients_ready; then
     echo -e "${RED}[ERROR]${NC} Robot client binaries not found. Set ROBOT_CLIENT_A/B/C."
     exit 1
 fi

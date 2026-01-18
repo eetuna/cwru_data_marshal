@@ -247,7 +247,7 @@ echo "  • Volume: ${IMAGE_SIZE}x${IMAGE_SIZE}x${IMAGE_NSLICES} slices"
 STREAMER_PID=$!
 
 # Ensure robot client binaries exist (from external repo).
-if ! ensure_robot_marshal_bins "$ROBOT_CLIENT_A" "$ROBOT_CLIENT_B" "$ROBOT_CLIENT_C"; then
+if ! ensure_robot_clients_ready; then
     echo "Robot client binaries not found. Set ROBOT_CLIENT_A/B/C."
     exit 1
 fi

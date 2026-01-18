@@ -93,3 +93,36 @@ ensure_robot_marshal_ready() {
 
     ensure_robot_marshal_bins "$ROBOT_MARSHAL_BIN"
 }
+
+try_build_robot_clients() {
+    if [ ! -d "$ROBOT_MARSHAL_DIR" ]; then
+        return 1
+    fi
+
+    if [ ! -f "$ROBOT_MARSHAL_DIR/client-a.cpp" ] || [ ! -f "$ROBOT_MARSHAL_DIR/client-b.cpp" ] || [ ! -f "$ROBOT_MARSHAL_DIR/client-c.cpp" ]; then
+        return 1
+    fi
+
+    mkdir -p "$ROBOT_MARSHAL_DIR/build"
+    g++ -std=c++17 -I "$ROBOT_MARSHAL_DIR" "$ROBOT_MARSHAL_DIR/client-a.cpp" -o "$ROBOT_MARSHAL_DIR/build/client-a" -lpthread
+    g++ -std=c++17 -I "$ROBOT_MARSHAL_DIR" "$ROBOT_MARSHAL_DIR/client-b.cpp" -o "$ROBOT_MARSHAL_DIR/build/client-b" -lpthread
+    g++ -std=c++17 -I "$ROBOT_MARSHAL_DIR" "$ROBOT_MARSHAL_DIR/client-c.cpp" -o "$ROBOT_MARSHAL_DIR/build/client-c" -lpthread
+
+    return 0
+}
+
+ensure_robot_clients_ready() {
+    if ensure_robot_marshal_bins "$ROBOT_CLIENT_A" "$ROBOT_CLIENT_B" "$ROBOT_CLIENT_C"; then
+        return 0
+    fi
+
+    if ! ensure_robot_marshal_checkout; then
+        return 1
+    fi
+
+    if ! try_build_robot_clients; then
+        return 1
+    fi
+
+    ensure_robot_marshal_bins "$ROBOT_CLIENT_A" "$ROBOT_CLIENT_B" "$ROBOT_CLIENT_C"
+}
