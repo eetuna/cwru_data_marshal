@@ -38,6 +38,8 @@ try_build_robot_marshal() {
         return 1
     fi
 
+    local stamp="$ROBOT_MARSHAL_DIR/build/.robot_marshal_port"
+
     if [ -f "$ROBOT_MARSHAL_DIR/CMakeLists.txt" ]; then
         cmake -S "$ROBOT_MARSHAL_DIR" -B "$ROBOT_MARSHAL_DIR/build" >/dev/null
         cmake --build "$ROBOT_MARSHAL_DIR/build" >/dev/null
@@ -52,6 +54,7 @@ try_build_robot_marshal() {
         return 1
     fi
 
+    echo "$ROBOT_MARSHAL_PORT" > "$stamp"
     return 0
 }
 
@@ -70,7 +73,14 @@ ensure_robot_marshal_checkout() {
 
 ensure_robot_marshal_ready() {
     if ensure_robot_marshal_bins "$ROBOT_MARSHAL_BIN"; then
-        return 0
+        local stamp="$ROBOT_MARSHAL_DIR/build/.robot_marshal_port"
+        if [ -f "$stamp" ]; then
+            local built_port
+            built_port=$(cat "$stamp" 2>/dev/null || true)
+            if [ "$built_port" = "$ROBOT_MARSHAL_PORT" ]; then
+                return 0
+            fi
+        fi
     fi
 
     if ! ensure_robot_marshal_checkout; then
