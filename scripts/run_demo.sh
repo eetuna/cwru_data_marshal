@@ -47,6 +47,7 @@ cleanup() {
     pkill -f "curl.*127.0.0.1:808" || true
     # Remove data
     rm -rf "$DATA_MRI" "$DATA_ROBOT" "$DATA_DUMPBOX"
+    rm -f ./files.json ./file1.json ./file2.json ./file3.json ./robot_status ./robot_commands
     # External robot marshal binaries are not removed here.
     rm -f "./files.json"
 }
@@ -92,6 +93,12 @@ fi
 "$ROBOT_MARSHAL_BIN" 8081 > "$DATA_ROBOT/server.log" 2>&1 &
 
 sleep 2
+
+# Ensure seed files exist for robot marshal (storage_dir = ./)
+echo '{}' > ./robot_status
+echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./file1.json
+echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./file2.json
+echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./file3.json
 
 # Wait for robot marshal to be ready (with timeout)
 echo -e "[*] Waiting for Robot Marshal to be ready..."

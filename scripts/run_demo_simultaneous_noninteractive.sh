@@ -90,9 +90,13 @@ cleanup() {
     pkill -f "viz_client" 2>/dev/null || true
     pkill -f "image_streamer" 2>/dev/null || true
     if [ "$KEEP_DEMO_DATA" -eq 0 ]; then
-        rm -rf "$DATA_MRI" "$DATA_ROBOT" "./files.json" "./files" "./log_files" 2>/dev/null || true
+        rm -rf "$DATA_MRI" "$DATA_ROBOT" "./files.json" "./log_files" \
+            ./file1.json ./file2.json ./file3.json ./robot_status ./robot_commands \
+            2>/dev/null || true
     else
-        rm -rf "./files.json" "./files" "./log_files" 2>/dev/null || true
+        rm -rf "./files.json" "./log_files" \
+            ./file1.json ./file2.json ./file3.json ./robot_status ./robot_commands \
+            2>/dev/null || true
     fi
     sleep 1
     echo "✓ Cleanup complete"
@@ -152,13 +156,13 @@ MRI_PID=$!
 
 # Setup and start Robot Marshal
 echo '["file1.json", "file2.json", "file3.json", "robot_status", "robot_commands"]' > ./files.json
-mkdir -p ./files ./log_files
-echo '{}' > ./files/robot_status
+mkdir -p ./log_files
+echo '{}' > ./robot_status
 # Initialize client data files BEFORE starting robot marshal
 # Client code expects: sent_at, client_id, values fields
-echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./files/file1.json
-echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./files/file2.json
-echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./files/file3.json
+echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./file1.json
+echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./file2.json
+echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./file3.json
 
 echo "Starting Robot Marshal (HTTP:$ROBOT_HTTP)..."
 export ROBOT_MARSHAL_PORT="$ROBOT_HTTP"
