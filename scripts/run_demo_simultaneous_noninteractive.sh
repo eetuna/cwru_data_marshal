@@ -12,9 +12,15 @@ source "$SCRIPT_DIR/tools/robot_marshal_env.sh"
 MRI_HTTP=8080
 MRI_WS=8090
 ROBOT_HTTP=8081
-DATA_MRI="./data_demo_mri"
+DATA_MRI="./data_demo_mri/run_$(date +%Y%m%d_%H%M%S)"
 DATA_ROBOT="./data_demo_robot"
 KEEP_DEMO_DATA=1
+
+# HDF5 file locking can fail on WSL/overlayfs; keep enabled on native Linux.
+if grep -qiE "(microsoft|wsl)" /proc/version 2>/dev/null; then
+    export HDF5_USE_FILE_LOCKING=FALSE
+    export HDF5_FILE_LOCKING=FALSE
+fi
 
 # ============ TIMING CONFIGURATION ============
 # Adjust these to control how long each feature runs
@@ -91,11 +97,11 @@ cleanup() {
     pkill -f "image_streamer" 2>/dev/null || true
     if [ "$KEEP_DEMO_DATA" -eq 0 ]; then
         rm -rf "$DATA_MRI" "$DATA_ROBOT" "./files.json" "./log_files" \
-            ./file1.json ./file2.json ./file3.json ./robot_status ./robot_commands \
+            ./file1.json ./file2.json ./file3.json ./robot_status \
             2>/dev/null || true
     else
         rm -rf "./files.json" "./log_files" \
-            ./file1.json ./file2.json ./file3.json ./robot_status ./robot_commands \
+            ./file1.json ./file2.json ./file3.json ./robot_status \
             2>/dev/null || true
     fi
     sleep 1
@@ -141,15 +147,29 @@ echo ""
 mkdir -p "$DATA_MRI" "$DATA_ROBOT"
 
 # Create file_routes.json for robot clients
-echo '["file1.json", "file2.json", "file3.json", "robot_status", "robot_commands"]' > ./file_routes.json
+cat > ./file_routes.json <<'EOF'
+{
+  "client-a": {
+    "read_from": "file1.json",
+    "write_to1": "file2.json",
+    "write_to2": "file3.json"
+  },
+  "client-b": {
+    "read_from": "file2.json",
+    "write_to": "file3.json"
+  },
+  "client-c": {
+    "read_from": "file3.json",
+    "write_to": "file1.json"
+  }
+}
+EOF
 
 # Start MRI Marshal
 echo "Starting MRI Marshal (HTTP:$MRI_HTTP, WebSocket:$MRI_WS)..."
 ./build/marshal --http 127.0.0.1:$MRI_HTTP \
                 --ws 127.0.0.1:$MRI_WS \
                 --data "$DATA_MRI" \
-                --flush-frames 4 \
-                --flush-ms 50 \
                 --shutdown-timeout-sec $SHUTDOWN_TIMEOUT_SEC \
                 > "$DATA_MRI/server.log" 2>&1 &
 MRI_PID=$!
@@ -170,6 +190,7 @@ if ! ensure_robot_marshal_ready; then
     echo "Robot marshal binary not found. Set ROBOT_MARSHAL_DIR/ROBOT_MARSHAL_BIN."
     exit 1
 fi
+echo "Robot Marshal binary: $ROBOT_MARSHAL_BIN"
 "$ROBOT_MARSHAL_BIN" $ROBOT_HTTP > "$DATA_ROBOT/server.log" 2>&1 &
 ROBOT_PID=$!
 
@@ -190,7 +211,27 @@ if curl -s --max-time 2 http://127.0.0.1:$ROBOT_HTTP/read/robot_status > /dev/nu
     echo "✓ Ready"
 else
     echo "✗ Failed"
-    exit 1
+    echo "  → Retrying Robot Marshal rebuild on port $ROBOT_HTTP..."
+    if [ -n "$ROBOT_PID" ] && kill -0 $ROBOT_PID 2>/dev/null; then
+        kill -TERM $ROBOT_PID 2>/dev/null || true
+        sleep 1
+    fi
+    rm -f "$ROBOT_MARSHAL_DIR/build/.robot_marshal_port" "$ROBOT_MARSHAL_BIN"
+    if ! ensure_robot_marshal_ready; then
+        echo "  → Rebuild failed. Check $DATA_ROBOT/server.log"
+        exit 1
+    fi
+    "$ROBOT_MARSHAL_BIN" $ROBOT_HTTP > "$DATA_ROBOT/server.log" 2>&1 &
+    ROBOT_PID=$!
+    sleep 2
+    if curl -s --max-time 2 http://127.0.0.1:$ROBOT_HTTP/read/robot_status > /dev/null 2>&1; then
+        echo "✓ Ready (after rebuild)"
+    else
+        echo "✗ Failed (after rebuild)"
+        echo "  → Last 10 lines of $DATA_ROBOT/server.log:"
+        tail -n 10 "$DATA_ROBOT/server.log" 2>/dev/null || true
+        exit 1
+    fi
 fi
 
 echo ""

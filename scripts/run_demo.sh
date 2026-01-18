@@ -47,7 +47,7 @@ cleanup() {
     pkill -f "curl.*127.0.0.1:808" || true
     # Remove data
     rm -rf "$DATA_MRI" "$DATA_ROBOT" "$DATA_DUMPBOX"
-    rm -f ./files.json ./file1.json ./file2.json ./file3.json ./robot_status ./robot_commands
+    rm -f ./files.json ./file1.json ./file2.json ./file3.json ./robot_status
     # External robot marshal binaries are not removed here.
     rm -f "./files.json"
 }
@@ -224,7 +224,23 @@ echo ""
 
 # Setup for C++ clients
 echo "[*] Setting up file routing configuration..."
-echo '["file1.json", "file2.json", "file3.json", "robot_status", "robot_commands"]' > ./file_routes.json
+cat > ./file_routes.json <<'EOF'
+{
+  "client-a": {
+    "read_from": "file1.json",
+    "write_to1": "file2.json",
+    "write_to2": "file3.json"
+  },
+  "client-b": {
+    "read_from": "file2.json",
+    "write_to": "file3.json"
+  },
+  "client-c": {
+    "read_from": "file3.json",
+    "write_to": "file1.json"
+  }
+}
+EOF
 
 echo "[*] Running 3 C++ clients for 5 seconds while MRI marshal is active..."
 START=$(date +%s%N)
