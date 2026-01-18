@@ -7,6 +7,8 @@ set -e
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "$SCRIPT_DIR/tools/robot_marshal_env.sh"
 source "$SCRIPT_DIR/tools/mri_marshal_env.sh"
+ROOT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+cd "$ROOT_DIR"
 
 # Configuration
 MRI_HTTP=8080
