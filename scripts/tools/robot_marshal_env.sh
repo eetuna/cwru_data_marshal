@@ -6,6 +6,8 @@ set -e
 ROBOT_MARSHAL_DIR="${ROBOT_MARSHAL_DIR:-}"
 ROBOT_MARSHAL_BRANCH="${ROBOT_MARSHAL_BRANCH:-robot-data-marshal}"
 ROBOT_MARSHAL_WORKTREE="${ROBOT_MARSHAL_WORKTREE:-../robot_data_marshal_worktree}"
+ROBOT_MARSHAL_HOST="${ROBOT_MARSHAL_HOST:-0.0.0.0}"
+ROBOT_MARSHAL_PORT="${ROBOT_MARSHAL_PORT:-8081}"
 
 if [ -z "$ROBOT_MARSHAL_DIR" ]; then
     if [ -d "../robot_data_marshal_with_catheter_system_components" ]; then
@@ -41,7 +43,10 @@ try_build_robot_marshal() {
         cmake --build "$ROBOT_MARSHAL_DIR/build" >/dev/null
     elif [ -f "$ROBOT_MARSHAL_DIR/server.cpp" ]; then
         mkdir -p "$ROBOT_MARSHAL_DIR/build"
-        g++ -std=c++17 -I "$ROBOT_MARSHAL_DIR" "$ROBOT_MARSHAL_DIR/server.cpp" \
+        local patched="$ROBOT_MARSHAL_DIR/build/robot_marshal_demo_patched.cpp"
+        sed -E "s/server.listen\\(\"[^\"]+\", [0-9]+\\)/server.listen(\\\"$ROBOT_MARSHAL_HOST\\\", $ROBOT_MARSHAL_PORT)/" \
+            "$ROBOT_MARSHAL_DIR/server.cpp" > "$patched"
+        g++ -std=c++17 -I "$ROBOT_MARSHAL_DIR" "$patched" \
             -o "$ROBOT_MARSHAL_DIR/build/robot_marshal_demo" -lpthread
     else
         return 1

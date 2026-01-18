@@ -161,6 +161,7 @@ echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./files/file2.j
 echo '{"client_id":"seed","sent_at":1,"values":[1.0,2.0,3.0]}' > ./files/file3.json
 
 echo "Starting Robot Marshal (HTTP:$ROBOT_HTTP)..."
+export ROBOT_MARSHAL_PORT="$ROBOT_HTTP"
 if ! ensure_robot_marshal_ready; then
     echo "Robot marshal binary not found. Set ROBOT_MARSHAL_DIR/ROBOT_MARSHAL_BIN."
     exit 1
