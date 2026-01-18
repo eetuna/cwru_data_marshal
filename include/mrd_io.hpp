@@ -220,14 +220,15 @@ inline nlohmann::json ingest_payload(MarshalState &state,
         {"source", source}
     };
 
-    append_line(index_root / "index.jsonl", entry.dump());
-    const std::string latest_dump = entry.dump();
+    const std::string entry_dump = entry.dump();
+    append_line(index_root / "index.jsonl", entry_dump);
+    const std::string latest_dump = entry_dump;
     write_atomic(index_root / "latest.json", latest_dump.data(), latest_dump.size());
 
     try
     {
-        state.ws_emit(entry.dump());
-        state.ws_emit_topic(entry.dump(), "mrd.ingest");
+        state.ws_emit(entry_dump);
+        state.ws_emit_topic(entry_dump, "mrd.ingest");
     }
     catch (const std::exception &e)
     {

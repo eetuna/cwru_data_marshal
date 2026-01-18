@@ -16,10 +16,10 @@
 #include <boost/beast/websocket.hpp>
 #include <boost/asio.hpp>
 #include <memory>
-#include <set>
 #include <mutex>
 #include <queue>
 #include <atomic>
+#include <vector>
 #include "marshal_state.hpp"
 #include <boost/asio/buffer.hpp>
 #include <nlohmann/json.hpp>
@@ -100,9 +100,13 @@ inline WsResult handle_ws_message(MarshalState &state, const std::string &text_d
 
 class WsServer
 {
+    struct Session;
+
     boost::asio::ip::tcp::acceptor acceptor_;
     boost::asio::ip::tcp::socket socket_;
     MarshalState &state_;
+    std::mutex clients_mtx_;
+    std::vector<std::weak_ptr<Session>> clients_;
 
 public:
     WsServer(boost::asio::io_context &ioc, boost::asio::ip::tcp::endpoint ep, MarshalState &s)
@@ -127,51 +131,89 @@ public:
     }
     void broadcast(const std::string &msg)
     {
-        // Copy client list under lock, then release lock before sending
-        std::vector<void *> clients_copy;
-        {
-            std::scoped_lock lk(state_.ws_mtx);
-            clients_copy.assign(state_.ws_clients.begin(), state_.ws_clients.end());
-        }
+        std::vector<std::shared_ptr<Session>> clients_copy;
+        collect_live_clients(clients_copy);
 
-        for (auto h : clients_copy)
+        for (const auto &client : clients_copy)
         {
-            try {
-                auto *s = static_cast<Session *>(h);
-                s->send(msg);
-            } catch (const std::exception& e) {
+            try
+            {
+                client->send(msg);
+            }
+            catch (const std::exception &e)
+            {
                 std::cerr << "WS individual broadcast failed: " << e.what() << "\n";
             }
         }
     }
     void broadcast_to(const std::string &msg, const std::string &topic)
     {
-        // Copy client list under lock, then release lock before sending
-        std::vector<void *> clients_copy;
-        {
-            std::scoped_lock lk(state_.ws_mtx);
-            clients_copy.assign(state_.ws_clients.begin(), state_.ws_clients.end());
-        }
+        std::vector<std::shared_ptr<Session>> clients_copy;
+        collect_live_clients(clients_copy);
 
-        for (auto h : clients_copy)
+        for (const auto &client : clients_copy)
         {
-            try {
-                auto *s = static_cast<Session *>(h);
-                if (topic.empty() || s->topic == topic)
-                    s->send(msg);
-            } catch (const std::exception& e) {
+            try
+            {
+                if (topic.empty() || client->get_topic() == topic)
+                    client->send(msg);
+            }
+            catch (const std::exception &e)
+            {
                 std::cerr << "WS topic broadcast failed: " << e.what() << "\n";
             }
         }
     }
 
 private:
+    void register_client(const std::shared_ptr<Session> &session)
+    {
+        std::lock_guard<std::mutex> lk(clients_mtx_);
+        clients_.push_back(session);
+    }
+
+    void unregister_client(Session *session)
+    {
+        std::lock_guard<std::mutex> lk(clients_mtx_);
+        auto it = clients_.begin();
+        while (it != clients_.end())
+        {
+            auto sp = it->lock();
+            if (!sp || sp.get() == session)
+            {
+                it = clients_.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+
+    void collect_live_clients(std::vector<std::shared_ptr<Session>> &out)
+    {
+        std::lock_guard<std::mutex> lk(clients_mtx_);
+        auto it = clients_.begin();
+        while (it != clients_.end())
+        {
+            if (auto sp = it->lock())
+            {
+                out.push_back(std::move(sp));
+                ++it;
+            }
+            else
+            {
+                it = clients_.erase(it);
+            }
+        }
+    }
+
     void do_accept()
     {
         acceptor_.async_accept(socket_, [this](auto ec)
                                {
-if(!ec) std::make_shared<Session>(std::move(socket_), state_, *this)->run();
-do_accept(); });
+	if(!ec) std::make_shared<Session>(std::move(socket_), state_, *this)->run();
+	do_accept(); });
     }
     struct Session : std::enable_shared_from_this<Session>
     {
@@ -179,6 +221,7 @@ do_accept(); });
         boost::beast::flat_buffer buffer;
         MarshalState &state;
         WsServer &server;
+        std::mutex topic_mtx_;
         std::string topic = "_system_"; // Default topic, receives only global broadcasts
 
         // Async write queue to prevent blocking
@@ -197,21 +240,14 @@ do_accept(); });
         {
             ws.set_option(websocket::stream_base::timeout::suggested(boost::beast::role_type::server));
             ws.accept();
-            {
-                std::scoped_lock lk(state.ws_mtx);
-                state.ws_clients.insert(this);
-            }
+            server.register_client(shared_from_this());
             do_read();
         }
 
         ~Session()
         {
             closed_ = true;
-            // Remove self from clients list
-            // Since broadcast() now copies the list and releases the lock before sending,
-            // the destructor taking the lock is safe (broadcast won't call methods on us)
-            std::scoped_lock lk(state.ws_mtx);
-            state.ws_clients.erase(this);
+            server.unregister_client(this);
         }
 
         void do_read()
@@ -244,11 +280,11 @@ do_accept(); });
             }
             buffer.consume(buffer.size());
 
-            WsResult res = handle_ws_message(state, text_data, binary_data, topic);
+            WsResult res = handle_ws_message(state, text_data, binary_data, get_topic());
 
             if (res.is_subscription)
             {
-                topic = res.topic;
+                set_topic(res.topic);
             }
 
             if (!res.response.empty())
@@ -260,6 +296,18 @@ do_accept(); });
             {
                 server.broadcast(res.broadcast);
             }
+        }
+
+        std::string get_topic()
+        {
+            std::lock_guard<std::mutex> lk(topic_mtx_);
+            return topic;
+        }
+
+        void set_topic(const std::string &new_topic)
+        {
+            std::lock_guard<std::mutex> lk(topic_mtx_);
+            topic = new_topic;
         }
 
         // Non-blocking send - queues message for async delivery
@@ -320,9 +368,10 @@ do_accept(); });
             }
 
             auto self = shared_from_this();
+            auto msg_ptr = std::make_shared<std::string>(std::move(msg));
             ws.text(true);
-            ws.async_write(boost::asio::buffer(msg),
-                [self, msg_copy = std::move(msg)](boost::beast::error_code ec, std::size_t) {
+            ws.async_write(boost::asio::buffer(*msg_ptr),
+                [self, msg_ptr](boost::beast::error_code ec, std::size_t) {
                     if (ec)
                     {
                         // Connection error, stop writing

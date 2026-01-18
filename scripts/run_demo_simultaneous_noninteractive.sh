@@ -11,10 +11,11 @@ MRI_WS=8090
 ROBOT_HTTP=8081
 DATA_MRI="./data_demo_mri"
 DATA_ROBOT="./data_demo_robot"
+KEEP_DEMO_DATA=1
 
 # ============ TIMING CONFIGURATION ============
 # Adjust these to control how long each feature runs
-DEMO_DURATION_SEC=60              # Total demo duration (seconds)
+DEMO_DURATION_SEC=30              # Total demo duration (seconds)
 
 # Image streamer / Visualizer (MRI frames)
 IMAGE_INTERVAL_MS=50          # Milliseconds between MRI frames (1/IMAGE_INTERVAL_MS fps target)
@@ -85,7 +86,11 @@ cleanup() {
     pkill -f "robot_marshal_demo" 2>/dev/null || true
     pkill -f "viz_client" 2>/dev/null || true
     pkill -f "image_streamer" 2>/dev/null || true
-    rm -rf "$DATA_MRI" "$DATA_ROBOT" "./files.json" "./files" "./log_files" 2>/dev/null || true
+    if [ "$KEEP_DEMO_DATA" -eq 0 ]; then
+        rm -rf "$DATA_MRI" "$DATA_ROBOT" "./files.json" "./files" "./log_files" 2>/dev/null || true
+    else
+        rm -rf "./files.json" "./files" "./log_files" 2>/dev/null || true
+    fi
     sleep 1
     echo "✓ Cleanup complete"
 }
@@ -116,8 +121,7 @@ echo ""
 echo "You'll see the visualizer update while the terminal shows"
 echo "ECG, pose, and robot data being processed simultaneously."
 echo ""
-echo "→ Press ENTER to start..."
-read -r
+echo "→ Auto-starting (non-interactive)..."
 
 # ============================================================================
 # STEP 1: Start Both Marshals
@@ -380,8 +384,7 @@ if [ -n "$VIZ_PID" ]; then
     echo "  • Visualizer:    PID $VIZ_PID"
 fi
 echo ""
-echo "→ Press ENTER to exit and cleanup..."
-read -r
+echo "→ Auto-exit and cleanup (non-interactive)..."
 
 echo ""
 echo "✓ Thank you for watching the demo!"

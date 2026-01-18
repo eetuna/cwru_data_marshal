@@ -625,7 +625,10 @@ private:
                     if (ec == http::error::body_limit)
                     {
                         using nlohmann::json;
-                        http::response<http::string_body> res{http::status::payload_too_large, 11};
+                        unsigned version = parser->get().version();
+                        if (version == 0)
+                            version = 11;
+                        http::response<http::string_body> res{http::status::payload_too_large, version};
                         res.set(http::field::content_type, "application/json");
                         res.body() = json{{"error", "request body exceeds limit"}, {"limit_bytes", self->state.max_body_bytes}}.dump();
                         res.prepare_payload();

@@ -4,6 +4,7 @@
 #include <thread>
 #include <algorithm>
 #include <string>
+#include <filesystem>
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
@@ -26,6 +27,8 @@ struct CachedHDF5Reader
     hid_t file_{-1};
     hid_t dataset_{-1};
     std::string current_path_;
+    std::filesystem::file_time_type last_write_time_{};
+    uintmax_t last_size_{0};
 
     ~CachedHDF5Reader()
     {
@@ -47,16 +50,23 @@ struct CachedHDF5Reader
         current_path_.clear();
     }
 
-    bool open(const std::string &path)
+    bool open(const std::string &path, bool force_reopen = false)
     {
-        // If same file is already open, just refresh the dataset
-        if (file_ >= 0 && current_path_ == path)
+        // If same file is already open, just refresh the dataset unless it changed
+        if (!force_reopen && file_ >= 0 && current_path_ == path)
         {
-            if (dataset_ >= 0)
+            std::error_code ec_mtime;
+            std::error_code ec_size;
+            auto mtime = std::filesystem::last_write_time(path, ec_mtime);
+            auto size = std::filesystem::file_size(path, ec_size);
+            if (!ec_mtime && !ec_size && mtime == last_write_time_ && size == last_size_)
             {
-                H5Drefresh(dataset_);
+                if (dataset_ >= 0)
+                {
+                    if (H5Drefresh(dataset_) >= 0)
+                        return true;
+                }
             }
-            return true;
         }
 
         // Close old file if different
@@ -84,6 +94,10 @@ struct CachedHDF5Reader
         }
 
         current_path_ = path;
+        std::error_code ec_mtime;
+        std::error_code ec_size;
+        last_write_time_ = std::filesystem::last_write_time(path, ec_mtime);
+        last_size_ = std::filesystem::file_size(path, ec_size);
         return true;
     }
 
@@ -95,7 +109,17 @@ struct CachedHDF5Reader
             return {};
 
         // Refresh to see latest writer data
-        H5Drefresh(dataset_);
+        if (H5Drefresh(dataset_) < 0)
+        {
+            // Attempt to reopen if the writer recreated the file.
+            const std::string path = current_path_;
+            close();
+            if (!path.empty())
+            {
+                if (!open(path, true))
+                    return {};
+            }
+        }
 
         hid_t space = H5Dget_space(dataset_);
         if (space < 0)

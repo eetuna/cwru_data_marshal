@@ -13,6 +13,9 @@
 #include <iostream>
 #include <filesystem>
 #include <system_error>
+#include <thread>
+#include <atomic>
+#include <limits>
 #include <boost/asio.hpp>
 #include "marshal_http.hpp"
 #include "marshal_ws.hpp"
@@ -32,6 +35,58 @@ inline std::string sanitize_session(const std::string &s)
     }
     return out.empty() ? mrd::iso8601_now_ms() : out;
 }
+
+namespace
+{
+bool parse_size_arg(const char *value, std::size_t &out)
+{
+    try
+    {
+        unsigned long long parsed = std::stoull(value);
+        if (parsed > std::numeric_limits<std::size_t>::max())
+            return false;
+        out = static_cast<std::size_t>(parsed);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+bool parse_int_arg(const char *value, int &out)
+{
+    try
+    {
+        out = std::stoi(value);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+bool parse_host_port(const std::string &input, std::string &host, unsigned short &port)
+{
+    auto p = input.find(':');
+    if (p == std::string::npos || p == 0 || p + 1 >= input.size())
+        return false;
+    host = input.substr(0, p);
+    try
+    {
+        int parsed = std::stoi(input.substr(p + 1));
+        if (parsed <= 0 || parsed > std::numeric_limits<unsigned short>::max())
+            return false;
+        port = static_cast<unsigned short>(parsed);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+} // namespace
 
 int main(int argc, char **argv)
 {
@@ -64,22 +119,53 @@ int main(int argc, char **argv)
         else if (a == "--dumpbox-session" && i + 1 < argc)
             dumpbox_session = sanitize_session(argv[++i]);
         else if (a == "--max-body-size" && i + 1 < argc)
-            max_body_size = static_cast<std::size_t>(std::stoull(argv[++i]));
+        {
+            if (!parse_size_arg(argv[++i], max_body_size))
+            {
+                std::cerr << "Invalid --max-body-size value\n";
+                return 1;
+            }
+        }
         else if (a == "--flush-max-frames" && i + 1 < argc)
-            flush_max_frames = static_cast<std::size_t>(std::stoull(argv[++i]));
+        {
+            if (!parse_size_arg(argv[++i], flush_max_frames))
+            {
+                std::cerr << "Invalid --flush-max-frames value\n";
+                return 1;
+            }
+        }
         else if (a == "--flush-max-ms" && i + 1 < argc)
-            flush_max_ms = std::stoi(argv[++i]);
+        {
+            if (!parse_int_arg(argv[++i], flush_max_ms))
+            {
+                std::cerr << "Invalid --flush-max-ms value\n";
+                return 1;
+            }
+        }
         else if (a == "--shutdown-timeout-sec" && i + 1 < argc)
-            shutdown_timeout_sec = std::stoi(argv[++i]);
+        {
+            if (!parse_int_arg(argv[++i], shutdown_timeout_sec))
+            {
+                std::cerr << "Invalid --shutdown-timeout-sec value\n";
+                return 1;
+            }
+        }
     }
 
-    auto split = [](const std::string &s)
+    std::string http_host;
+    std::string ws_host;
+    unsigned short http_port = 0;
+    unsigned short ws_port = 0;
+    if (!parse_host_port(http_bind, http_host, http_port))
     {
-        auto p = s.find(':');
-        return std::pair{s.substr(0, p), static_cast<unsigned short>(std::stoi(s.substr(p + 1)))};
-    };
-    auto [http_host, http_port] = split(http_bind);
-    auto [ws_host, ws_port] = split(ws_bind);
+        std::cerr << "Invalid --http bind (expected host:port)\n";
+        return 1;
+    }
+    if (!parse_host_port(ws_bind, ws_host, ws_port))
+    {
+        std::cerr << "Invalid --ws bind (expected host:port)\n";
+        return 1;
+    }
 
     // IO + state
     boost::asio::io_context ioc{1};
@@ -131,13 +217,32 @@ int main(int argc, char **argv)
     HttpServer http{ioc, http_ep, state};
     WsServer ws{ioc, ws_ep, state};
 
+    // Periodic cleanup for idle streams
+    auto cleanup_timer = std::make_shared<boost::asio::steady_timer>(ioc);
+    std::function<void()> schedule_cleanup;
+    schedule_cleanup = [&, cleanup_timer]() {
+        cleanup_timer->expires_after(std::chrono::seconds(60));
+        cleanup_timer->async_wait([&, cleanup_timer](const boost::system::error_code &ec) {
+            if (ec)
+                return;
+            if (state.mrd_sink)
+                state.mrd_sink->cleanup_idle_streams();
+            schedule_cleanup();
+        });
+    };
+    schedule_cleanup();
+
     // Graceful shutdown handler (async)
     boost::asio::signal_set signals(ioc, SIGINT, SIGTERM);
     auto shutdown_timer = std::make_shared<boost::asio::steady_timer>(ioc);
+    std::atomic<bool> shutdown_started{false};
+    std::thread flush_thread;
 
     signals.async_wait([&, shutdown_timer](const boost::system::error_code &ec, int signum) {
         if (!ec)
         {
+            if (shutdown_started.exchange(true))
+                return;
             std::cerr << "\n[SHUTDOWN] Received signal " << signum
                       << ", shutting down (timeout: " << shutdown_timeout_sec << "s)...\n";
 
@@ -148,15 +253,19 @@ int main(int argc, char **argv)
                 std::exit(1);
             });
 
-            // Flush all HDF5 data
-            if (state.mrd_sink)
-            {
-                std::cerr << "[SHUTDOWN] Flushing all HDF5 streams...\n";
-                state.mrd_sink->flush_all();
-                std::cerr << "[SHUTDOWN] Flush complete.\n";
-            }
-
-            ioc.stop();
+            // Flush on background thread so timer can still fire.
+            flush_thread = std::thread([&]() {
+                if (state.mrd_sink)
+                {
+                    std::cerr << "[SHUTDOWN] Flushing all HDF5 streams...\n";
+                    state.mrd_sink->flush_all();
+                    std::cerr << "[SHUTDOWN] Flush complete.\n";
+                }
+                boost::asio::post(ioc, [shutdown_timer, &ioc]() {
+                    shutdown_timer->cancel();
+                    ioc.stop();
+                });
+            });
         }
     });
 
@@ -179,6 +288,9 @@ int main(int argc, char **argv)
     std::cout << " shutdown_timeout=" << shutdown_timeout_sec << "s\n";
 
     ioc.run();
+
+    if (flush_thread.joinable())
+        flush_thread.join();
 
     std::cerr << "[SHUTDOWN] Server stopped.\n";
     return 0;

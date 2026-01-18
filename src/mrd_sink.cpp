@@ -33,23 +33,33 @@ hid_t element_hdf_type(ElementType type)
         return H5T_STD_U16LE;
     case ElementType::ComplexFloat32:
     {
-        static hid_t complex_type = [] {
-            hid_t t = H5Tcreate(H5T_COMPOUND, sizeof(float) * 2);
-            if (t < 0)
-                throw std::runtime_error("H5Tcreate complex32 failed");
-            if (H5Tinsert(t, "r", 0, H5T_IEEE_F32LE) < 0)
+        struct ComplexTypeHolder
+        {
+            hid_t type{-1};
+            ComplexTypeHolder()
             {
-                H5Tclose(t);
-                throw std::runtime_error("H5Tinsert complex32 real failed");
+                type = H5Tcreate(H5T_COMPOUND, sizeof(float) * 2);
+                if (type < 0)
+                    throw std::runtime_error("H5Tcreate complex32 failed");
+                if (H5Tinsert(type, "r", 0, H5T_IEEE_F32LE) < 0)
+                {
+                    H5Tclose(type);
+                    throw std::runtime_error("H5Tinsert complex32 real failed");
+                }
+                if (H5Tinsert(type, "i", sizeof(float), H5T_IEEE_F32LE) < 0)
+                {
+                    H5Tclose(type);
+                    throw std::runtime_error("H5Tinsert complex32 imag failed");
+                }
             }
-            if (H5Tinsert(t, "i", sizeof(float), H5T_IEEE_F32LE) < 0)
+            ~ComplexTypeHolder()
             {
-                H5Tclose(t);
-                throw std::runtime_error("H5Tinsert complex32 imag failed");
+                if (type >= 0)
+                    H5Tclose(type);
             }
-            return t;
-        }();
-        return complex_type;
+        };
+        static ComplexTypeHolder holder;
+        return holder.type;
     }
     }
     throw std::runtime_error("unsupported element type");
@@ -510,24 +520,31 @@ std::shared_ptr<MrdSink::StreamState> MrdSink::ensure_stream(const std::string &
 void MrdSink::cleanup_idle_streams(std::chrono::seconds idle_timeout)
 {
     auto now = std::chrono::steady_clock::now();
-    std::vector<std::string> streams_to_erase;
+    std::vector<std::shared_ptr<StreamState>> streams_to_destroy;
 
     {
         std::lock_guard<std::mutex> lk(map_mutex_);
-        for (const auto& [stream_id, stream_state] : streams_)
+        auto it = streams_.begin();
+        while (it != streams_.end())
         {
-            auto age = std::chrono::duration_cast<std::chrono::seconds>(
-                now - stream_state->last_accessed);
-            if (age > idle_timeout)
+            const auto &stream_state = it->second;
+            bool expired = false;
             {
-                streams_to_erase.push_back(stream_id);
+                std::lock_guard<std::mutex> state_lk(stream_state->mutex);
+                auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - stream_state->last_accessed);
+                expired = age > idle_timeout;
             }
-        }
 
-        // Remove idle streams
-        for (const auto& stream_id : streams_to_erase)
-        {
-            streams_.erase(stream_id);
+            if (expired)
+            {
+                streams_to_destroy.push_back(stream_state);
+                it = streams_.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
         }
     }
 }
@@ -589,14 +606,15 @@ FrameAppendResult MrdSink::append_frame(const std::string &stream_id,
     auto seq = ingest_sequence().fetch_add(1);
     nlohmann::json entry = make_entry_json(result);
     entry["seq"] = seq;
+    const std::string entry_dump = entry.dump();
 
-    append_line(sink.index_root / "index.jsonl", entry.dump());
-    const std::string latest = entry.dump();
+    append_line(sink.index_root / "index.jsonl", entry_dump);
+    const std::string latest = entry_dump;
     write_atomic(sink.index_root / "latest.json", latest.data(), latest.size());
 
     try
     {
-        state_.ws_emit_topic(entry.dump(), "mrd");
+        state_.ws_emit_topic(entry_dump, "mrd");
     }
     catch (const std::exception &e)
     {
