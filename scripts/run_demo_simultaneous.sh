@@ -71,6 +71,22 @@ cleanup() {
     echo ""
     echo "[CLEANUP] Terminating all demo processes..."
 
+    # Stop producers/clients first to avoid socket resets during marshal shutdown.
+    if [ -n "$STREAMER_PID" ] && kill -0 $STREAMER_PID 2>/dev/null; then
+        kill -TERM $STREAMER_PID 2>/dev/null || true
+    fi
+    for pid in "${CLIENT_PIDS[@]}"; do
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
+    if [ -n "$ECG_PID" ] && kill -0 $ECG_PID 2>/dev/null; then
+        kill -TERM $ECG_PID 2>/dev/null || true
+    fi
+    if [ -n "$POSE_PID" ] && kill -0 $POSE_PID 2>/dev/null; then
+        kill -TERM $POSE_PID 2>/dev/null || true
+    fi
+
     # Send SIGTERM first to allow graceful shutdown (marshal will flush HDF5)
     if [ -n "$MRI_PID" ] && kill -0 $MRI_PID 2>/dev/null; then
         echo "  → Sending SIGTERM to MRI Marshal (PID: $MRI_PID) for graceful shutdown..."
