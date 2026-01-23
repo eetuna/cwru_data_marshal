@@ -8,6 +8,13 @@ set -e
 
 # ============ CONFIGURATION ============
 DEMO_DURATION=30          # Total demo duration (seconds)
+
+# Image streamer settings
+IMAGE_SIZE=64             # Image width/height (pixels)
+IMAGE_SLICES=4            # Number of slices
+IMAGE_INTERVAL=0.5        # Frame interval (seconds)
+
+# Client intervals
 ECG_INTERVAL=1.0          # ECG sample interval (seconds)
 POSE_INTERVAL=0.5         # Pose update interval (seconds)
 ROBOT_INTERVAL=2          # Robot write interval (seconds)
@@ -153,8 +160,8 @@ if [ "$USE_EXEC" = true ]; then
 else
     # === WSL2 MODE: localhost + viz ===
 
-    echo -e "${CYAN}[IMAGE_STREAMER]${NC} Starting..."
-    "$MRI_BUILD/image_streamer" &
+    echo -e "${CYAN}[IMAGE_STREAMER]${NC} Starting (${IMAGE_SIZE}x${IMAGE_SIZE}, ${IMAGE_SLICES} slices, ${IMAGE_INTERVAL}s interval)..."
+    "$MRI_BUILD/image_streamer" --size $IMAGE_SIZE --slices $IMAGE_SLICES --interval $IMAGE_INTERVAL &
     IMAGE_PID=$!
     sleep 1
 
