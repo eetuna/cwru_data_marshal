@@ -10,7 +10,8 @@ set -e
 DEMO_DURATION=30          # Total demo duration (seconds)
 
 # Image streamer settings
-IMAGE_SIZE=64             # Image width/height (pixels)
+IMAGE_WIDTH=64            # Image width (pixels)
+IMAGE_HEIGHT=64           # Image height (pixels)
 IMAGE_SLICES=4            # Number of slices
 IMAGE_INTERVAL=0.5        # Frame interval (seconds)
 
@@ -160,8 +161,8 @@ if [ "$USE_EXEC" = true ]; then
 else
     # === WSL2 MODE: localhost + viz ===
 
-    echo -e "${CYAN}[IMAGE_STREAMER]${NC} Starting (${IMAGE_SIZE}x${IMAGE_SIZE}, ${IMAGE_SLICES} slices, ${IMAGE_INTERVAL}s interval)..."
-    "$MRI_BUILD/image_streamer" --size $IMAGE_SIZE --slices $IMAGE_SLICES --interval $IMAGE_INTERVAL &
+    echo -e "${CYAN}[IMAGE_STREAMER]${NC} Starting (${IMAGE_WIDTH}x${IMAGE_HEIGHT}, ${IMAGE_SLICES} slices, ${IMAGE_INTERVAL}s interval)..."
+    "$MRI_BUILD/image_streamer" --width $IMAGE_WIDTH --height $IMAGE_HEIGHT --slices $IMAGE_SLICES --interval $IMAGE_INTERVAL &
     IMAGE_PID=$!
     sleep 1
 
