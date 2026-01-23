@@ -71,7 +71,7 @@ target_link_libraries(playback PRIVATE Boost::system Threads::Threads nlohmann_j
 add_executable(fk_client clients/fk_client/fk_client_main.cpp)
 target_link_libraries(fk_client PRIVATE Boost::system Threads::Threads nlohmann_json::nlohmann_json)
 
-set(ENABLE_VIZ_CLIENT ON)
+option(ENABLE_VIZ_CLIENT "Build viz_client (requires OpenCV with viz module)" ON)
 if(ENABLE_VIZ_CLIENT)
   find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc highgui viz)
   if(NOT OpenCV_FOUND)
