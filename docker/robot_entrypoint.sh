@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-FILES_DIR="/files"
+FILES_DIR="/data/robot_data"
 mkdir -p "$FILES_DIR"
 
 if [ -f /opt/robot/files.json ]; then
@@ -9,7 +9,7 @@ if [ -f /opt/robot/files.json ]; then
 import json
 import os
 seed = {"client_id": "seed", "sent_at": 1, "values": [1.0, 2.0, 3.0]}
-files_dir = "/files"
+files_dir = "/data/robot_data"
 try:
     files = json.load(open("/opt/robot/files.json"))
 except Exception:

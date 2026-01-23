@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
     python3 \
+    curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --depth 1 --branch "$BRANCH" "$REPO_URL" /opt/robot
@@ -19,7 +21,10 @@ COPY docker/robot_entrypoint.sh /opt/robot/robot_entrypoint.sh
 RUN chmod +x /opt/robot/robot_entrypoint.sh
 
 WORKDIR /opt/robot
-VOLUME ["/files"]
+VOLUME ["/data/robot_data"]
 EXPOSE 8081
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8081/read/robot_status || exit 1
 
 CMD ["/opt/robot/robot_entrypoint.sh"]

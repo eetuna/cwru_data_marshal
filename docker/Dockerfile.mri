@@ -1,24 +1,59 @@
 FROM ubuntu:22.04
 
+ENV DEBIAN_FRONTEND=noninteractive
+
 ARG REPO_URL=https://github.com/cwru-mercis/cwru_data_marshal.git
 ARG BRANCH=mri-data-marhsal
 
+# Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
+    ninja-build \
     git \
+    pkg-config \
+    curl \
+    ca-certificates \
     libboost-all-dev \
     libhdf5-dev \
-    pkg-config \
+    libpugixml-dev \
+    libeigen3-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Build ISMRMRD from source (required dependency)
+RUN git clone --depth 1 --branch v1.13.7 https://github.com/ismrmrd/ismrmrd.git /tmp/ismrmrd \
+    && cmake -S /tmp/ismrmrd -B /tmp/ismrmrd/build \
+       -DCMAKE_BUILD_TYPE=Release \
+       -DCMAKE_INSTALL_PREFIX=/usr/local \
+    && cmake --build /tmp/ismrmrd/build --target install \
+    && rm -rf /tmp/ismrmrd
+
+# Clone MRI Marshal source
 RUN git clone --depth 1 --branch "$BRANCH" "$REPO_URL" /opt/mri
 
-RUN cmake -S /opt/mri -B /opt/mri/build -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build /opt/mri/build --target marshal
+# Build MRI Marshal (marshal and image_streamer)
+# Note: viz_client excluded - runs on HOST for GUI display
+RUN cmake -S /opt/mri -B /opt/mri/build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_PREFIX_PATH=/usr/local \
+    -GNinja \
+    && cmake --build /opt/mri/build --target marshal image_streamer
 
 WORKDIR /opt/mri
-VOLUME ["/data"]
+
+# Data volume mount point
+VOLUME ["/data/mri_data"]
+
+# Expose HTTP and WebSocket ports
 EXPOSE 8080 8090
 
-CMD ["/opt/mri/build/marshal", "--http", "0.0.0.0:8080", "--ws", "0.0.0.0:8090", "--data", "/data", "--sink", "mrd"]
+# Health check endpoint
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Default command
+CMD ["/opt/mri/build/marshal", \
+     "--http", "0.0.0.0:8080", \
+     "--ws", "0.0.0.0:8090", \
+     "--data", "/data/mri_data", \
+     "--sink", "mrd"]

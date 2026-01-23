@@ -73,7 +73,14 @@
       "Bash(./scripts/quick_wal_test.sh:*)",
       "Bash(git push:*)",
       "Bash(git branch:*)",
-      "Bash(git -C /workspaces/cwru_data_marshal log --oneline)"
+      "Bash(git -C /workspaces/cwru_data_marshal log --oneline)",
+      "Bash(git worktree:*)",
+      "Bash(./scripts/run_demo_simultaneous_noninteractive.sh:*)",
+      "Bash(git mv:*)",
+      "Bash(tree:*)",
+      "Bash(wc:*)",
+      "Bash(git ls-remote:*)",
+      "Bash(git clone:*)"
     ]
   }
 }
