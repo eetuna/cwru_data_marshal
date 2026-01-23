@@ -1,0 +1,24 @@
+FROM gcc:latest
+
+WORKDIR /app
+
+# Copy source files
+COPY server.cpp files.json httplib.h json.hpp circularBuffer.hpp ./
+COPY file*.json /files/
+COPY file_routes.json ./
+
+# Create directories
+RUN mkdir -p log_files
+
+# Patch server to listen on 0.0.0.0:8081
+RUN sed -i 's/server.listen("172.28.1.10", 8080)/server.listen("0.0.0.0", 8081)/' server.cpp
+
+# Install curl for healthcheck
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
+# Build server
+RUN g++ -std=c++17 server.cpp -o server -pthread
+
+EXPOSE 8081
+
+CMD ["./server"]
