@@ -1,123 +1,271 @@
 # Docker Deployment Guide
 
-This guide covers the Docker containerization and deployment of the CWRU Data Marshal system.
+This guide covers the Docker containerization of the CWRU Data Marshal system.
 
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
+- [Build Strategy](#build-strategy)
+- [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
 - [Service Details](#service-details)
-- [Volume Structure](#volume-structure)
-- [Health Checks](#health-checks)
+- [Data Access](#data-access)
 - [Mock Clients](#mock-clients)
-- [USB Deployment](#usb-deployment)
+- [USB Export](#usb-export)
+- [Running Demos](#running-demos)
 - [Troubleshooting](#troubleshooting)
-- [Advanced Configuration](#advanced-configuration)
 
 ---
 
 ## Architecture Overview
 
-The CWRU Data Marshal system consists of two containerized services that run independently:
-
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Host Machine                             │
-│                                                                   │
-│  ┌────────────────────┐              ┌─────────────────────┐    │
-│  │  MRI Marshal       │              │  Robot Marshal      │    │
-│  │  Container         │              │  Container          │    │
-│  │                    │              │                     │    │
-│  │  ┌──────────────┐  │              │  ┌──────────────┐  │    │
-│  │  │   marshal    │  │              │  │ robot_marshal│  │    │
-│  │  │              │  │              │  │    _demo     │  │    │
-│  │  │ HTTP: 8080   │◄─┼──────┐       │  │ HTTP: 8081   │◄─┼─┐  │
-│  │  │ WS:   8090   │◄─┼────┐ │       │  │              │  │ │  │
-│  │  └──────────────┘  │    │ │       │  └──────────────┘  │ │  │
-│  │                    │    │ │       │                     │ │  │
-│  │  Volume:           │    │ │       │  Volume:            │ │  │
-│  │  /data/mri_data ◄──┼─┐  │ │       │  /data/robot_data ◄─┼┐│  │
-│  └────────────────────┘ │  │ │       └─────────────────────┘││  │
-│                         │  │ │                               ││  │
-│  ┌──────────────────────┼──┼─┼───────────────────────────────┼┼──┤
-│  │  Bind Mounts         │  │ │                               ││  │
-│  │                      ▼  │ │                               ▼│  │
-│  │  ./data/mri_data/*.h5   │ │       ./data/robot_data/*.json│  │
-│  └─────────────────────────┼─┼────────────────────────────────┼──┤
-│                             │ │                                │  │
-│  ┌──────────────────────────┼─┼────────────────────────────────┼──┤
-│  │  Host Clients            │ │                                │  │
-│  │                          │ │                                │  │
-│  │  viz_client ─────────────┘ │                                │  │
-│  │  ecg_client.py ────────────┘                                │  │
-│  │  pose_client.py ─────────────────────────────────────────────┘  │
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Host Machine                                 │
+│                                                                      │
+│  ┌────────────────────────┐       ┌────────────────────────┐       │
+│  │   MRI Marshal          │       │   Robot Marshal        │       │
+│  │   Container            │       │   Container            │       │
+│  │                        │       │                        │       │
+│  │   HTTP:  8080 ─────────┼───┐   │   HTTP:  8081 ─────────┼───┐  │
+│  │   WS:    8090 ─────────┼─┐ │   │                        │   │  │
+│  │                        │ │ │   │                        │   │  │
+│  │   /data/mri_data ◄─────┼─┼─┼───┼────────────────────────┼─┐ │  │
+│  └────────────────────────┘ │ │   └────────────────────────┘ │ │  │
+│                              │ │                              │ │  │
+│  ┌───────────────────────────┼─┼──────────────────────────────┼─┼──┤
+│  │  Bind Mounts              │ │                              │ │  │
+│  │                           │ │                              │ │  │
+│  │  ./data/mri_data/ ◄───────┘ │   ./data/robot_data/ ◄───────┘ │  │
+│  │  (HDF5 files)               │   (JSON files)                 │  │
+│  └─────────────────────────────┼────────────────────────────────┼──┤
+│                                │                                │  │
+│  ┌─────────────────────────────┴────────────────────────────────┴──┤
+│  │  External Clients (run on HOST)                                 │
 │  │                                                                  │
+│  │  • viz_client        → connects to localhost:8080, :8090        │
+│  │  • ecg_client.py     → POST to localhost:8080/v1/bio/signal     │
+│  │  • pose_client.py    → POST to localhost:8080/v1/pose/update    │
+│  │  • Your applications → read ./data/mri_data/, ./data/robot_data/│
 │  └──────────────────────────────────────────────────────────────────┘
-└─────────────────────────────────────────────────────────────────┘
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Points
 
-- **Two Independent Containers**: MRI Marshal and Robot Marshal run in separate containers
-- **Host-based Clients**: Mock clients and viz_client run on the HOST (not containerized)
-- **Bind Mounts**: Data directories are bind-mounted from host to containers
-- **Port Exposure**: Services expose HTTP/WebSocket ports to host network
+- **Two Independent Containers**: MRI Marshal and Robot Marshal run separately
+- **Host-based Clients**: Mock clients, viz_client run on HOST (not containerized)
+- **Bind Mounts**: Data directories accessible from both containers and host
 - **No Inter-Container Communication**: Services are independent; clients connect via exposed ports
+
+---
+
+## Build Strategy
+
+### Why Local Worktrees? (Option 2)
+
+The GitHub repository is **private**, so Docker cannot clone it during build. Instead, we use **local git worktrees** as build contexts.
+
+```
+/workspaces/
+├── cwru_data_marshal/                    # main branch (Dockerfiles, compose)
+│   ├── docker/
+│   │   ├── Dockerfile.mri
+│   │   └── Dockerfile.robot
+│   └── docker-compose.yml
+│
+├── mri_data_marshal_worktree/            # mri-data-marhsal branch
+│   ├── CMakeLists.txt                    # ← Build context for MRI Marshal
+│   ├── src/
+│   └── ...
+│
+└── robot_data_marshal_worktree/          # robot branch
+    ├── server.cpp                        # ← Build context for Robot Marshal
+    ├── httplib.h
+    └── ...
+```
+
+### How It Works
+
+1. **docker-compose.yml** specifies each service's build context as its worktree path
+2. **Dockerfiles** use `COPY` to pull files from the build context
+3. No network access to GitHub needed during build
+
+### Alternative Approaches Considered
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Git Clone** | Self-contained | Needs public repo or tokens |
+| **Local COPY (chosen)** | Works offline, simple | Requires worktrees exist |
+| **Additional Contexts** | Flexible mixing | Needs Docker Compose v2.17+ |
+
+#### Option 1: Git Clone During Build
+
+Clone the repository directly in the Dockerfile:
+
+```dockerfile
+# Dockerfile.robot (Git Clone approach)
+FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y git build-essential
+RUN git clone --depth 1 --branch robot_branch https://github.com/org/repo.git /opt/robot
+RUN g++ /opt/robot/server.cpp -o /opt/robot/server
+CMD ["./server"]
+```
+
+**Pros:**
+- Self-contained image - no local files needed
+- Always builds from the specified branch
+- Works for CI/CD pipelines
+
+**Cons:**
+- Requires public repository OR authentication tokens
+- Build fails if network is unavailable
+- Slower builds (clone every time without caching)
+
+**When to use:** Public repositories or CI systems with GitHub tokens.
+
+#### Option 2: Local COPY (Chosen)
+
+Copy source files from a local directory (git worktree) during build:
+
+```dockerfile
+# Dockerfile.robot (Local COPY approach)
+FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y build-essential
+COPY server.cpp httplib.h json.hpp /opt/robot/
+RUN g++ /opt/robot/server.cpp -o /opt/robot/server
+CMD ["./server"]
+```
+
+```yaml
+# docker-compose.yml
+services:
+  robot-marshal:
+    build:
+      context: /workspaces/robot_data_marshal_worktree  # Worktree path
+      dockerfile: /workspaces/cwru_data_marshal/docker/Dockerfile.robot
+```
+
+**Pros:**
+- Works offline (no network needed)
+- Fast builds (leverages Docker cache)
+- Builds exactly what you have locally
+- Works with private repositories
+
+**Cons:**
+- Requires git worktrees to exist before building
+- Build context must contain all needed files
+- Cannot easily mix files from multiple directories
+
+**When to use:** Private repositories, local development, offline environments.
+
+#### Option 3: Additional Contexts (Docker Compose v2.17+)
+
+Use named build contexts to reference multiple directories:
+
+```yaml
+# docker-compose.yml (Additional Contexts approach)
+services:
+  robot-marshal:
+    build:
+      context: .                                        # Primary context (main branch)
+      dockerfile: docker/Dockerfile.robot
+      additional_contexts:
+        robot_src: /workspaces/robot_data_marshal_worktree  # Named context
+```
+
+```dockerfile
+# Dockerfile.robot (Additional Contexts approach)
+FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y build-essential
+
+# Copy from named context
+COPY --from=robot_src server.cpp httplib.h json.hpp /opt/robot/
+
+# Can also copy from primary context
+COPY docker/shared_config.json /opt/robot/
+
+RUN g++ /opt/robot/server.cpp -o /opt/robot/server
+CMD ["./server"]
+```
+
+**Pros:**
+- Mix files from multiple directories in one Dockerfile
+- Primary context can hold shared files (configs, scripts)
+- Clean separation of concerns
+- Flexible for complex multi-source builds
+
+**Cons:**
+- Requires Docker Compose v2.17 or later
+- More complex syntax (`COPY --from=name`)
+- Less portable to older Docker versions
+
+**When to use:** Complex builds needing files from multiple locations, shared configurations.
+
+#### Why We Chose Option 2
+
+For this project, **Local COPY** was chosen because:
+
+1. **Private Repository**: The GitHub repo is private, making Git Clone impractical without tokens
+2. **Simplicity**: Standard `COPY` syntax works with any Docker version
+3. **Offline Capability**: Builds work without network access
+4. **Development Workflow**: Worktrees are already used for branch management
+5. **Independence**: Each marshal builds from its own worktree without cross-dependencies
+
+---
+
+## Prerequisites
+
+### 1. Docker with Docker Compose
+
+```bash
+docker --version        # Docker 20.10+
+docker compose version  # Docker Compose v2.0+
+```
+
+### 2. Git Worktrees
+
+Create the required worktrees:
+
+```bash
+cd /workspaces/cwru_data_marshal
+
+# Create MRI worktree (if not exists)
+git worktree add /workspaces/mri_data_marshal_worktree mri-data-marhsal
+
+# Create Robot worktree (if not exists)
+git worktree add /workspaces/robot_data_marshal_worktree robot_data_marshal_with_catheter_system_components
+
+# Verify
+git worktree list
+```
+
+### 3. Data Directories
+
+```bash
+mkdir -p data/mri_data data/robot_data
+```
 
 ---
 
 ## Quick Start
 
-### Prerequisites
-
-- Docker Engine 20.10+
-- Docker Compose 2.0+
-- 4GB+ available disk space (for images)
-- Git (for building from source)
-
-### Build and Run
-
 ```bash
-# From the main branch repository root
+# Navigate to main branch
 cd /workspaces/cwru_data_marshal
 
-# Create data directories
-mkdir -p data/mri_data data/robot_data
+# Build images (first time takes 5-15 minutes)
+docker compose build
 
-# Build and start services
-docker compose up --build -d
+# Start services
+docker compose up -d
 
 # Check status
 docker compose ps
 
-# View logs
-docker compose logs -f
-```
-
-### Verify Services
-
-```bash
-# Check MRI Marshal health
+# Verify health
 curl http://localhost:8080/health
-
-# Expected: {"ok": true} or similar
-
-# Check Robot Marshal health
 curl http://localhost:8081/read/robot_status
-
-# Expected: {"ok": true, "status": "operational"} or similar
-```
-
-### Test with Mock Clients
-
-```bash
-# Send 5 ECG signals
-python3 /workspaces/mri_data_marshal_worktree/clients/mocks/ecg_client.py \
-  --endpoint http://localhost:8080 --count 5
-
-# Send 20 pose updates
-python3 /workspaces/mri_data_marshal_worktree/clients/mocks/pose_client.py \
-  --endpoint http://localhost:8080 --count 20
 ```
 
 ---
@@ -126,481 +274,387 @@ python3 /workspaces/mri_data_marshal_worktree/clients/mocks/pose_client.py \
 
 ### MRI Marshal
 
-**Container Name:** `cwru-mri-marshal`
-**Image:** `cwru/mri-marshal:latest`
-**Source Branch:** `mri-data-marhsal`
-
-**Ports:**
-- `8080` - HTTP API endpoint
-- `8090` - WebSocket streaming endpoint
-
-**Volume:**
-- Host: `./data/mri_data`
-- Container: `/data/mri_data`
-- Purpose: Store MRI data as HDF5 files (`.h5`)
-
-**Health Check:**
-- Endpoint: `http://localhost:8080/health`
-- Interval: 10s
-- Timeout: 5s
-- Start Period: 30s (allows build time)
-- Retries: 3
-
-**Environment Variables:**
-- `HDF5_USE_FILE_LOCKING=FALSE` - Disable HDF5 file locking (WSL2/NFS compatibility)
-- `HDF5_FILE_LOCKING=FALSE` - Additional HDF5 locking flag
-
-**Command:**
-```bash
-/opt/mri/build/marshal \
-  --http 0.0.0.0:8080 \
-  --ws 0.0.0.0:8090 \
-  --data /data/mri_data \
-  --sink mrd
-```
-
-**Build Details:**
-- Base image: `ubuntu:22.04`
-- Dependencies: Boost, HDF5, PugiXML, Eigen3, ISMRMRD
-- Build targets: `marshal`, `image_streamer`
-- Excludes: `viz_client` (runs on host)
-
----
+| Property | Value |
+|----------|-------|
+| Image | `cwru/mri-marshal:latest` |
+| Container | `cwru-mri-marshal` |
+| Source | `/workspaces/mri_data_marshal_worktree` |
+| HTTP Port | 8080 |
+| WebSocket Port | 8090 |
+| Data Volume | `./data/mri_data` → `/data/mri_data` |
+| Health Check | `GET /health` |
 
 ### Robot Marshal
 
-**Container Name:** `cwru-robot-marshal`
-**Image:** `cwru/robot-marshal:latest`
-**Source Branch:** `robot_data_marshal_with_catheter_system_components`
+| Property | Value |
+|----------|-------|
+| Image | `cwru/robot-marshal:latest` |
+| Container | `cwru-robot-marshal` |
+| Source | `/workspaces/robot_data_marshal_worktree` |
+| HTTP Port | 8081 |
+| Data Volume | `./data/robot_data` → `/data/robot_data` |
+| Health Check | `GET /read/robot_status` |
 
-**Ports:**
-- `8081` - HTTP API endpoint
-
-**Volume:**
-- Host: `./data/robot_data`
-- Container: `/data/robot_data`
-- Purpose: Store robot data as JSON files (`.json`)
-
-**Health Check:**
-- Endpoint: `http://localhost:8081/read/robot_status`
-- Interval: 10s
-- Timeout: 5s
-- Start Period: 10s
-- Retries: 3
-
-**Command:**
-```bash
-/opt/robot/build/robot_marshal_demo 8081
-```
-
-**Build Details:**
-- Base image: `ubuntu:22.04`
-- Compiler: g++ with C++17
-- Dependencies: Minimal (pthread only)
-- Entrypoint: Custom script that initializes data directory
+**Note**: Robot Marshal's server.cpp is patched during build to listen on `0.0.0.0:8081` instead of the hardcoded `172.28.1.10:8080`.
 
 ---
 
-## Volume Structure
+## Data Access
 
-The project uses **bind mounts** for data persistence:
+### For External Clients
 
-```
-/workspaces/cwru_data_marshal/
-├── data/
-│   ├── mri_data/           # Bind-mounted to MRI Marshal container
-│   │   ├── stream_*.h5     # MRI data files (created at runtime)
-│   │   └── ...
-│   └── robot_data/         # Bind-mounted to Robot Marshal container
-│       ├── robot_status.json
-│       ├── catheter_pose.json
-│       └── ...
-├── docker-compose.yml
-└── ...
-```
+External clients can access data in two ways:
 
-### Why Bind Mounts?
-
-- **Easy Access**: Data is directly accessible from host filesystem
-- **Portability**: Simple to backup, inspect, or transfer data
-- **Development**: Makes debugging easier (tail files, inspect with tools)
-- **USB Export**: Data directories can be included in export packages
-
-### Data Lifecycle
-
-1. **Startup**: Directories are created if they don't exist
-2. **Runtime**: Services write data to mounted volumes
-3. **Shutdown**: Data persists on host after container stops
-4. **Cleanup**: Remove `data/` contents manually if desired
-
----
-
-## Health Checks
-
-Both services include Docker health checks for monitoring:
-
-### Checking Health Status
-
-```bash
-# View health status in compose
-docker compose ps
-
-# Expected output:
-# NAME                 STATUS              PORTS
-# cwru-mri-marshal     Up (healthy)        0.0.0.0:8080->8080/tcp, ...
-# cwru-robot-marshal   Up (healthy)        0.0.0.0:8081->8081/tcp
-
-# Inspect specific health check
-docker inspect cwru-mri-marshal --format='{{.State.Health.Status}}'
-```
-
-### Health Check States
-
-- **starting**: Container is in start period (health checks not yet run)
-- **healthy**: Service is responding correctly
-- **unhealthy**: Service failed health checks (after retries)
-
-### Manual Health Checks
+#### 1. HTTP APIs (Recommended)
 
 ```bash
 # MRI Marshal
-curl -f http://localhost:8080/health && echo " ✓ MRI Marshal healthy"
+curl http://localhost:8080/v1/mrd/latest
+curl http://localhost:8080/v1/pose/current
 
 # Robot Marshal
-curl -f http://localhost:8081/read/robot_status && echo " ✓ Robot Marshal healthy"
+curl http://localhost:8081/read/robot_status
+curl http://localhost:8081/read/catheter_pose
 ```
+
+#### 2. Direct File Access
+
+Data files are bind-mounted, so they're accessible on the host:
+
+```bash
+# MRI data (HDF5 files)
+ls ./data/mri_data/
+
+# Robot data (JSON files)
+ls ./data/robot_data/
+```
+
+### Data Flow
+
+```
+External Client
+      │
+      ├── HTTP ──────────► MRI Marshal ──────► ./data/mri_data/*.h5
+      │                         │
+      │                         └── WebSocket (real-time)
+      │
+      └── HTTP ──────────► Robot Marshal ────► ./data/robot_data/*.json
+```
+
+### Cross-Marshal Data Access
+
+The marshals are **independent** and don't share data directly. If you need:
+
+- **MRI data in Robot client**: Query MRI Marshal's HTTP API
+- **Robot data in MRI client**: Query Robot Marshal's HTTP API
+- **Combined data**: Use a coordinator/bridge service on the host
 
 ---
 
 ## Mock Clients
 
-Mock clients simulate external devices and run on the HOST machine (not containerized).
+Mock clients are located in the MRI worktree and run on the **host** (not in Docker).
 
 ### Location
 
-- **Repository**: MRI Marshal branch worktree
-- **Path**: `/workspaces/mri_data_marshal_worktree/clients/mocks/`
+```
+/workspaces/mri_data_marshal_worktree/clients/mocks/
+├── ecg_client.py       # Pure Python - no dependencies
+├── pose_client.py      # Pure Python - no dependencies
+├── http_tracker.py     # Requires: pip install requests
+├── planner.py          # Requires: pip install websockets
+├── surface_tracker.py  # Requires: pip install websockets
+└── README.md
+```
 
-### Available Clients
-
-| Client | Purpose | Dependencies | Endpoint |
-|--------|---------|--------------|----------|
-| `ecg_client.py` | Simulated ECG signals | None (stdlib) | POST `/v1/bio/signal` |
-| `pose_client.py` | Simulated robot poses | None (stdlib) | POST `/v1/pose/update` |
-| `http_tracker.py` | Poll MRI/pose data | `requests` | GET `/v1/mrd/latest`, `/v1/pose/current` |
-| `planner.py` | WebSocket frame verifier | `websockets` | WS `/ws` (subscribe to `mrd`) |
-| `surface_tracker.py` | Mock surface tracker | `websockets` | WS `/ws` |
-
-### Usage Examples
+### Usage
 
 ```bash
-# ECG Client - Send 10 signals at 1 Hz
+# ECG signals (pure Python)
 python3 /workspaces/mri_data_marshal_worktree/clients/mocks/ecg_client.py \
-  --count 10 --interval 1.0
+  --endpoint http://localhost:8080 --count 10
 
-# Pose Client - Circular trajectory at 10 Hz
+# Pose updates (pure Python)
 python3 /workspaces/mri_data_marshal_worktree/clients/mocks/pose_client.py \
-  --trajectory circular --interval 0.1 --count 100
+  --endpoint http://localhost:8080 --count 20
 
-# HTTP Tracker - Continuous polling
+# HTTP tracker (requires requests)
 python3 /workspaces/mri_data_marshal_worktree/clients/mocks/http_tracker.py
 
-# Planner - WebSocket frame continuity check
+# WebSocket planner (requires websockets)
 python3 /workspaces/mri_data_marshal_worktree/clients/mocks/planner.py
 ```
 
-See [`/workspaces/mri_data_marshal_worktree/clients/mocks/README.md`](../../mri_data_marshal_worktree/clients/mocks/README.md) for complete documentation.
-
 ---
 
-## USB Deployment
+## USB Export
 
-The project includes a USB export script that packages everything needed for offline deployment.
-
-### Creating Export Package
+To deploy on a machine without access to the source repository:
 
 ```bash
-# From main branch repository root
-cd /workspaces/cwru_data_marshal
+# Build images first
+docker compose build
 
-# Create export package
-./scripts/export_usb.sh /path/to/output
-
-# Example: Export to USB drive
-./scripts/export_usb.sh /media/usb/cwru_deploy
+# Export to USB/directory
+./scripts/export_usb.sh /path/to/usb/cwru_deploy
 ```
 
 ### Export Contents
 
 ```
-output_directory/
+cwru_deploy/
 ├── images/
-│   ├── mri-marshal.tar       # Docker image (~1-2 GB)
-│   └── robot-marshal.tar     # Docker image (~300-500 MB)
+│   ├── mri-marshal.tar      # Docker image
+│   └── robot-marshal.tar    # Docker image
 ├── mock_clients/
 │   ├── ecg_client.py
 │   ├── pose_client.py
 │   └── README.md
 ├── data/
-│   ├── mri_data/             # Empty directory
-│   └── robot_data/           # Empty directory
+│   ├── mri_data/
+│   └── robot_data/
 ├── docker-compose.yml
-└── README.md                 # Deployment instructions
+└── README.md                 # Load instructions
 ```
 
-### Deploying on Receiving Machine
-
-On the target machine (with Docker installed):
+### On Receiving Machine
 
 ```bash
-cd /path/to/exported/package
+cd /path/to/usb/cwru_deploy
 
-# Load Docker images
+# Load images
 docker load -i images/mri-marshal.tar
 docker load -i images/robot-marshal.tar
 
 # Start services
 docker compose up -d
 
-# Verify
+# Test
 curl http://localhost:8080/health
-curl http://localhost:8081/read/robot_status
-
-# Test with mock clients
 python3 mock_clients/ecg_client.py --count 5
 ```
 
-### Export Script Details
-
-The [`scripts/export_usb.sh`](../scripts/export_usb.sh) script:
-1. Builds both Docker images using `docker compose build`
-2. Saves images as `.tar` files using `docker save`
-3. Copies `docker-compose.yml` for deployment
-4. Copies mock clients from MRI worktree
-5. Creates deployment `README.md` with instructions
-6. Sets up empty data directory structure
-
 ---
 
-## Troubleshooting
+## Running Demos
 
-### Issue: Health checks failing
+### Quick Demo - Mock Clients Only
 
-**Symptoms:**
+Test the system with synthetic data:
+
 ```bash
+# Terminal 1: Start Docker services
+cd /workspaces/cwru_data_marshal
+docker compose up -d
+docker compose ps  # Wait until both show "healthy"
+
+# Terminal 2: Send ECG signals
+python3 /workspaces/mri_data_marshal_worktree/clients/mocks/ecg_client.py \
+  --endpoint http://localhost:8080 --count 20 --interval 0.5
+
+# Terminal 3: Send pose updates
+python3 /workspaces/mri_data_marshal_worktree/clients/mocks/pose_client.py \
+  --endpoint http://localhost:8080 --count 100 --interval 0.1
+```
+
+### Full Demo - With Visualization
+
+Run the complete demo with MRI streaming and visualization:
+
+```bash
+# Terminal 1: Start Docker services
+cd /workspaces/cwru_data_marshal
+docker compose up -d
+
+# Terminal 2: Build and run viz_client on HOST (requires GUI)
+cd /workspaces/mri_data_marshal_worktree
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target viz_client
+./build/viz_client --endpoint http://localhost:8080 --ws ws://localhost:8090
+
+# Terminal 3: Stream MRI data
+cd /workspaces/mri_data_marshal_worktree
+./build/image_streamer --endpoint http://localhost:8080 --ws ws://localhost:8090 \
+  --stream demo_stream --count 100
+
+# Terminal 4: Send pose updates (continuous)
+python3 clients/mocks/pose_client.py --endpoint http://localhost:8080 \
+  --trajectory circular --interval 0.1
+
+# Terminal 5: Send ECG signals (continuous)
+python3 clients/mocks/ecg_client.py --endpoint http://localhost:8080 \
+  --interval 1.0
+```
+
+### Using Existing Demo Scripts
+
+If you have demo scripts in the main branch:
+
+```bash
+# Ensure Docker services are running
+docker compose up -d
+
+# Run from MRI worktree (scripts expect local marshal, but will connect to Docker)
+cd /workspaces/mri_data_marshal_worktree
+../cwru_data_marshal/scripts/run_demo_simultaneous.sh
+```
+
+**Note**: Demo scripts may need modification to work with Docker. Check that they connect to `localhost:8080/8081` rather than starting their own marshals.
+
+### Demo Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Docker Containers                             │
+│                                                                  │
+│  ┌─────────────────┐              ┌─────────────────┐          │
+│  │  MRI Marshal    │              │  Robot Marshal  │          │
+│  │  :8080 / :8090  │              │  :8081          │          │
+│  └────────▲────────┘              └────────▲────────┘          │
+└───────────┼────────────────────────────────┼────────────────────┘
+            │                                │
+┌───────────┼────────────────────────────────┼────────────────────┐
+│  Host     │                                │                    │
+│           │                                │                    │
+│  image_streamer ───► MRI data              │                    │
+│  ecg_client.py ────► bio signals           │                    │
+│  pose_client.py ───► pose updates          │                    │
+│  viz_client ◄─────── visualization         │                    │
+│                                            │                    │
+│  (Robot clients would connect here) ───────┘                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Stopping the Demo
+
+```bash
+# Stop mock clients (Ctrl+C in each terminal)
+
+# Close viz_client window
+
+# Stop Docker services
+docker compose down
+
+# Verify everything stopped
 docker compose ps
-# Shows: unhealthy
+pkill -f viz_client
+pkill -f image_streamer
 ```
 
-**Solutions:**
+### Checking Demo Data
 
-1. Check logs:
-   ```bash
-   docker compose logs mri-marshal
-   docker compose logs robot-marshal
-   ```
-
-2. Verify services are listening:
-   ```bash
-   docker exec cwru-mri-marshal netstat -tlnp | grep 8080
-   docker exec cwru-robot-marshal netstat -tlnp | grep 8081
-   ```
-
-3. Manually test health endpoints:
-   ```bash
-   docker exec cwru-mri-marshal curl http://localhost:8080/health
-   docker exec cwru-robot-marshal curl http://localhost:8081/read/robot_status
-   ```
-
-### Issue: Port already in use
-
-**Symptoms:**
-```
-Error: bind: address already in use
-```
-
-**Solutions:**
-
-1. Find conflicting process:
-   ```bash
-   sudo lsof -i :8080
-   sudo lsof -i :8081
-   ```
-
-2. Stop conflicting service or change ports in `docker-compose.yml`:
-   ```yaml
-   ports:
-     - "8082:8080"  # Change host port
-   ```
-
-### Issue: HDF5 file locking errors
-
-**Symptoms:**
-```
-HDF5-DIAG: Error detected in HDF5 (1.x.x) thread 0:
-  unable to lock file
-```
-
-**Solution:**
-
-Environment variables are already set in `docker-compose.yml`:
-```yaml
-environment:
-  - HDF5_USE_FILE_LOCKING=FALSE
-  - HDF5_FILE_LOCKING=FALSE
-```
-
-If still experiencing issues, check NFS/network filesystem settings.
-
-### Issue: Permission denied on volumes
-
-**Symptoms:**
-```
-mkdir: cannot create directory '/data/mri_data': Permission denied
-```
-
-**Solutions:**
-
-1. Fix host directory permissions:
-   ```bash
-   sudo chown -R $USER:$USER ./data
-   chmod -R 755 ./data
-   ```
-
-2. Check SELinux context (if applicable):
-   ```bash
-   sudo chcon -Rt svirt_sandbox_file_t ./data
-   ```
-
-### Issue: Build failures
-
-**Symptoms:**
-```
-Error: failed to build image
-```
-
-**Solutions:**
-
-1. Check Docker disk space:
-   ```bash
-   docker system df
-   docker system prune  # Clean up if needed
-   ```
-
-2. Rebuild without cache:
-   ```bash
-   docker compose build --no-cache
-   ```
-
-3. Verify network access for git clones:
-   ```bash
-   curl -I https://github.com
-   ```
-
----
-
-## Advanced Configuration
-
-### Custom Build Arguments
-
-Override repository URLs or branches:
+After running a demo, inspect the generated data:
 
 ```bash
-docker compose build \
-  --build-arg REPO_URL=https://github.com/myorg/fork.git \
-  --build-arg BRANCH=my-feature-branch
-```
+# MRI data files
+ls -lh data/mri_data/
 
-### Resource Limits
-
-Add resource constraints in `docker-compose.yml`:
-
-```yaml
-services:
-  mri-marshal:
-    # ... existing config ...
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 4G
-        reservations:
-          cpus: '1.0'
-          memory: 2G
-```
-
-### Network Configuration
-
-Access services from other machines:
-
-```yaml
-services:
-  mri-marshal:
-    # ... existing config ...
-    ports:
-      - "0.0.0.0:8080:8080"  # Expose to all interfaces
-```
-
-### Multiple Instances
-
-Run multiple marshal instances on different ports:
-
-```bash
-# Create separate compose file
-cp docker-compose.yml docker-compose.dev.yml
-
-# Edit ports in docker-compose.dev.yml
-# Then run:
-docker compose -f docker-compose.dev.yml up -d
-```
-
-### Logging Configuration
-
-Add logging drivers:
-
-```yaml
-services:
-  mri-marshal:
-    # ... existing config ...
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+# Robot data files
+ls -lh data/robot_data/
+cat data/robot_data/robot_status.json
 ```
 
 ---
 
 ## Port Reference
 
-| Service | Port | Protocol | Purpose |
-|---------|------|----------|---------|
-| MRI Marshal | 8080 | HTTP | REST API for data operations |
-| MRI Marshal | 8090 | WebSocket | Real-time streaming |
-| Robot Marshal | 8081 | HTTP | REST API for robot data |
+| Port | Service | Protocol | Purpose |
+|------|---------|----------|---------|
+| 8080 | MRI Marshal | HTTP | REST API |
+| 8090 | MRI Marshal | WebSocket | Real-time streaming |
+| 8081 | Robot Marshal | HTTP | REST API |
 
 ---
 
-## Related Documentation
+## Common Commands
 
-- **Mock Clients**: [`/workspaces/mri_data_marshal_worktree/clients/mocks/README.md`](../../mri_data_marshal_worktree/clients/mocks/README.md)
-- **USB Export Script**: [`scripts/export_usb.sh`](../scripts/export_usb.sh)
-- **Docker Compose**: [`docker-compose.yml`](../docker-compose.yml)
-- **Dockerfiles**:
-  - [`docker/Dockerfile.mri`](../docker/Dockerfile.mri)
-  - [`docker/Dockerfile.robot`](../docker/Dockerfile.robot)
+```bash
+# Build
+docker compose build                    # Build all
+docker compose build mri-marshal        # Build one service
+docker compose build --no-cache         # Force rebuild
+
+# Run
+docker compose up -d                    # Start detached
+docker compose up                       # Start with logs
+docker compose up mri-marshal           # Start one service
+
+# Status
+docker compose ps                       # Container status
+docker compose logs -f                  # Follow logs
+docker compose logs -f mri-marshal      # One service logs
+
+# Stop
+docker compose down                     # Stop containers
+docker compose down -v                  # Stop and remove volumes
+
+# Debug
+docker exec -it cwru-mri-marshal bash   # Shell into container
+docker inspect cwru-mri-marshal         # Container details
+```
+
+---
+
+## Troubleshooting
+
+### "Worktree not found" during build
+
+```bash
+# Create missing worktrees
+git worktree add /workspaces/mri_data_marshal_worktree mri-data-marhsal
+git worktree add /workspaces/robot_data_marshal_worktree robot_data_marshal_with_catheter_system_components
+```
+
+### "Port already in use"
+
+```bash
+# Find process using port
+sudo lsof -i :8080
+
+# Kill it or change ports in docker-compose.yml
+```
+
+### Health check failing
+
+```bash
+# Check container logs
+docker compose logs mri-marshal
+docker compose logs robot-marshal
+
+# Manual health check
+docker exec cwru-mri-marshal curl http://localhost:8080/health
+```
+
+### Stale worktree references
+
+```bash
+# Remove orphaned worktree entries
+git worktree prune
+
+# List current worktrees
+git worktree list
+```
+
+### HDF5 file locking errors
+
+Environment variables are set in docker-compose.yml:
+```yaml
+environment:
+  - HDF5_USE_FILE_LOCKING=FALSE
+  - HDF5_FILE_LOCKING=FALSE
+```
 
 ---
 
 ## Summary
 
-The Docker deployment provides:
-
-- ✅ **Containerized Services**: MRI and Robot marshals in separate containers
-- ✅ **Health Monitoring**: Automatic health checks for both services
-- ✅ **Persistent Data**: Bind-mounted volumes for data persistence
-- ✅ **Host-based Clients**: Mock clients run on host for easy testing
-- ✅ **USB Deployment**: Complete offline deployment package
-- ✅ **Production Ready**: Restart policies, resource management, logging
-
-For questions or issues, refer to the troubleshooting section or check the main project repository.
+| What | Where |
+|------|-------|
+| Dockerfiles | `/workspaces/cwru_data_marshal/docker/` |
+| docker-compose.yml | `/workspaces/cwru_data_marshal/` |
+| MRI source | `/workspaces/mri_data_marshal_worktree/` |
+| Robot source | `/workspaces/robot_data_marshal_worktree/` |
+| MRI data | `./data/mri_data/` |
+| Robot data | `./data/robot_data/` |
+| Mock clients | `/workspaces/mri_data_marshal_worktree/clients/mocks/` |
+| USB export | `./scripts/export_usb.sh` |

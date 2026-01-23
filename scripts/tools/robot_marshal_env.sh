@@ -5,7 +5,7 @@ set -e
 
 ROBOT_MARSHAL_DIR="${ROBOT_MARSHAL_DIR:-}"
 ROBOT_MARSHAL_BRANCH="${ROBOT_MARSHAL_BRANCH:-robot_data_marshal_with_catheter_system_components}"
-ROBOT_MARSHAL_WORKTREE="${ROBOT_MARSHAL_WORKTREE:-../robot_data_marshal_catheter_worktree}"
+ROBOT_MARSHAL_WORKTREE="${ROBOT_MARSHAL_WORKTREE:-../robot_data_marshal_worktree}"
 ROBOT_MARSHAL_HOST="${ROBOT_MARSHAL_HOST:-0.0.0.0}"
 ROBOT_MARSHAL_PORT="${ROBOT_MARSHAL_PORT:-8081}"
 

@@ -2,18 +2,15 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-ARG REPO_URL=https://github.com/cwru-mercis/cwru_data_marshal.git
-ARG BRANCH=mri-data-marhsal
-
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
     ninja-build \
-    git \
     pkg-config \
     curl \
     ca-certificates \
+    git \
     libboost-all-dev \
     libhdf5-dev \
     libpugixml-dev \
@@ -28,16 +25,16 @@ RUN git clone --depth 1 --branch v1.13.7 https://github.com/ismrmrd/ismrmrd.git 
     && cmake --build /tmp/ismrmrd/build --target install \
     && rm -rf /tmp/ismrmrd
 
-# Clone MRI Marshal source
-RUN git clone --depth 1 --branch "$BRANCH" "$REPO_URL" /opt/mri
+# Copy MRI Marshal source from build context (MRI worktree)
+COPY . /opt/mri
 
-# Build MRI Marshal (marshal and image_streamer)
-# Note: viz_client excluded - runs on HOST for GUI display
+# Build MRI Marshal only (clients run on HOST)
 RUN cmake -S /opt/mri -B /opt/mri/build \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_PREFIX_PATH=/usr/local \
+    -DENABLE_VIZ_CLIENT=OFF \
     -GNinja \
-    && cmake --build /opt/mri/build --target marshal image_streamer
+    && cmake --build /opt/mri/build --target marshal
 
 WORKDIR /opt/mri
 

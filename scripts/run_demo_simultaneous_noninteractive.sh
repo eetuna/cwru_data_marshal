@@ -27,25 +27,25 @@ fi
 
 # ============ TIMING CONFIGURATION ============
 # Adjust these to control how long each feature runs
-DEMO_DURATION_SEC=30              # Total demo duration (seconds)
+DEMO_DURATION_SEC=60              # Total demo duration (seconds)
 
 # Image streamer / Visualizer (MRI frames)
-IMAGE_INTERVAL_MS=20          # Milliseconds between MRI frames (1/IMAGE_INTERVAL_MS fps target)
+IMAGE_INTERVAL_MS=50          # Milliseconds between MRI frames (1/IMAGE_INTERVAL_MS fps target)
 IMAGE_FRAME_COUNT=$((DEMO_DURATION_SEC * 1000 / IMAGE_INTERVAL_MS))
-IMAGE_SIZE=64
-IMAGE_NSLICES=10
+IMAGE_SIZE=128
+IMAGE_NSLICES=5
 
 # ECG biosignal
-ECG_INTERVAL_MS=250             # Milliseconds between ECG samples (4 Hz)
+ECG_INTERVAL_MS=500             # Milliseconds between ECG samples (4 Hz)
 ECG_COUNT_TARGET=$((DEMO_DURATION_SEC * 1000 / ECG_INTERVAL_MS))
 
 # Pose updates
-POSE_INTERVAL_MS=500            # Milliseconds between pose updates (2 Hz)
+POSE_INTERVAL_MS=1000            # Milliseconds between pose updates (2 Hz)
 POSE_COUNT_TARGET=$((DEMO_DURATION_SEC * 1000 / POSE_INTERVAL_MS))
 
 # Robot marshal clients run continuously until demo ends
 # ==============================================
-MONITOR_INTERVAL=0.1              # Seconds between robot stats prints (can be 0.5, 0.1, etc.)
+MONITOR_INTERVAL=2             # Seconds between robot stats prints (can be 0.5, 0.1, etc.)
 
 # Graceful shutdown configuration
 SHUTDOWN_TIMEOUT_SEC=15           # How long to wait for marshal to flush HDF5 before force-kill
