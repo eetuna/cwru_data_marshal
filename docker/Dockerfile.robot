@@ -13,12 +13,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN git clone --depth 1 --branch "$BRANCH" "$REPO_URL" /opt/robot
 
-RUN mkdir -p /opt/robot/build \
-    && g++ -std=c++17 -I /opt/robot /opt/robot/server.cpp \
-        -o /opt/robot/build/robot_marshal_demo -lpthread
+# Patch server.cpp to listen on 0.0.0.0:8081 instead of hardcoded 172.28.1.10:8080
+RUN sed -i 's/server.listen("172.28.1.10", 8080)/server.listen("0.0.0.0", 8081)/' /opt/robot/server.cpp
 
-COPY docker/robot_entrypoint.sh /opt/robot/robot_entrypoint.sh
-RUN chmod +x /opt/robot/robot_entrypoint.sh
+# Build the server
+RUN g++ -std=c++17 -I /opt/robot /opt/robot/server.cpp \
+    -o /opt/robot/server -lpthread
+
+# Create log directory required by server
+RUN mkdir -p /opt/robot/log_files
 
 WORKDIR /opt/robot
 VOLUME ["/data/robot_data"]
@@ -27,4 +30,4 @@ EXPOSE 8081
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8081/read/robot_status || exit 1
 
-CMD ["/opt/robot/robot_entrypoint.sh"]
+CMD ["./server"]
