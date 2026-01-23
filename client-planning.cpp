@@ -3,6 +3,7 @@
 #include <chrono>
 #include <string>
 #include <map>
+#include <cstdlib>
 
 #include "httplib.h"
 #include "json.hpp"
@@ -15,7 +16,15 @@ int64_t current_time_ns() {
 }
 
 int main() {
-    httplib::Client cli("172.28.1.10", 8080);
+    // Configurable host/port via environment variables (default: localhost:8081)
+    const char* host_env = std::getenv("ROBOT_MARSHAL_HOST");
+    const char* port_env = std::getenv("ROBOT_MARSHAL_PORT");
+    std::string marshal_host = host_env ? host_env : "localhost";
+    int marshal_port = port_env ? std::stoi(port_env) : 8081;
+
+    std::cout << "Connecting to robot marshal at " << marshal_host << ":" << marshal_port << std::endl;
+    httplib::Client cli(marshal_host, marshal_port);
+
     while(true){
     std::string client_id = "client-planning";
 
