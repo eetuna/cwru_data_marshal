@@ -1,0 +1,36 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build dependencies + OpenCV with viz module
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    ninja-build \
+    pkg-config \
+    curl \
+    ca-certificates \
+    git \
+    libboost-all-dev \
+    libopencv-dev \
+    libopencv-viz-dev \
+    libvtk9-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy MRI source from build context
+COPY . /opt/mri
+
+# Build viz_client only
+RUN cmake -S /opt/mri -B /opt/mri/build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DENABLE_VIZ_CLIENT=ON \
+    -GNinja \
+    && cmake --build /opt/mri/build --target viz_client
+
+WORKDIR /opt/mri
+
+# X11 display forwarding (set DISPLAY env var when running)
+ENV DISPLAY=:0
+
+# Default connection to MRI marshal WebSocket
+CMD ["/opt/mri/build/viz_client", "--ws", "ws://mri-marshal:8090/ws"]

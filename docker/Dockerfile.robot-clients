@@ -1,0 +1,35 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy source files from build context (robot worktree)
+COPY client-catheter-tracking.cpp /opt/robot/
+COPY client-controller.cpp /opt/robot/
+COPY client-front-end.cpp /opt/robot/
+COPY client-planning.cpp /opt/robot/
+COPY client-surface-tracking.cpp /opt/robot/
+COPY httplib.h json.hpp circularBuffer.hpp /opt/robot/
+COPY file_routes.json file*.json /opt/robot/
+
+WORKDIR /opt/robot
+
+# Build all clients
+RUN g++ -std=c++17 client-catheter-tracking.cpp -o catheter-tracking -lpthread && \
+    g++ -std=c++17 client-controller.cpp -o controller -lpthread && \
+    g++ -std=c++17 client-front-end.cpp -o front-end -lpthread && \
+    g++ -std=c++17 client-planning.cpp -o planning -lpthread && \
+    g++ -std=c++17 client-surface-tracking.cpp -o surface-tracking -lpthread
+
+# Environment variables for robot marshal connection
+ENV ROBOT_MARSHAL_HOST=robot-marshal
+ENV ROBOT_MARSHAL_PORT=8081
+
+# Default: run catheter-tracking (override in docker-compose)
+CMD ["./catheter-tracking"]

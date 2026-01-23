@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+# Install requests library
+RUN pip install --no-cache-dir requests
+
+# Copy mock clients
+COPY clients/mocks/ecg_client.py /app/ecg_client.py
+
+WORKDIR /app
+
+# Default connection to MRI marshal
+ENV MRI_MARSHAL_HTTP=http://mri-marshal:8080
+
+# Default: run ecg_client continuously
+# --count 0 means infinite, --interval 1.0 second between samples
+CMD ["python3", "ecg_client.py", "--endpoint", "http://mri-marshal:8080", "--count", "0", "--interval", "1.0", "--heart-rate", "72"]
