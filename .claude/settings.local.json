@@ -138,7 +138,9 @@
       "Bash(docker network ls:*)",
       "Bash(do docker exec cwru-mri-marshal cat /session-data/mrd/latest.json)",
       "Bash(sudo lsof:*)",
-      "Bash(ctest:*)"
+      "Bash(ctest:*)",
+      "Bash(mount:*)",
+      "Bash(findmnt:*)"
     ]
   }
 }
