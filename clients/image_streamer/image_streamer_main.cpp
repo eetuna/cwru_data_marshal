@@ -173,7 +173,7 @@ int main(int argc, char **argv) {
         std::vector<uint8_t> body(header_bytes + payload_bytes);
         std::size_t frame_index = 0;
         const std::size_t total_frames = opt.frames;
-        const std::size_t log_stride = 30;
+        const std::size_t log_stride = 10;
 
         while (total_frames == 0 || frame_index < total_frames) {
             head.image_index = static_cast<uint16_t>((frame_index % 65535) + 1);

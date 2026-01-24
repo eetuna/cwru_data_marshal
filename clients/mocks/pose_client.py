@@ -82,8 +82,7 @@ def main():
                 success_count += 1
             sent_count += 1
 
-            if sent_count % 10 == 0:
-                print(f"[{sent_count:04d}] p=[{position[0]:7.2f}, {position[1]:7.2f}, {position[2]:7.2f}] | Success: {100.0 * success_count / sent_count:.1f}%")
+            print(f"[{sent_count:04d}] p=[{position[0]:7.2f}, {position[1]:7.2f}, {position[2]:7.2f}] | Success: {100.0 * success_count / sent_count:.1f}%")
 
             if args.count > 0 and sent_count >= args.count:
                 break

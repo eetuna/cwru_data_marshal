@@ -78,7 +78,7 @@ def main():
             if send_ecg_signal(args.endpoint, args.source, samples, args.rate_hz):
                 success_count += 1
             sent_count += 1
-            print(f"[{sent_count:04d}] Sent {len(samples)} samples | Success: {100.0 * success_count / sent_count:.1f}%")
+            print(f"[{sent_count:04d}] HR={args.heart_rate} BPM | Sent {len(samples)} samples @ {args.rate_hz} Hz | Success: {100.0 * success_count / sent_count:.1f}%")
 
             t_offset += args.samples * dt
             if args.count > 0 and sent_count >= args.count:
