@@ -6,9 +6,6 @@ services:
   mri-marshal:
     image: cwru/mri-marshal:latest
     container_name: cwru-mri-marshal
-    build:
-      context: ../mri_data_marshal_worktree
-      dockerfile: ../cwru_data_marshal/docker/Dockerfile.mri
     command: ["/opt/mri/build/marshal", "--http", "0.0.0.0:8080", "--ws", "0.0.0.0:8090", "--data", "/data/mri_data"]
     environment:
       - HDF5_USE_FILE_LOCKING=FALSE
@@ -25,9 +22,6 @@ services:
   robot-marshal:
     image: cwru/robot-marshal:latest
     container_name: cwru-robot-marshal
-    build:
-      context: ../robot_data_marshal_worktree
-      dockerfile: ../cwru_data_marshal/docker/Dockerfile.robot
     healthcheck:
       test: ["CMD", "curl", "-s", "http://localhost:8081/"]
       interval: 5s
@@ -39,9 +33,6 @@ services:
   image-streamer:
     image: cwru/image-streamer:latest
     container_name: cwru-image-streamer
-    build:
-      context: ../mri_data_marshal_worktree
-      dockerfile: ../cwru_data_marshal/docker/Dockerfile.image-streamer
     command: ["./build/image_streamer", "--http", "http://localhost:8080", "--interval", "${IMAGE_INTERVAL}", "--width", "${IMAGE_WIDTH}", "--height", "${IMAGE_HEIGHT}", "--slices", "${IMAGE_SLICES}"]
     depends_on:
       mri-marshal:
@@ -51,9 +42,6 @@ services:
   ecg-client:
     image: cwru/ecg-client:latest
     container_name: cwru-ecg-client
-    build:
-      context: ../mri_data_marshal_worktree
-      dockerfile: ../cwru_data_marshal/docker/Dockerfile.ecg-client
     command: ["python3", "ecg_client.py", "--endpoint", "http://localhost:8080", "--count", "0", "--interval", "${ECG_INTERVAL}", "--heart-rate", "${ECG_HEART_RATE}"]
     depends_on:
       mri-marshal:
@@ -63,9 +51,6 @@ services:
   pose-client:
     image: cwru/pose-client:latest
     container_name: cwru-pose-client
-    build:
-      context: ../mri_data_marshal_worktree
-      dockerfile: ../cwru_data_marshal/docker/Dockerfile.pose-client
     command: ["python3", "pose_client.py", "--endpoint", "http://localhost:8080", "--count", "0", "--interval", "${POSE_INTERVAL}", "--trajectory", "${POSE_TRAJECTORY}"]
     depends_on:
       mri-marshal:
@@ -75,9 +60,6 @@ services:
   viz-client:
     image: cwru/viz-client:latest
     container_name: cwru-viz-client
-    build:
-      context: ../mri_data_marshal_worktree
-      dockerfile: ../cwru_data_marshal/docker/Dockerfile.viz-client
     command: ["./build/viz_client", "--http", "http://localhost:8080/v1/mrd/latest"]
     environment:
       - DISPLAY=${DISPLAY:-:0}
@@ -91,9 +73,6 @@ services:
   catheter-tracking:
     image: cwru/robot-clients:latest
     container_name: cwru-catheter-tracking
-    build:
-      context: ../robot_data_marshal_worktree
-      dockerfile: ../cwru_data_marshal/docker/Dockerfile.robot-clients
     command: ["./catheter-tracking"]
     environment:
       - ROBOT_MARSHAL_HOST=localhost
