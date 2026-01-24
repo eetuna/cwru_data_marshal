@@ -25,9 +25,12 @@ docker compose -f "$COMPOSE_FILE" down 2>/dev/null || true
 docker rm -f cwru-viz-client 2>/dev/null || true
 docker network prune -f 2>/dev/null || true
 
+# Create demo-data directory
+mkdir -p demo-data
+
 # Clean up old demo data to start fresh
 if [ "$CLEANUP_DATA" = "true" ]; then
-    docker volume rm cwru_data_marshal_mri-data 2>/dev/null || true
+    rm -rf demo-data/*
 fi
 
 # Start
@@ -58,8 +61,8 @@ cleanup() {
     docker compose -f "$COMPOSE_FILE" down
 
     if [ "$CLEANUP_DATA" = "true" ]; then
-        echo "Cleaning up mri-data volume..."
-        docker volume rm cwru_data_marshal_mri-data 2>/dev/null || true
+        echo "Cleaning up demo data..."
+        rm -rf demo-data/*
     fi
 
     exit 0
@@ -112,6 +115,6 @@ if docker ps --format '{{.Names}}' | grep -q "cwru-viz-client"; then
 fi
 
 if [ "$CLEANUP_DATA" = "true" ]; then
-    echo "Cleaning up mri-data volume..."
-    docker volume rm cwru_data_marshal_mri-data 2>/dev/null || true
+    echo "Cleaning up demo data..."
+    rm -rf demo-data/*
 fi

@@ -10,7 +10,7 @@ services:
     environment:
       - HDF5_USE_FILE_LOCKING=FALSE
     volumes:
-      - mri-data:/data/mri_data
+      - ./demo-data:/data/mri_data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 5s
@@ -129,6 +129,3 @@ services:
       robot-marshal:
         condition: service_healthy
     network_mode: host
-
-volumes:
-  mri-data:
