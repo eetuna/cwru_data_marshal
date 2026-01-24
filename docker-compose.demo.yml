@@ -6,6 +6,7 @@ services:
   mri-marshal:
     image: cwru/mri-marshal:latest
     container_name: cwru-mri-marshal
+    user: "${UID:-1000}:${GID:-1000}"
     command: ["/opt/mri/build/marshal", "--http", "0.0.0.0:8080", "--ws", "0.0.0.0:8090", "--data", "/data/mri_data"]
     environment:
       - HDF5_USE_FILE_LOCKING=FALSE
