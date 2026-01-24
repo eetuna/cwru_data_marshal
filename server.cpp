@@ -205,7 +205,37 @@ bool load_config(const std::string& config_path) {
     
     return true;
 }
-int main() {
+int main(int argc, char* argv[]) {
+    // Default bind address and port (Docker-friendly defaults)
+    std::string bind_host = "0.0.0.0";
+    int bind_port = 8081;
+
+    // Parse command-line arguments
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+
+        if (arg == "--host" && i + 1 < argc) {
+            bind_host = argv[++i];
+        } else if (arg == "--port" && i + 1 < argc) {
+            bind_port = std::stoi(argv[++i]);
+        } else if (arg == "--http" && i + 1 < argc) {
+            // Parse "host:port" format (like MRI marshal)
+            std::string endpoint = argv[++i];
+            size_t colon = endpoint.find(':');
+            if (colon != std::string::npos) {
+                bind_host = endpoint.substr(0, colon);
+                bind_port = std::stoi(endpoint.substr(colon + 1));
+            }
+        } else if (arg == "--help" || arg == "-h") {
+            std::cout << "Usage: " << argv[0] << " [options]\n"
+                      << "Options:\n"
+                      << "  --host <addr>     Bind address (default: 0.0.0.0)\n"
+                      << "  --port <port>     Port number (default: 8081)\n"
+                      << "  --http <addr:port> HTTP endpoint (e.g., 0.0.0.0:8081)\n"
+                      << "  --help, -h        Show this help\n";
+            return 0;
+        }
+    }
 
     httplib::Server server;
     const std::string storage_dir = "./";
@@ -363,12 +393,12 @@ int main() {
         }
     });
     
-    
 
-    std::cout << "Server running at http://localhost:8080\n";
+
+    std::cout << "Server running at http://" << bind_host << ":" << bind_port << "\n";
     // Start the background worker
     std::thread worker_thread(background_worker, storage_dir);
-    server.listen("172.28.1.10", 8080);
+    server.listen(bind_host, bind_port);
     // Stop the worker gracefully on shutdown
     stop_worker = true;
     write_condition.notify_all();
