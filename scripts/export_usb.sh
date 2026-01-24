@@ -197,7 +197,25 @@ cwru/robot-clients      latest
 # - Visualization window (if X11 available)
 ```
 
-### 3. Verify External Client Access
+### 3. Access Generated Data
+
+**Data is automatically visible in the `session-data/` directory!**
+
+```bash
+# View generated files
+ls -lh session-data/mrd/
+
+# Expected files:
+# - demo_stream-64x64x5-g0000.mrd  (MRI image data)
+# - bio.jsonl                      (ECG data log)
+# - poses.jsonl                    (Pose tracking log)
+# - index.jsonl                    (Frame metadata)
+# - latest.json                    (Latest frame pointer)
+```
+
+**Note:** By default, `CLEANUP_DATA=true` clears this directory after each demo run. To keep data between runs, edit `.env.demo` and set `CLEANUP_DATA=false`.
+
+### 4. Verify External Client Access
 
 While demo is running, test the marshal APIs:
 
@@ -221,13 +239,15 @@ See `docs/EXTERNAL_CLIENT_GUIDE.md` for complete API documentation.
 
 ### Demo Configuration
 
-Edit `demo-docker.sh` to change:
-- `DEMO_DURATION` - Demo run time (default: 30s)
-- `IMAGE_INTERVAL_MS` - Image streaming rate (default: 50ms = 20fps)
+Edit `.env.demo` to change:
+- `DEMO_DURATION` - Demo run time (default: 30s, 0 = infinite)
+- `IMAGE_WIDTH` / `IMAGE_HEIGHT` - Image dimensions (default: 64x64)
+- `IMAGE_SLICES` - Slices per volume (default: 5)
+- `IMAGE_INTERVAL` - Image streaming rate (default: 50ms = 20fps)
 - `ECG_INTERVAL` - ECG sample rate (default: 0.5s)
 - `POSE_INTERVAL` - Pose update rate (default: 0.1s)
-- `ENABLE_VIZ` - Show visualization window (default: true)
-- `CLEANUP_DATA` - Remove mri-data volume after demo (default: true, set false to keep data)
+- `ENABLE_VIZ` - Show visualization window (default: true, requires X11)
+- `CLEANUP_DATA` - Remove session-data/ after demo (default: true, set false to keep data)
 
 ### Manual Control
 

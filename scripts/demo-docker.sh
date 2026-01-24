@@ -25,12 +25,12 @@ docker compose -f "$COMPOSE_FILE" down 2>/dev/null || true
 docker rm -f cwru-viz-client 2>/dev/null || true
 docker network prune -f 2>/dev/null || true
 
-# Create demo-data directory
-mkdir -p demo-data
+# Create session-data directory
+mkdir -p session-data
 
 # Clean up old demo data to start fresh
 if [ "$CLEANUP_DATA" = "true" ]; then
-    rm -rf demo-data/*
+    rm -rf session-data/*
 fi
 
 # Start
@@ -62,7 +62,7 @@ cleanup() {
 
     if [ "$CLEANUP_DATA" = "true" ]; then
         echo "Cleaning up demo data..."
-        rm -rf demo-data/*
+        rm -rf session-data/*
     fi
 
     exit 0
@@ -116,5 +116,5 @@ fi
 
 if [ "$CLEANUP_DATA" = "true" ]; then
     echo "Cleaning up demo data..."
-    rm -rf demo-data/*
+    rm -rf session-data/*
 fi

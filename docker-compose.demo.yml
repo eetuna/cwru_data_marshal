@@ -10,7 +10,7 @@ services:
     environment:
       - HDF5_USE_FILE_LOCKING=FALSE
     volumes:
-      - ./demo-data:/data/mri_data
+      - ./session-data:/data/mri_data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 5s

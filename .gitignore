@@ -1,5 +1,5 @@
 # Demo data directory (generated at runtime)
-demo-data/
+session-data/
 
 # Backup files
 *.bak

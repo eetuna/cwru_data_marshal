@@ -32,10 +32,10 @@ sed -i 's/CLEANUP_DATA=true/CLEANUP_DATA=false/' .env.demo
 ./scripts/demo-docker.sh
 
 # Copy data to workspace
-docker cp cwru-mri-marshal:/data/mri_data/ ./demo-data/
+docker cp cwru-mri-marshal:/data/mri_data/ ./session-data/
 
 # Now you can see it
-ls -lh demo-data/mrd/
+ls -lh session-data/mrd/
 ```
 
 **Option B: Mount workspace directory directly**
@@ -48,19 +48,19 @@ Edit `docker-compose.demo.yml` line 12, change:
 To:
 ```yaml
     volumes:
-      - ./demo-data:/data/mri_data
+      - ./session-data:/data/mri_data
 ```
 
 Then:
 ```bash
 # Create directory
-mkdir -p demo-data
+mkdir -p session-data
 
 # Run demo
 ./scripts/demo-docker.sh
 
 # Data appears in workspace automatically
-ls -lh demo-data/mrd/
+ls -lh session-data/mrd/
 ```
 
 ---
