@@ -1,25 +1,25 @@
 #!/bin/bash
 #
-# USB Export Script for CWRU Data Marshal
+# USB Export Script for CWRU Data Marshal Demo
 #
 # Creates a portable deployment package containing:
-# - Docker images (as .tar files)
-# - docker-compose.yml
-# - Mock clients from MRI worktree
+# - All 7 Docker images for the demo (as .tar files)
+# - docker-compose.demo.yml
+# - demo-docker.sh launcher script
+# - External client integration guide
 # - README with instructions for receiver
 #
 # Usage:
 #   ./scripts/export_usb.sh <output_directory>
 #
 # Example:
-#   ./scripts/export_usb.sh /media/usb/cwru_marshal_deploy
+#   ./scripts/export_usb.sh /media/usb/cwru_marshal_demo
 #
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-MRI_WORKTREE="/workspaces/mri_data_marshal_worktree"
 
 # Check arguments
 if [ $# -ne 1 ]; then
@@ -45,108 +45,106 @@ echo "============================================"
 echo ""
 echo "Output directory: $OUT_DIR"
 echo "Project root: $PROJECT_ROOT"
-echo "MRI worktree: $MRI_WORKTREE"
 echo ""
 
 # Create directory structure
-echo "[1/7] Creating directory structure..."
-mkdir -p "$OUT_DIR"/{images,mock_clients,data/mri_data,data/robot_data}
+echo "[1/6] Creating directory structure..."
+mkdir -p "$OUT_DIR"/{images,docs}
 
 # Build Docker images
 echo ""
-echo "[2/7] Building Docker images..."
+echo "[2/6] Building Docker images..."
 cd "$PROJECT_ROOT"
-docker compose build
+docker compose -f docker-compose.demo.yml build
 
-# Verify images were built
-if ! docker images | grep -q "cwru/mri-marshal"; then
-    echo "Error: MRI Marshal image not found after build"
-    exit 1
-fi
+# Verify all 7 images were built
+REQUIRED_IMAGES=(
+    "cwru/mri-marshal"
+    "cwru/robot-marshal"
+    "cwru/image-streamer"
+    "cwru/ecg-client"
+    "cwru/pose-client"
+    "cwru/viz-client"
+    "cwru/robot-clients"
+)
 
-if ! docker images | grep -q "cwru/robot-marshal"; then
-    echo "Error: Robot Marshal image not found after build"
-    exit 1
-fi
+echo "Verifying images..."
+for img in "${REQUIRED_IMAGES[@]}"; do
+    if ! docker images | grep -q "$img"; then
+        echo "Error: $img image not found after build"
+        exit 1
+    fi
+    echo "  ✓ $img"
+done
 
 # Save Docker images to tar files
 echo ""
-echo "[3/7] Exporting Docker images..."
-echo "  - Saving MRI Marshal image (this may take a few minutes)..."
-docker save -o "$OUT_DIR/images/mri-marshal.tar" cwru/mri-marshal:latest
+echo "[3/6] Exporting Docker images (this may take several minutes)..."
+docker save -o "$OUT_DIR/images/cwru-demo-images.tar" \
+    cwru/mri-marshal:latest \
+    cwru/robot-marshal:latest \
+    cwru/image-streamer:latest \
+    cwru/ecg-client:latest \
+    cwru/pose-client:latest \
+    cwru/viz-client:latest \
+    cwru/robot-clients:latest
 
-echo "  - Saving Robot Marshal image..."
-docker save -o "$OUT_DIR/images/robot-marshal.tar" cwru/robot-marshal:latest
+# Get total size
+TOTAL_SIZE=$(du -h "$OUT_DIR/images/cwru-demo-images.tar" | cut -f1)
+echo "  ✓ Saved all 7 images: $TOTAL_SIZE"
 
-# Get image sizes
-MRI_SIZE=$(du -h "$OUT_DIR/images/mri-marshal.tar" | cut -f1)
-ROBOT_SIZE=$(du -h "$OUT_DIR/images/robot-marshal.tar" | cut -f1)
-echo "  - MRI Marshal: $MRI_SIZE"
-echo "  - Robot Marshal: $ROBOT_SIZE"
-
-# Copy docker-compose.yml
+# Copy demo files
 echo ""
-echo "[4/7] Copying docker-compose.yml..."
-cp "$PROJECT_ROOT/docker-compose.yml" "$OUT_DIR/"
+echo "[4/6] Copying demo configuration files..."
+cp "$PROJECT_ROOT/docker-compose.demo.yml" "$OUT_DIR/"
+cp "$PROJECT_ROOT/scripts/demo-docker.sh" "$OUT_DIR/"
+chmod +x "$OUT_DIR/demo-docker.sh"
+echo "  ✓ docker-compose.demo.yml"
+echo "  ✓ demo-docker.sh"
 
-# Copy mock clients from MRI worktree
+# Copy documentation
 echo ""
-echo "[5/7] Copying mock clients from MRI worktree..."
-if [ -d "$MRI_WORKTREE/clients/mocks" ]; then
-    cp "$MRI_WORKTREE/clients/mocks/ecg_client.py" "$OUT_DIR/mock_clients/"
-    cp "$MRI_WORKTREE/clients/mocks/pose_client.py" "$OUT_DIR/mock_clients/"
-    cp "$MRI_WORKTREE/clients/mocks/README.md" "$OUT_DIR/mock_clients/"
-    chmod +x "$OUT_DIR/mock_clients/"*.py
-    echo "  - Copied: ecg_client.py, pose_client.py, README.md"
-else
-    echo "  Warning: MRI worktree mock clients not found at $MRI_WORKTREE/clients/mocks"
-    echo "  Creating placeholder mock_clients directory..."
+echo "[5/6] Copying documentation..."
+if [ -f "$PROJECT_ROOT/docs/EXTERNAL_CLIENT_GUIDE.md" ]; then
+    cp "$PROJECT_ROOT/docs/EXTERNAL_CLIENT_GUIDE.md" "$OUT_DIR/docs/"
+    echo "  ✓ EXTERNAL_CLIENT_GUIDE.md"
 fi
-
-# Create .gitignore for data directories
-echo ""
-echo "[6/7] Creating data directory placeholders..."
-cat > "$OUT_DIR/data/.gitignore" <<'EOF'
-# Data directories for runtime use
-mri_data/*
-robot_data/*
-
-# Keep directory structure
-!.gitignore
-EOF
 
 # Create README for receiver
 echo ""
-echo "[7/7] Creating deployment README..."
+echo "[6/6] Creating deployment README..."
 cat > "$OUT_DIR/README.md" <<'EOF'
-# CWRU Data Marshal - Docker Deployment Package
+# CWRU Data Marshal - Demo Package
 
-This package contains everything needed to run the CWRU Data Marshal system using Docker.
+This package contains a complete, self-contained demo of the CWRU Data Marshal system.
 
 ## Contents
 
 ```
 .
 ├── images/
-│   ├── mri-marshal.tar       # MRI Marshal Docker image
-│   └── robot-marshal.tar     # Robot Marshal Docker image
-├── mock_clients/
-│   ├── ecg_client.py          # Mock ECG signal generator
-│   ├── pose_client.py         # Mock pose tracker
-│   └── README.md              # Mock client documentation
-├── data/
-│   ├── mri_data/              # MRI data storage (empty)
-│   └── robot_data/            # Robot data storage (empty)
-├── docker-compose.yml         # Docker Compose configuration
+│   └── cwru-demo-images.tar   # All 7 Docker images (single file)
+├── docs/
+│   └── EXTERNAL_CLIENT_GUIDE.md  # External client integration guide
+├── docker-compose.demo.yml    # Demo configuration
+├── demo-docker.sh             # Demo launcher script
 └── README.md                  # This file
 ```
+
+## What's Included
+
+The demo includes:
+- **2 Marshals**: MRI Marshal (HTTP + WebSocket) and Robot Marshal
+- **3 Mock Data Generators**: Image streamer, ECG client, Pose client
+- **5 Robot Clients**: Catheter tracking, Controller, Planning, Front-end, Surface tracking
+- **1 Visualization Client**: Real-time MRI image viewer (optional, requires X11)
 
 ## Prerequisites
 
 The receiving machine must have:
 - Docker Engine (version 20.10 or later)
 - Docker Compose (version 2.0 or later)
-- Python 3.6+ (for mock clients - optional)
+- X11 display server (for visualization client - optional)
 
 ### Installing Docker
 
@@ -167,226 +165,147 @@ sudo usermod -aG docker $USER
 ```bash
 cd /path/to/this/directory
 
-# Load MRI Marshal image
-docker load -i images/mri-marshal.tar
+# Load all demo images (single file with 7 images)
+docker load -i images/cwru-demo-images.tar
 
-# Load Robot Marshal image
-docker load -i images/robot-marshal.tar
-
-# Verify images loaded
+# Verify all images loaded
 docker images | grep cwru
 ```
 
-Expected output:
+Expected output (7 images):
 ```
-cwru/mri-marshal     latest    <image-id>   <size>
-cwru/robot-marshal   latest    <image-id>   <size>
+cwru/mri-marshal        latest
+cwru/robot-marshal      latest
+cwru/image-streamer     latest
+cwru/ecg-client         latest
+cwru/pose-client        latest
+cwru/viz-client         latest
+cwru/robot-clients      latest
 ```
 
-### 2. Start Services
+### 2. Run the Demo
 
 ```bash
-# Start both marshals
-docker compose up -d
+# Run 30-second demo with all services
+./demo-docker.sh
 
-# Check status
-docker compose ps
-
-# View logs
-docker compose logs -f
+# The demo will show:
+# - ECG data streaming
+# - Pose tracking data
+# - Image frames being generated
+# - Robot operations count
+# - Visualization window (if X11 available)
 ```
 
-### 3. Verify Health
+### 3. Verify External Client Access
+
+While demo is running, test the marshal APIs:
 
 ```bash
-# Check MRI Marshal
-curl http://localhost:8080/health
+# Check MRI Marshal (should return field strength)
+curl -s http://localhost:8080/v1/mrd/latest/header | jq '.acquisitionSystemInformation.systemFieldStrength_T'
 
-# Check Robot Marshal
-curl http://localhost:8081/read/robot_status
-```
-
-Expected response: `{"ok": true}` (or similar)
-
-### 4. Test with Mock Clients (Optional)
-
-```bash
-# Send 5 ECG signals
-python3 mock_clients/ecg_client.py --count 5
-
-# Send 20 pose updates
-python3 mock_clients/pose_client.py --count 20
-
-# See mock_clients/README.md for full documentation
+# Check Robot Marshal (should return HTML or JSON)
+curl -s http://localhost:8081/
 ```
 
 ## Service Information
 
-### Ports
+### Marshal Endpoints (for External Clients)
 
-- **MRI Marshal HTTP:** 8080
-- **MRI Marshal WebSocket:** 8090
-- **Robot Marshal HTTP:** 8081
+- **MRI Marshal HTTP:** http://localhost:8080
+- **MRI Marshal WebSocket:** ws://localhost:8090
+- **Robot Marshal HTTP:** http://localhost:8081
 
-### Data Volumes
+See `docs/EXTERNAL_CLIENT_GUIDE.md` for complete API documentation.
 
-Data is persisted in bind-mounted directories:
-- `./data/mri_data/` - MRI HDF5 files
-- `./data/robot_data/` - Robot JSON files
+### Demo Configuration
 
-### Environment Variables
+Edit `demo-docker.sh` to change:
+- `DEMO_DURATION` - Demo run time (default: 30s)
+- `IMAGE_INTERVAL_MS` - Image streaming rate (default: 50ms = 20fps)
+- `ECG_INTERVAL` - ECG sample rate (default: 0.5s)
+- `POSE_INTERVAL` - Pose update rate (default: 0.1s)
+- `ENABLE_VIZ` - Show visualization window (default: true)
+- `CLEANUP_DATA` - Remove mri-data volume after demo (default: true, set false to keep data)
 
-The compose file sets HDF5 locking variables for WSL2/NFS compatibility:
-- `HDF5_USE_FILE_LOCKING=FALSE`
-- `HDF5_FILE_LOCKING=FALSE`
+### Manual Control
 
-## Common Operations
+Instead of using `demo-docker.sh`, you can manually control services:
 
-### Stop Services
 ```bash
-docker compose down
+# Start all services (no viz)
+docker compose -f docker-compose.demo.yml up -d
+
+# Start with visualization
+docker compose -f docker-compose.demo.yml --profile viz up -d
+
+# Stop all services
+docker compose -f docker-compose.demo.yml down
+
+# View logs
+docker compose -f docker-compose.demo.yml logs -f
+
+# Check status
+docker compose -f docker-compose.demo.yml ps
 ```
-
-### View Logs
-```bash
-# All services
-docker compose logs -f
-
-# Specific service
-docker compose logs -f mri-marshal
-docker compose logs -f robot-marshal
-```
-
-### Restart Services
-```bash
-docker compose restart
-```
-
-### Check Health
-```bash
-docker compose ps
-```
-
-Services should show `healthy` status after start period.
-
-### Update Images
-
-To update with new images:
-1. Stop services: `docker compose down`
-2. Load new images: `docker load -i images/mri-marshal.tar`
-3. Start services: `docker compose up -d`
 
 ## Troubleshooting
 
-### Issue: "Cannot connect to the Docker daemon"
-**Solution:** Ensure Docker is running and your user is in the `docker` group.
-
+### Docker daemon not running
 ```bash
 sudo systemctl start docker
-sudo usermod -aG docker $USER
-# Log out and back in
+sudo usermod -aG docker $USER  # Log out and back in after this
 ```
 
-### Issue: Port already in use
-**Solution:** Check for conflicting processes.
-
+### Port already in use
 ```bash
-# Find process using port 8080
-sudo lsof -i :8080
-
-# Stop conflicting service or change port in docker-compose.yml
+sudo lsof -i :8080  # Find process using port
+docker compose -f docker-compose.demo.yml down  # Stop demo services
 ```
 
-### Issue: Health check failing
-**Solution:** Check container logs.
+### Visualization client not showing
+- Ensure `ENABLE_VIZ=true` in `demo-docker.sh`
+- Check X11 is available: `echo $DISPLAY` should show `:0` or similar
+- WSL2 users: Install X server on Windows (VcXsrv, Xming, or use WSLg)
 
+### Containers not healthy
 ```bash
-docker compose logs mri-marshal
-docker compose logs robot-marshal
+docker compose -f docker-compose.demo.yml logs mri-marshal
+docker compose -f docker-compose.demo.yml logs robot-marshal
 ```
 
-### Issue: Permission denied on data directories
-**Solution:** Adjust directory permissions.
+## Known Limitations
+
+- **Viz client display FPS**: Shows ~15 fps due to Docker X11 forwarding overhead
+  - Core system (marshals) operates at full 20+ fps
+  - Only affects display, not data ingestion or client APIs
+  - See `docs/EXTERNAL_CLIENT_GUIDE.md` for details
+
+## Cleanup
 
 ```bash
-sudo chown -R $USER:$USER ./data
-chmod -R 755 ./data
-```
+# Stop all services
+docker compose -f docker-compose.demo.yml down
 
-### Issue: Mock clients fail to connect
-**Solution:** Verify services are running and healthy.
-
-```bash
-docker compose ps
-curl http://localhost:8080/health
-```
-
-## Network Access
-
-### Access from Other Machines
-
-If you need to access the marshals from other computers on the network:
-
-1. Find the host machine's IP address:
-   ```bash
-   hostname -I
-   ```
-
-2. Use that IP in client connections:
-   ```bash
-   python3 mock_clients/ecg_client.py --endpoint http://192.168.1.50:8080
-   ```
-
-3. Ensure firewall allows connections:
-   ```bash
-   sudo ufw allow 8080/tcp
-   sudo ufw allow 8081/tcp
-   sudo ufw allow 8090/tcp
-   ```
-
-## Data Persistence
-
-All data is stored in the `./data/` directory:
-- MRI data: `./data/mri_data/*.h5`
-- Robot data: `./data/robot_data/*.json`
-
-**Backup your data** before removing containers:
-```bash
-# Data persists after stopping services
-docker compose down
-
-# Your data is still safe in ./data/
-ls -lh data/mri_data/
-ls -lh data/robot_data/
-```
-
-## Removal
-
-To completely remove the deployment:
-
-```bash
-# Stop and remove containers
-docker compose down
-
-# Remove images
-docker rmi cwru/mri-marshal:latest cwru/robot-marshal:latest
-
-# Remove data (CAUTION: This deletes all data!)
-rm -rf data/mri_data/* data/robot_data/*
+# Remove all demo images
+docker rmi cwru/mri-marshal:latest cwru/robot-marshal:latest \
+    cwru/image-streamer:latest cwru/ecg-client:latest \
+    cwru/pose-client:latest cwru/viz-client:latest \
+    cwru/robot-clients:latest
 ```
 
 ## Support
 
 For issues or questions:
-- Check logs: `docker compose logs`
-- Review mock client docs: `mock_clients/README.md`
+- Review documentation: `docs/EXTERNAL_CLIENT_GUIDE.md`
+- Check logs: `docker compose -f docker-compose.demo.yml logs`
 - Project repository: https://github.com/cwru-mercis/cwru_data_marshal
 
 ---
 
 **Package created:** $(date)
-**Docker Compose version required:** 2.0+
-**Docker Engine version required:** 20.10+
+**Requirements:** Docker Engine 20.10+, Docker Compose 2.0+
 EOF
 
 # Summary
@@ -395,17 +314,19 @@ echo "============================================"
 echo "Export Complete!"
 echo "============================================"
 echo ""
-echo "Output directory: $OUT_DIR"
+echo "Package location: $OUT_DIR"
+echo "Package size: $(du -sh "$OUT_DIR" | cut -f1)"
 echo ""
-echo "Directory structure:"
-tree -L 2 "$OUT_DIR" 2>/dev/null || find "$OUT_DIR" -maxdepth 2 -type f -o -type d | sort
-echo ""
-echo "Total size:"
-du -sh "$OUT_DIR"
+echo "Contents:"
+echo "  ✓ 7 Docker images ($TOTAL_SIZE)"
+echo "  ✓ docker-compose.demo.yml"
+echo "  ✓ demo-docker.sh launcher"
+echo "  ✓ External client documentation"
+echo "  ✓ README with setup instructions"
 echo ""
 echo "Next steps:"
-echo "  1. Copy $OUT_DIR to USB drive or transfer to receiving machine"
-echo "  2. On receiving machine, follow instructions in README.md"
-echo "  3. Load images with: docker load -i images/*.tar"
-echo "  4. Start services with: docker compose up -d"
+echo "  1. Copy $OUT_DIR to USB drive"
+echo "  2. On receiving machine:"
+echo "     - Load images: docker load -i images/cwru-demo-images.tar"
+echo "     - Run demo: ./demo-docker.sh"
 echo ""

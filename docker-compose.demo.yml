@@ -1,0 +1,133 @@
+# CWRU Data Marshal - Demo (Host Networking)
+# Run: ./scripts/demo-docker.sh
+
+services:
+  mri-marshal:
+    image: cwru/mri-marshal:latest
+    container_name: cwru-mri-marshal
+    command: ["/opt/mri/build/marshal", "--http", "0.0.0.0:8080", "--ws", "0.0.0.0:8090", "--data", "/data/mri_data"]
+    environment:
+      - HDF5_USE_FILE_LOCKING=FALSE
+    volumes:
+      - mri-data:/data/mri_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    network_mode: host
+
+  robot-marshal:
+    image: cwru/robot-marshal:latest
+    container_name: cwru-robot-marshal
+    healthcheck:
+      test: ["CMD", "curl", "-s", "http://localhost:8081/"]
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    network_mode: host
+
+  image-streamer:
+    image: cwru/image-streamer:latest
+    container_name: cwru-image-streamer
+    command: ["./build/image_streamer", "--http", "http://localhost:8080", "--dt-ms", "${IMAGE_INTERVAL_MS}", "--width", "${IMAGE_WIDTH}", "--height", "${IMAGE_HEIGHT}", "--nslices", "${IMAGE_SLICES}"]
+    depends_on:
+      mri-marshal:
+        condition: service_healthy
+    network_mode: host
+
+  ecg-client:
+    image: cwru/ecg-client:latest
+    container_name: cwru-ecg-client
+    command: ["python3", "ecg_client.py", "--endpoint", "http://localhost:8080", "--count", "0", "--interval", "${ECG_INTERVAL}", "--heart-rate", "${ECG_HEART_RATE}"]
+    depends_on:
+      mri-marshal:
+        condition: service_healthy
+    network_mode: host
+
+  pose-client:
+    image: cwru/pose-client:latest
+    container_name: cwru-pose-client
+    command: ["python3", "pose_client.py", "--endpoint", "http://localhost:8080", "--count", "0", "--interval", "${POSE_INTERVAL}", "--trajectory", "${POSE_TRAJECTORY}"]
+    depends_on:
+      mri-marshal:
+        condition: service_healthy
+    network_mode: host
+
+  viz-client:
+    image: cwru/viz-client:latest
+    container_name: cwru-viz-client
+    command: ["./build/viz_client", "--http", "http://localhost:8080/v1/mrd/latest"]
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - HDF5_USE_FILE_LOCKING=FALSE
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+    profiles:
+      - viz
+
+  catheter-tracking:
+    image: cwru/robot-clients:latest
+    container_name: cwru-catheter-tracking
+    command: ["./catheter-tracking"]
+    environment:
+      - ROBOT_MARSHAL_HOST=localhost
+      - ROBOT_MARSHAL_PORT=8081
+    depends_on:
+      robot-marshal:
+        condition: service_healthy
+    network_mode: host
+
+  controller:
+    image: cwru/robot-clients:latest
+    container_name: cwru-controller
+    command: ["./controller"]
+    environment:
+      - ROBOT_MARSHAL_HOST=localhost
+      - ROBOT_MARSHAL_PORT=8081
+    depends_on:
+      robot-marshal:
+        condition: service_healthy
+    network_mode: host
+
+  planning:
+    image: cwru/robot-clients:latest
+    container_name: cwru-planning
+    command: ["./planning"]
+    environment:
+      - ROBOT_MARSHAL_HOST=localhost
+      - ROBOT_MARSHAL_PORT=8081
+    depends_on:
+      robot-marshal:
+        condition: service_healthy
+    network_mode: host
+
+  front-end:
+    image: cwru/robot-clients:latest
+    container_name: cwru-front-end
+    command: ["./front-end"]
+    environment:
+      - ROBOT_MARSHAL_HOST=localhost
+      - ROBOT_MARSHAL_PORT=8081
+    depends_on:
+      robot-marshal:
+        condition: service_healthy
+    network_mode: host
+
+  surface-tracking:
+    image: cwru/robot-clients:latest
+    container_name: cwru-surface-tracking
+    command: ["./surface-tracking"]
+    environment:
+      - ROBOT_MARSHAL_HOST=localhost
+      - ROBOT_MARSHAL_PORT=8081
+    depends_on:
+      robot-marshal:
+        condition: service_healthy
+    network_mode: host
+
+volumes:
+  mri-data:

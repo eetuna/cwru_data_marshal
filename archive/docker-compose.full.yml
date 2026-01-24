@@ -33,14 +33,14 @@ services:
     build:
       context: ../mri_data_marshal_worktree
       dockerfile: ../cwru_data_marshal/docker/Dockerfile.mri
+    command: ["/opt/mri/build/marshal", "--http", "0.0.0.0:8080", "--ws", "0.0.0.0:8090", "--data", "/data/mri_data"]
     ports:
       - "8080:8080"   # HTTP API
       - "8090:8090"   # WebSocket
     volumes:
-      - ./data/mri_data:/data/mri_data
+      - mri-data:/data/mri_data
     environment:
       - HDF5_USE_FILE_LOCKING=FALSE
-      - HDF5_FILE_LOCKING=FALSE
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 10s
@@ -79,7 +79,7 @@ services:
     build:
       context: ../mri_data_marshal_worktree
       dockerfile: ../cwru_data_marshal/docker/Dockerfile.image-streamer
-    command: ["./build/image_streamer", "--http", "http://mri-marshal:8080", "--interval", "0.5", "--size", "64", "--slices", "4"]
+    command: ["./build/image_streamer", "--http", "http://mri-marshal:8080", "--dt-ms", "500", "--size", "64", "--nslices", "4"]
     depends_on:
       mri-marshal:
         condition: service_healthy
@@ -130,14 +130,16 @@ services:
     build:
       context: ../mri_data_marshal_worktree
       dockerfile: ../cwru_data_marshal/docker/Dockerfile.viz-client
-    command: ["./build/viz_client", "--ws", "ws://mri-marshal:8090/ws"]
+    command: ["./build/viz_client", "--http", "http://mri-marshal:8080/v1/mrd/latest"]
     depends_on:
       mri-marshal:
         condition: service_healthy
     environment:
       - DISPLAY=${DISPLAY:-:0}
+      - HDF5_USE_FILE_LOCKING=FALSE
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - mri-data:/data/mri_data:ro
     restart: unless-stopped
     networks:
       - cwru-net
@@ -250,3 +252,6 @@ services:
 networks:
   cwru-net:
     driver: bridge
+
+volumes:
+  mri-data:

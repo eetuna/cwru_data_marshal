@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     libboost-all-dev \
     libhdf5-dev \
+    libpugixml-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Build ISMRMRD from source (required for image_streamer)

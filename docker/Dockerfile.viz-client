@@ -12,10 +12,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     git \
     libboost-all-dev \
+    libhdf5-dev \
+    libpugixml-dev \
+    libeigen3-dev \
     libopencv-dev \
     libopencv-viz-dev \
     libvtk9-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Build ISMRMRD from source (required for viz_client)
+RUN git clone --depth 1 --branch v1.13.7 https://github.com/ismrmrd/ismrmrd.git /tmp/ismrmrd \
+    && cmake -S /tmp/ismrmrd -B /tmp/ismrmrd/build \
+       -DCMAKE_BUILD_TYPE=Release \
+       -DCMAKE_INSTALL_PREFIX=/usr/local \
+    && cmake --build /tmp/ismrmrd/build --target install \
+    && rm -rf /tmp/ismrmrd
 
 # Copy MRI source from build context
 COPY . /opt/mri
@@ -23,6 +34,7 @@ COPY . /opt/mri
 # Build viz_client only
 RUN cmake -S /opt/mri -B /opt/mri/build \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_PREFIX_PATH=/usr/local \
     -DENABLE_VIZ_CLIENT=ON \
     -GNinja \
     && cmake --build /opt/mri/build --target viz_client

@@ -20,6 +20,11 @@ COPY file_routes.json file*.json /opt/robot/
 
 WORKDIR /opt/robot
 
+# Patch clients to use compact single-line output instead of multi-line JSON
+RUN sed -i 's/std::cout << "Read localization values: " << values.dump(2) << "\\n";/std::cout << "CATHETER: " << values.dump() << std::endl;/' client-catheter-tracking.cpp && \
+    sed -i 's/std::cout << "Result sent successfully.*$//' client-catheter-tracking.cpp && \
+    sed -i '/Result sent successfully/d' client-*.cpp
+
 # Build all clients
 RUN g++ -std=c++17 client-catheter-tracking.cpp -o catheter-tracking -lpthread && \
     g++ -std=c++17 client-controller.cpp -o controller -lpthread && \
