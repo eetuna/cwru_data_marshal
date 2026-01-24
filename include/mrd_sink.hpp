@@ -46,6 +46,17 @@ struct FrameAppendResult
     bool flushed{true};
 };
 
+struct FrameReadResult
+{
+    std::vector<uint8_t> data;
+    std::string stream_id;
+    uint64_t frame_index{0};
+    uint64_t total_frames{0};
+    ElementType element_type{ElementType::Float32};
+    ImageDimensions dims;
+    bool success{false};
+};
+
 class MrdFile
 {
   public:
@@ -105,6 +116,10 @@ class MrdSink
                                    const void *data,
                                    size_t bytes,
                                    std::string_view session_token = {});
+
+    // Read frame from SWMR file (safe while writer is writing)
+    // frame_index < 0 means latest frame
+    FrameReadResult read_frame(const std::filesystem::path &mrd_path, int64_t frame_index = -1);
 
     void cleanup_idle_streams(std::chrono::seconds idle_timeout = std::chrono::seconds(600));
     void flush_all();

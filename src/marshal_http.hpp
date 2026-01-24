@@ -428,6 +428,160 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
         }
     }
 
+    // GET /v1/mrd/frame?path=...&index=...  (read frame from SWMR - safe while writing)
+    // index < 0 or omitted = latest frame
+    if (req.method() == http::verb::get && std::string(req.target()).rfind("/v1/mrd/frame", 0) == 0)
+    {
+        try
+        {
+            // Parse query params
+            std::string target_str(req.target());
+            auto qpos = target_str.find('?');
+            std::string mrd_path;
+            int64_t frame_index = -1;
+
+            if (qpos != std::string::npos)
+            {
+                auto query = target_str.substr(qpos + 1);
+                // Parse path=...
+                auto path_pos = query.find("path=");
+                if (path_pos != std::string::npos)
+                {
+                    auto val_start = path_pos + 5;
+                    auto val_end = query.find('&', val_start);
+                    mrd_path = (val_end == std::string::npos)
+                        ? query.substr(val_start)
+                        : query.substr(val_start, val_end - val_start);
+                }
+                // Parse index=...
+                auto idx_pos = query.find("index=");
+                if (idx_pos != std::string::npos)
+                {
+                    auto val_start = idx_pos + 6;
+                    auto val_end = query.find('&', val_start);
+                    auto idx_str = (val_end == std::string::npos)
+                        ? query.substr(val_start)
+                        : query.substr(val_start, val_end - val_start);
+                    try { frame_index = std::stoll(idx_str); } catch (...) {}
+                }
+            }
+
+            if (mrd_path.empty())
+            {
+                // Try to get path from latest.json
+                fs::path latest_path = fs::path(state.data_dir) / "mrd" / "latest.json";
+                if (fs::exists(latest_path))
+                {
+                    std::string s;
+                    if (read_file_all(latest_path, s) && !s.empty())
+                    {
+                        auto j = json::parse(s, nullptr, false);
+                        if (!j.is_discarded() && j.contains("path"))
+                            mrd_path = j["path"].get<std::string>();
+                    }
+                }
+            }
+
+            if (mrd_path.empty())
+                return make_response(http::status::bad_request, {{"error", "missing path param and no latest.json"}});
+
+            if (!state.mrd_sink)
+                return make_response(http::status::service_unavailable, {{"error", "MRD sink unavailable"}});
+
+            auto result = state.mrd_sink->read_frame(mrd_path, frame_index);
+
+            if (!result.success || result.data.empty())
+                return make_response(http::status::no_content, {});
+
+            // Return binary frame data with metadata in headers
+            http::response<http::string_body> res{http::status::ok, req.version()};
+            res.set(http::field::content_type, "application/octet-stream");
+            res.set("X-MRD-Frame-Index", std::to_string(result.frame_index));
+            res.set("X-MRD-Total-Frames", std::to_string(result.total_frames));
+            res.set("X-MRD-Dims-X", std::to_string(result.dims.spatial[0]));
+            res.set("X-MRD-Dims-Y", std::to_string(result.dims.spatial[1]));
+            res.set("X-MRD-Dims-Z", std::to_string(result.dims.spatial[2]));
+            res.set("X-MRD-Channels", std::to_string(result.dims.channels));
+            res.set("X-MRD-Datatype", mrd::element_type_to_string(result.element_type));
+            res.body().assign(reinterpret_cast<const char*>(result.data.data()), result.data.size());
+            res.prepare_payload();
+            return res;
+        }
+        catch (const std::exception &e)
+        {
+            return make_response(http::status::internal_server_error, {{"error", e.what()}});
+        }
+    }
+
+    // GET /v1/mrd/ingest?path=...  (download complete .mrd file)
+    // If no path provided, uses latest.json to find current file
+    if (req.method() == http::verb::get && std::string(req.target()).rfind("/v1/mrd/ingest", 0) == 0)
+    {
+        try
+        {
+            std::string target_str(req.target());
+            std::string mrd_path;
+
+            // Parse path= query param
+            auto qpos = target_str.find('?');
+            if (qpos != std::string::npos)
+            {
+                auto query = target_str.substr(qpos + 1);
+                auto path_pos = query.find("path=");
+                if (path_pos != std::string::npos)
+                {
+                    auto val_start = path_pos + 5;
+                    auto val_end = query.find('&', val_start);
+                    mrd_path = (val_end == std::string::npos)
+                        ? query.substr(val_start)
+                        : query.substr(val_start, val_end - val_start);
+                }
+            }
+
+            // If no path provided, get from latest.json
+            if (mrd_path.empty())
+            {
+                fs::path latest_path = fs::path(state.data_dir) / "mrd" / "latest.json";
+                if (fs::exists(latest_path))
+                {
+                    std::string s;
+                    if (read_file_all(latest_path, s) && !s.empty())
+                    {
+                        auto j = json::parse(s, nullptr, false);
+                        if (!j.is_discarded() && j.contains("path"))
+                            mrd_path = j["path"].get<std::string>();
+                    }
+                }
+            }
+
+            if (mrd_path.empty())
+                return make_response(http::status::bad_request, {{"error", "missing path param and no latest.json"}});
+
+            if (!fs::exists(mrd_path))
+                return make_response(http::status::not_found, {{"error", "file not found"}});
+
+            std::ifstream ifs(mrd_path, std::ios::binary);
+            if (!ifs)
+                return make_response(http::status::internal_server_error, {{"error", "failed to open file"}});
+
+            std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+            // Extract filename from path
+            std::string filename = fs::path(mrd_path).filename().string();
+
+            http::response<http::string_body> res{http::status::ok, req.version()};
+            res.set(http::field::content_type, "application/octet-stream");
+            res.set(http::field::content_disposition, "attachment; filename=\"" + filename + "\"");
+            res.body() = std::move(content);
+            res.prepare_payload();
+            return res;
+        }
+        catch (const std::exception &e)
+        {
+            return make_response(http::status::internal_server_error, {{"error", e.what()}});
+        }
+    }
+
     // GET /v1/mrd/latest  (reads ${data_dir}/mrd/latest.json)
     if (req.method() == http::verb::get && req.target() == "/v1/mrd/latest")
     {

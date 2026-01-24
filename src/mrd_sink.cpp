@@ -624,6 +624,136 @@ FrameAppendResult MrdSink::append_frame(const std::string &stream_id,
     return result;
 }
 
+FrameReadResult MrdSink::read_frame(const std::filesystem::path &mrd_path, int64_t frame_index)
+{
+    FrameReadResult result;
+
+    if (!std::filesystem::exists(mrd_path))
+        return result;
+
+    // Open in SWMR read mode - safe while writer is writing
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    if (fapl < 0)
+        return result;
+
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
+    H5Pset_fclose_degree(fapl, H5F_CLOSE_SEMI);
+
+    hid_t file = H5Fopen(mrd_path.c_str(), H5F_ACC_RDONLY | H5F_ACC_SWMR_READ, fapl);
+    H5Pclose(fapl);
+
+    if (file < 0)
+        return result;
+
+    hid_t dataset = H5Dopen2(file, "/images/data", H5P_DEFAULT);
+    if (dataset < 0)
+    {
+        H5Fclose(file);
+        return result;
+    }
+
+    // Refresh to see latest writer data
+    H5Drefresh(dataset);
+
+    // Get current dimensions: [frames, channels, z, y, x]
+    hid_t space = H5Dget_space(dataset);
+    if (space < 0)
+    {
+        H5Dclose(dataset);
+        H5Fclose(file);
+        return result;
+    }
+
+    hsize_t dims[5] = {0};
+    H5Sget_simple_extent_dims(space, dims, nullptr);
+
+    uint64_t num_frames = dims[0];
+    if (num_frames == 0)
+    {
+        H5Sclose(space);
+        H5Dclose(dataset);
+        H5Fclose(file);
+        return result;
+    }
+
+    // Determine which frame to read
+    uint64_t idx = (frame_index < 0) ? (num_frames - 1) : static_cast<uint64_t>(frame_index);
+    if (idx >= num_frames)
+        idx = num_frames - 1;
+
+    // Get datatype info
+    hid_t dtype = H5Dget_type(dataset);
+    size_t elem_size = H5Tget_size(dtype);
+
+    // Determine element type
+    H5T_class_t type_class = H5Tget_class(dtype);
+    if (type_class == H5T_FLOAT)
+        result.element_type = ElementType::Float32;
+    else if (type_class == H5T_INTEGER)
+    {
+        if (H5Tget_sign(dtype) == H5T_SGN_NONE)
+            result.element_type = ElementType::UInt16;
+        else
+            result.element_type = ElementType::Int16;
+    }
+    else if (type_class == H5T_COMPOUND)
+        result.element_type = ElementType::ComplexFloat32;
+
+    H5Tclose(dtype);
+
+    // Calculate frame size
+    size_t frame_elements = dims[1] * dims[2] * dims[3] * dims[4];
+    size_t frame_bytes = frame_elements * elem_size;
+
+    // Select hyperslab for single frame
+    hsize_t start[5] = {idx, 0, 0, 0, 0};
+    hsize_t count[5] = {1, dims[1], dims[2], dims[3], dims[4]};
+
+    if (H5Sselect_hyperslab(space, H5S_SELECT_SET, start, nullptr, count, nullptr) < 0)
+    {
+        H5Sclose(space);
+        H5Dclose(dataset);
+        H5Fclose(file);
+        return result;
+    }
+
+    // Create memory space
+    hid_t memspace = H5Screate_simple(5, count, nullptr);
+    if (memspace < 0)
+    {
+        H5Sclose(space);
+        H5Dclose(dataset);
+        H5Fclose(file);
+        return result;
+    }
+
+    // Allocate and read data
+    result.data.resize(frame_bytes);
+    hid_t mem_dtype = H5Dget_type(dataset);
+    herr_t status = H5Dread(dataset, mem_dtype, memspace, space, H5P_DEFAULT, result.data.data());
+    H5Tclose(mem_dtype);
+
+    H5Sclose(memspace);
+    H5Sclose(space);
+    H5Dclose(dataset);
+    H5Fclose(file);
+
+    if (status < 0)
+    {
+        result.data.clear();
+        return result;
+    }
+
+    // Fill result metadata
+    result.frame_index = idx;
+    result.total_frames = num_frames;
+    result.dims.spatial = {dims[4], dims[3], dims[2]}; // x, y, z
+    result.dims.channels = dims[1];
+    result.success = true;
+
+    return result;
+}
+
 std::string MrdSink::canonical_scan_name(const std::string &stream_id)
 {
     std::string out;
