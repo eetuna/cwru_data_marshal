@@ -39,7 +39,7 @@ services:
       - -c
       - |
         echo "[Robot Marshal] Starting on http://0.0.0.0:8081"
-        exec ./server
+        exec ./server >/dev/null 2>&1
     ports:
       - "8081:8081"
     healthcheck:
@@ -84,7 +84,17 @@ services:
   viz-client:
     image: cwru/viz-client:latest
     container_name: cwru-viz-client
-    command: ["./build/viz_client", "--http", "http://mri-marshal:8080/v1/mrd/latest"]
+    command:
+      - sh
+      - -c
+      - |
+        echo "[Viz Client] Waiting for new frame from image-streamer..."
+        # Record current frame index
+        INITIAL=$$(curl -s http://mri-marshal:8080/v1/mrd/latest | grep -o '"frame_index":[0-9]*' | grep -o '[0-9]*' || echo "-1")
+        # Wait for WebSocket notification (blocks until new frame arrives)
+        echo '{"subscribe":"mrd"}' | timeout 300 websocat -n1 wss://mri-marshal:8090/ws >/dev/null 2>&1 || true
+        echo "[Viz Client] Frame received, starting visualization..."
+        exec ./build/viz_client --http http://mri-marshal:8080/v1/mrd/latest
     environment:
       - DISPLAY=${DISPLAY:-:0}
       - XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir
@@ -172,6 +182,43 @@ services:
     restart: unless-stopped
     networks:
       - cwru-net
+
+  # Run all robot clients with op count summary
+  robot-clients:
+    image: cwru/robot-clients:latest
+    container_name: cwru-robot-clients
+    command:
+      - sh
+      - -c
+      - |
+        # Start all clients, redirect output to files for counting
+        ./catheter-tracking >> /tmp/cath.log 2>&1 &
+        ./controller >> /tmp/ctrl.log 2>&1 &
+        ./planning >> /tmp/plan.log 2>&1 &
+        ./front-end >> /tmp/fe.log 2>&1 &
+        ./surface-tracking >> /tmp/surf.log 2>&1 &
+
+        # Monitor and print op counts
+        while true; do
+          sleep $${MONITOR_INTERVAL:-10}
+          CATH=$$(grep -c "CATHETER:" /tmp/cath.log 2>/dev/null || echo 0)
+          CTRL=$$(grep -c "CONTROLLER:" /tmp/ctrl.log 2>/dev/null || echo 0)
+          PLAN=$$(grep -c "PLANNING:" /tmp/plan.log 2>/dev/null || echo 0)
+          FE=$$(grep -c "FRONTEND:" /tmp/fe.log 2>/dev/null || echo 0)
+          SURF=$$(grep -c "SURFACE:" /tmp/surf.log 2>/dev/null || echo 0)
+          printf "[%s] Robot Clients: cath=%s ctrl=%s plan=%s fe=%s surf=%s\n" "$$(date +%H:%M:%S)" "$$CATH" "$$CTRL" "$$PLAN" "$$FE" "$$SURF"
+        done
+    environment:
+      - ROBOT_MARSHAL_HOST=robot-marshal
+      - ROBOT_MARSHAL_PORT=8081
+      - MONITOR_INTERVAL=${MONITOR_INTERVAL:-10}
+    depends_on:
+      robot-marshal:
+        condition: service_healthy
+    networks:
+      - cwru-net
+    profiles:
+      - robot-clients
 
 networks:
   cwru-net:

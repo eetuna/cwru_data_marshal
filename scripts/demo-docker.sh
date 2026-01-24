@@ -21,24 +21,35 @@ echo "Cleanup data: ${CLEANUP_DATA}"
 echo "=========================================="
 
 # Stop existing and clean up stale networks
-docker compose -f "$COMPOSE_FILE" down 2>/dev/null || true
-docker rm -f cwru-viz-client 2>/dev/null || true
+docker compose --env-file .env.demo -f "$COMPOSE_FILE" down 2>/dev/null || true
+docker rm -f cwru-viz-client >/dev/null 2>&1 || true
 docker network prune -f 2>/dev/null || true
 
-# Create session-data directory
-mkdir -p session-data
-
-# Clean up old demo data to start fresh
-if [ "$CLEANUP_DATA" = "true" ]; then
-    rm -rf session-data/*
-fi
+# Create session-data directory and clear ALL old data for fresh stream
+mkdir -p "${SESSION_DATA_DIR:-./session-data}/mrd"
+rm -rf "${SESSION_DATA_DIR:-./session-data}/mrd/"* 2>/dev/null || true
 
 # Start
 echo "Starting services..."
+docker compose --env-file .env.demo -f "$COMPOSE_FILE" up -d
+
+echo ""
+echo "Checking robot client status..."
+sleep 2
+for client in catheter-tracking controller planning front-end surface-tracking; do
+    if docker ps --format '{{.Names}}' | grep -q "cwru-$client"; then
+        echo "  ✓ $client is running"
+    else
+        echo "  ✗ $client failed - check logs: docker logs cwru-$client"
+    fi
+done
+
 if [ "$ENABLE_VIZ" = "true" ]; then
-    docker compose -f "$COMPOSE_FILE" --profile viz up -d
-else
-    docker compose -f "$COMPOSE_FILE" up -d
+    echo ""
+    echo "Waiting for first image frame..."
+    sleep 3
+    echo "Starting visualization client..."
+    docker compose --env-file .env.demo -f "$COMPOSE_FILE" --profile viz up -d >/dev/null 2>&1
 fi
 
 echo ""
@@ -54,67 +65,56 @@ cleanup() {
     # Force stop viz-client to close GUI immediately
     if docker ps --format '{{.Names}}' | grep -q "cwru-viz-client"; then
         echo "Closing visualization window..."
-        docker stop -t 1 cwru-viz-client 2>/dev/null || true
-        docker rm -f cwru-viz-client 2>/dev/null || true
+        docker stop -t 1 cwru-viz-client >/dev/null 2>&1 || true
+        docker rm -f cwru-viz-client >/dev/null 2>&1 || true
     fi
 
-    docker compose -f "$COMPOSE_FILE" down
-
-    if [ "$CLEANUP_DATA" = "true" ]; then
-        echo "Cleaning up demo data..."
-        rm -rf session-data/*
-    fi
-
+    docker compose --env-file .env.demo -f "$COMPOSE_FILE" down 2>&1 | grep -v "totally borken" || true
     exit 0
 }
 trap cleanup INT TERM
 
-# Background monitor for robot client operations
-monitor_robot_ops() {
+# Background monitor for status
+monitor_status() {
     sleep 5  # Let things start up
     while true; do
-        TOTAL=$(docker compose -f "$COMPOSE_FILE" logs --tail 200 2>&1 | grep -c "CATHETER:" || echo 0)
-        echo "[$(date +%H:%M:%S)] Robot ops: $TOTAL"
+        # MRI Marshal: latest image-streamer frame (if IMAGE_LOG_STRIDE > 0)
+        if [ "${IMAGE_LOG_STRIDE:-0}" -gt 0 ]; then
+            FRAME_LINE=$(docker logs cwru-image-streamer --tail 1 2>&1 | grep "frame" || echo "")
+            if [ -n "$FRAME_LINE" ]; then
+                echo "$FRAME_LINE"
+            fi
+        fi
+
+        # Robot Marshal: catheter, controller, planning, front-end, surface (total ops count)
+        CATHETER=$(docker logs cwru-catheter-tracking 2>/dev/null | grep -c "CATHETER:")
+        CONTROLLER=$(docker logs cwru-controller 2>/dev/null | grep -c "CONTROLLER:")
+        PLANNING=$(docker logs cwru-planning 2>/dev/null | grep -c "PLANNING:")
+        FRONTEND=$(docker logs cwru-front-end 2>/dev/null | grep -c "FRONTEND:")
+        SURFACE=$(docker logs cwru-surface-tracking 2>/dev/null | grep -c "SURFACE:")
+        printf "[%s] Robot Marshal: cath=%s ctrl=%s plan=%s fe=%s surf=%s\n" "$(date +%H:%M:%S)" "$CATHETER" "$CONTROLLER" "$PLANNING" "$FRONTEND" "$SURFACE"
+
         sleep "$MONITOR_INTERVAL"
     done
 }
 
 if [ "$DEMO_DURATION" -gt 0 ]; then
     # Start robot ops monitor in background
-    monitor_robot_ops &
+    monitor_status &
     MONITOR_PID=$!
 
-    # Show MRI data: ECG, pose, images (skip robot catheter spam)
-    timeout --foreground "$DEMO_DURATION" docker compose -f "$COMPOSE_FILE" logs -f 2>&1 \
-        | grep --line-buffered -E "ecg-client.*\[|pose-client.*\[|image-streamer.*sent frame" \
-        | sed -u 's/^.*ecg-client[^[]*\(\[[^]]*\] HR=.*\)$/ECG:  \1/' \
-        | sed -u 's/^.*pose-client[^[]*\(\[[^]]*\] p=.*\)$/POSE: \1/' \
-        | sed -u 's/^.*image-streamer.*sent frame \([0-9]*\).*/IMG:  frame \1/' || true
+    # Show MRI data: ECG, pose (no image-streamer spam)
+    timeout --foreground "$DEMO_DURATION" docker compose --env-file .env.demo -f "$COMPOSE_FILE" logs -f --no-log-prefix 2>&1 \
+        | grep --line-buffered -E "^\[[0-9]" || true
 
     kill $MONITOR_PID 2>/dev/null || true
+
+    # Graceful shutdown after duration
+    cleanup
 else
-    monitor_robot_ops &
+    monitor_status &
     MONITOR_PID=$!
 
-    docker compose -f "$COMPOSE_FILE" logs -f 2>&1 \
-        | grep --line-buffered -E "ecg-client.*\[|pose-client.*\[|image-streamer.*sent frame" \
-        | sed -u 's/^.*ecg-client[^[]*\(\[[^]]*\] HR=.*\)$/ECG:  \1/' \
-        | sed -u 's/^.*pose-client[^[]*\(\[[^]]*\] p=.*\)$/POSE: \1/' \
-        | sed -u 's/^.*image-streamer.*sent frame \([0-9]*\).*/IMG:  frame \1/'
-fi
-
-echo ""
-echo "Demo complete."
-docker compose -f "$COMPOSE_FILE" down
-
-# Extra cleanup for viz-client if it's still running
-if docker ps --format '{{.Names}}' | grep -q "cwru-viz-client"; then
-    echo "Closing visualization window..."
-    docker stop -t 1 cwru-viz-client 2>/dev/null || true
-    docker rm -f cwru-viz-client 2>/dev/null || true
-fi
-
-if [ "$CLEANUP_DATA" = "true" ]; then
-    echo "Cleaning up demo data..."
-    rm -rf session-data/*
+    docker compose --env-file .env.demo -f "$COMPOSE_FILE" logs -f --no-log-prefix 2>&1 \
+        | grep --line-buffered -E "^\[[0-9]"
 fi
