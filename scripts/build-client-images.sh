@@ -12,18 +12,46 @@ echo "  CWRU Data Marshal - Build Docker Images"
 echo "============================================"
 echo ""
 
+# Clean up any stale worktree registrations
+git worktree prune
+
+# Ensure required branches exist (fetch directly from upstream repo)
+MRI_BRANCH="mri-data-marhsal"
+ROBOT_BRANCH="robot_data_marshal_with_catheter_system_components"
+UPSTREAM_REPO="https://github.com/cwru-mercis/cwru_data_marshal.git"
+
+echo "Checking required branches..."
+for BRANCH in "$MRI_BRANCH" "$ROBOT_BRANCH"; do
+    if ! git rev-parse --verify "$BRANCH" >/dev/null 2>&1; then
+        echo "Branch '$BRANCH' not found locally, fetching from cwru-mercis..."
+        if ! git fetch "$UPSTREAM_REPO" "$BRANCH:$BRANCH" 2>/dev/null; then
+            echo ""
+            echo "  ✗ ERROR: Failed to fetch branch '$BRANCH'"
+            echo ""
+            echo "  This repository is private. You need:"
+            echo "    1. Access to https://github.com/cwru-mercis/cwru_data_marshal"
+            echo "    2. GitHub authentication configured (SSH key or personal access token)"
+            echo ""
+            echo "  To set up SSH authentication:"
+            echo "    https://docs.github.com/en/authentication/connecting-to-github-with-ssh"
+            echo ""
+            exit 1
+        fi
+    fi
+done
+
 # Check if worktrees exist, create if needed
-MRI_WORKTREE="/workspaces/mri_data_marshal_worktree"
-ROBOT_WORKTREE="/workspaces/robot_data_marshal_worktree"
+MRI_WORKTREE="$PROJECT_ROOT/.worktrees/mri_data_marshal"
+ROBOT_WORKTREE="$PROJECT_ROOT/.worktrees/robot_data_marshal"
 
 if [ ! -d "$MRI_WORKTREE" ]; then
     echo "Creating MRI worktree at $MRI_WORKTREE..."
-    git worktree add "$MRI_WORKTREE" mri-data-marhsal
+    git worktree add "$MRI_WORKTREE" "$MRI_BRANCH"
 fi
 
 if [ ! -d "$ROBOT_WORKTREE" ]; then
     echo "Creating robot worktree at $ROBOT_WORKTREE..."
-    git worktree add "$ROBOT_WORKTREE" robot_data_marshal_with_catheter_system_components
+    git worktree add "$ROBOT_WORKTREE" "$ROBOT_BRANCH"
 fi
 
 echo "[1/3] Building MRI Marshal and Clients..."

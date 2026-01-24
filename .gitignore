@@ -1,5 +1,8 @@
 # Demo data directory (generated at runtime)
 session-data/
 
+# Worktrees directory (for Docker image builds)
+.worktrees/
+
 # Backup files
 *.bak

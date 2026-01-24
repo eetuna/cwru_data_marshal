@@ -1,0 +1,653 @@
+# CWRU Data Marshal - Manual Terminal Setup Guide
+
+This guide shows how to run each marshal and client in separate terminals for maximum visibility and control. Perfect for development, debugging, and connecting your own custom clients.
+
+## Table of Contents
+
+1. [Prerequisites](#prerequisites)
+2. [Initial Setup](#initial-setup)
+3. [Environment Variables](#environment-variables)
+4. [Running Services in Separate Terminals](#running-services-in-separate-terminals)
+5. [Stopping Services](#stopping-services)
+6. [Troubleshooting](#troubleshooting)
+
+---
+
+## Prerequisites
+
+### On a Fresh Ubuntu Machine
+
+**Only Docker is required!**
+
+```bash
+# Install Docker on Ubuntu
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+sudo usermod -aG docker $USER
+
+# Log out and back in (for group changes to take effect)
+```
+
+### Clone and Build
+
+```bash
+# Clone the repository
+git clone <repo-url>
+cd cwru_data_marshal
+
+# Build all Docker images (takes 5-10 minutes)
+./scripts/build-client-images.sh
+
+# Verify all 7 images were built
+docker images | grep cwru
+```
+
+Expected images:
+- `cwru/mri-marshal`
+- `cwru/robot-marshal`
+- `cwru/image-streamer`
+- `cwru/ecg-client`
+- `cwru/pose-client`
+- `cwru/viz-client`
+- `cwru/robot-clients`
+
+---
+
+## Environment Variables
+
+The system uses `.env.demo` for configuration. Here's what each variable controls:
+
+### Demo Control Variables
+
+```bash
+# Demo duration in seconds (0 = run indefinitely)
+DEMO_DURATION=30
+
+# Cleanup session-data/ folder after demo ends
+# Set to false to keep data between runs
+CLEANUP_DATA=true
+```
+
+### Session Data Location
+
+```bash
+# Where to store all generated data (MRI images, ECG, poses)
+SESSION_DATA_DIR=./session-data
+
+# Directory structure created:
+# session-data/
+#   └── run_YYYYMMDD_HHMMSS/
+#       └── mrd/
+#           ├── demo_stream-64x64x5-g0000.mrd  (MRI images - HDF5)
+#           ├── bio.jsonl                       (ECG data)
+#           ├── poses.jsonl                     (Pose tracking)
+#           ├── index.jsonl                     (Frame metadata)
+#           └── latest.json                     (Latest frame pointer)
+```
+
+### Image Generation Settings
+
+```bash
+# Image dimensions
+IMAGE_WIDTH=64        # Pixel width (default: 64)
+IMAGE_HEIGHT=64       # Pixel height (default: 64)
+IMAGE_SLICES=5        # Number of slices per 3D volume (default: 5)
+
+# Image streaming rate
+IMAGE_INTERVAL=0.05   # Seconds between frames (0.05 = 20 fps)
+
+# Image logging
+IMAGE_LOG_STRIDE=100  # Log every Nth frame (0 = disable logging)
+```
+
+### Biological Signal Settings
+
+```bash
+# ECG/biological signal sampling rate
+ECG_INTERVAL=0.5      # Seconds between samples (0.5 = 2 Hz)
+
+# Pose tracking update rate
+POSE_INTERVAL=0.1     # Seconds between updates (0.1 = 10 Hz)
+```
+
+### Robot Client Settings
+
+```bash
+# How often robot clients communicate with marshal
+ROBOT_INTERVAL=0.02   # Seconds between operations (0.02 = 50 Hz)
+
+# Logging frequency for robot clients
+ROBOT_LOG_STRIDE=100  # Log every Nth operation (0 = disable)
+```
+
+### Visualization Settings
+
+```bash
+# Enable/disable visualization window (requires X11)
+ENABLE_VIZ=true
+
+# Visualization refresh rate
+VIZ_INTERVAL=0.067    # Seconds between frame updates (0.067 ≈ 15 fps)
+```
+
+### Monitoring Settings
+
+```bash
+# Status monitoring update interval
+MONITOR_INTERVAL=2    # Seconds between status updates
+```
+
+---
+
+## Running Services in Separate Terminals
+
+This approach gives you maximum visibility - each service runs in its own terminal window so you can see real-time logs.
+
+### Preparation
+
+Before starting services, ensure `session-data/` is clean:
+
+```bash
+# Clear old demo data (optional)
+rm -rf session-data/*
+
+# Or set CLEANUP_DATA=false in .env.demo to keep data between runs
+```
+
+### Terminal 1: MRI Marshal (Core Service)
+
+The MRI marshal manages all MRI-related data (images, ECG, poses).
+
+```bash
+cd /path/to/cwru_data_marshal
+
+# Run MRI marshal with environment variables
+docker compose --env-file .env.demo -f docker-compose.demo.yml up mri-marshal
+```
+
+**What you'll see:**
+```
+[MRI Marshal] Starting on http://0.0.0.0:8080, ws://0.0.0.0:8090
+[MRI Marshal] Data dir: /session-data/run_20260124_123456
+```
+
+**Endpoints:**
+- HTTP API: http://localhost:8080
+- WebSocket: ws://localhost:8090
+- Health check: http://localhost:8080/health
+
+**Leave this running.** Open a new terminal for the next service.
+
+---
+
+### Terminal 2: Robot Marshal (Core Service)
+
+The robot marshal manages robot control data exchange.
+
+```bash
+cd /path/to/cwru_data_marshal
+
+# Run Robot marshal
+docker compose --env-file .env.demo -f docker-compose.demo.yml up robot-marshal
+```
+
+**What you'll see:**
+```
+[Robot Marshal] Server listening on http://0.0.0.0:8081
+[Robot Marshal] Available endpoints:
+  - GET/POST /read/tip_position_orientation
+  - GET/POST /write/user_input
+  ...
+```
+
+**Endpoints:**
+- HTTP API: http://localhost:8081
+- Browse available channels: http://localhost:8081/
+
+**Leave this running.** Open a new terminal.
+
+---
+
+### Terminal 3: Image Streamer (MRI Data Generator)
+
+Generates synthetic MRI image frames and sends them to the MRI marshal.
+
+```bash
+cd /path/to/cwru_data_marshal
+
+# Run image streamer
+docker compose --env-file .env.demo -f docker-compose.demo.yml up image-streamer
+```
+
+**What you'll see (if IMAGE_LOG_STRIDE > 0):**
+```
+[image-streamer] Sent frame 0
+[image-streamer] Sent frame 100
+[image-streamer] Sent frame 200
+...
+```
+
+**Configuration:**
+- Frame rate: `IMAGE_INTERVAL` (default: 0.05s = 20 fps)
+- Dimensions: `IMAGE_WIDTH` x `IMAGE_HEIGHT` x `IMAGE_SLICES`
+- Logging: Every `IMAGE_LOG_STRIDE` frames
+
+---
+
+### Terminal 4: ECG Client (Biological Signal Generator)
+
+Generates synthetic ECG/biological signals.
+
+```bash
+cd /path/to/cwru_data_marshal
+
+# Run ECG client
+docker compose --env-file .env.demo -f docker-compose.demo.yml up ecg-client
+```
+
+**What you'll see:**
+```
+[ecg-client] ❤️  HR: 72 bpm, ECG: 0.523
+[ecg-client] ❤️  HR: 73 bpm, ECG: 0.612
+...
+```
+
+**Configuration:**
+- Sample rate: `ECG_INTERVAL` (default: 0.5s = 2 Hz)
+- Sends to: http://mri-marshal:8080/v1/bio/signal
+
+---
+
+### Terminal 5: Pose Client (Tracking Data Generator)
+
+Generates synthetic pose/tracking data.
+
+```bash
+cd /path/to/cwru_data_marshal
+
+# Run pose client
+docker compose --env-file .env.demo -f docker-compose.demo.yml up pose-client
+```
+
+**What you'll see:**
+```
+[pose-client] 📍 Pose: pos=[1.2, 3.4, 5.6], ori=[0.0, 0.0, 0.707, 0.707]
+[pose-client] 📍 Pose: pos=[1.3, 3.5, 5.7], ori=[0.0, 0.0, 0.708, 0.706]
+...
+```
+
+**Configuration:**
+- Update rate: `POSE_INTERVAL` (default: 0.1s = 10 Hz)
+- Sends to: http://mri-marshal:8080/v1/pose/update
+
+---
+
+### Terminal 6: Robot Clients (All 5 Together)
+
+Runs all 5 robot clients in a single container:
+- Catheter tracking
+- Controller
+- Planning
+- Front-end
+- Surface tracking
+
+```bash
+cd /path/to/cwru_data_marshal
+
+# Run all robot clients
+docker compose --env-file .env.demo -f docker-compose.demo.yml up robot-clients
+```
+
+**What you'll see (if ROBOT_LOG_STRIDE > 0):**
+```
+[robot-clients] CATHETER: Read tip_position_orientation
+[robot-clients] CONTROLLER: Read desired_planned_motion
+[robot-clients] PLANNING: Wrote desired_planned_motion
+[robot-clients] FRONTEND: Wrote user_input
+[robot-clients] SURFACE: Read streaming_2D_images
+...
+```
+
+**Configuration:**
+- Operation rate: `ROBOT_INTERVAL` (default: 0.02s = 50 Hz)
+- Logging: Every `ROBOT_LOG_STRIDE` operations
+- Communicates with: http://robot-marshal:8081
+
+---
+
+### Terminal 7: Visualization Client (Optional - Requires X11)
+
+Displays MRI frames in real-time.
+
+**Prerequisites:**
+- X11 display server running
+- `ENABLE_VIZ=true` in `.env.demo`
+- `DISPLAY` environment variable set (e.g., `:0`)
+
+**WSL2 Users:**
+- Install VcXsrv, Xming, or use WSLg
+- Allow X11 connections
+
+```bash
+cd /path/to/cwru_data_marshal
+
+# Run visualization client (requires --profile viz)
+docker compose --env-file .env.demo -f docker-compose.demo.yml --profile viz up viz-client
+```
+
+**What you'll see:**
+- OpenCV window displaying MRI slices in real-time
+- Console output with frame information
+
+**Configuration:**
+- Refresh rate: `VIZ_INTERVAL` (default: 0.067s ≈ 15 fps)
+- Reads from: http://mri-marshal:8080/v1/mrd/latest
+
+**Note:** Display FPS is lower than actual data ingestion FPS due to Docker X11 forwarding overhead. The marshals still process data at full speed (20+ fps).
+
+---
+
+## Customizing Environment Variables
+
+### Option 1: Edit `.env.demo` File
+
+```bash
+nano .env.demo
+```
+
+Change values, save, then run services with:
+```bash
+docker compose --env-file .env.demo -f docker-compose.demo.yml up <service>
+```
+
+### Option 2: Override on Command Line
+
+```bash
+# Run with custom image size and faster frame rate
+IMAGE_WIDTH=128 IMAGE_HEIGHT=128 IMAGE_INTERVAL=0.025 \
+  docker compose --env-file .env.demo -f docker-compose.demo.yml up image-streamer
+
+# Run ECG client with faster sampling
+ECG_INTERVAL=0.1 \
+  docker compose --env-file .env.demo -f docker-compose.demo.yml up ecg-client
+
+# Run indefinitely (no time limit)
+DEMO_DURATION=0 \
+  docker compose --env-file .env.demo -f docker-compose.demo.yml up mri-marshal
+```
+
+### Option 3: Create Custom .env File
+
+```bash
+cp .env.demo .env.custom
+
+# Edit .env.custom
+nano .env.custom
+
+# Use it
+docker compose --env-file .env.custom -f docker-compose.demo.yml up <service>
+```
+
+---
+
+## Accessing the APIs While Running
+
+### MRI Marshal API
+
+```bash
+# Health check
+curl http://localhost:8080/health
+
+# Get latest MRI frame metadata
+curl http://localhost:8080/v1/mrd/latest | jq
+
+# Get latest ECG data
+curl http://localhost:8080/v1/bio/latest | jq
+
+# Get current pose
+curl http://localhost:8080/v1/pose/current | jq
+```
+
+### Robot Marshal API
+
+```bash
+# List all available channels
+curl http://localhost:8081/
+
+# Read catheter tip position
+curl http://localhost:8081/read/tip_position_orientation | jq
+
+# Write user command
+curl -X POST http://localhost:8081/write/user_input \
+  -H "Content-Type: application/json" \
+  -d '{"values": [10.0, 20.0, 30.0], "sent_at": 1706126625123456789}'
+```
+
+### WebSocket Notifications
+
+```bash
+# Connect to WebSocket (using wscat)
+npm install -g wscat
+wscat -c ws://localhost:8090/ws
+
+# Subscribe to MRD updates
+> {"subscribe": "mrd"}
+
+# You'll receive notifications like:
+< {"type": "mrd_update", "frame_index": 1234, "timestamp": "2026-01-24T18:23:45.123Z"}
+```
+
+---
+
+## Viewing Generated Data
+
+Data is stored in `session-data/`:
+
+```bash
+# View data structure
+tree session-data/
+
+# Expected output:
+# session-data/
+# └── run_20260124_123456/
+#     └── mrd/
+#         ├── demo_stream-64x64x5-g0000.mrd  # MRI images (HDF5)
+#         ├── bio.jsonl                       # ECG data
+#         ├── poses.jsonl                     # Pose tracking
+#         ├── index.jsonl                     # Frame metadata
+#         └── latest.json                     # Latest frame pointer
+
+# View MRI file info (requires h5dump)
+h5dump -H session-data/run_*/mrd/*.mrd | head -50
+
+# View ECG data
+cat session-data/run_*/mrd/bio.jsonl | jq
+
+# View pose data
+cat session-data/run_*/mrd/poses.jsonl | jq
+
+# Check latest frame
+cat session-data/run_*/mrd/latest.json | jq
+```
+
+---
+
+## Stopping Services
+
+### Stop Individual Service
+
+In the terminal running the service, press:
+```
+Ctrl+C
+```
+
+### Stop All Services at Once
+
+From any terminal:
+```bash
+cd /path/to/cwru_data_marshal
+
+# Stop all demo services
+docker compose -f docker-compose.demo.yml down
+```
+
+### Clean Up Everything
+
+```bash
+# Stop all services
+docker compose -f docker-compose.demo.yml down
+
+# Remove all stopped containers
+docker rm $(docker ps -aq)
+
+# Remove session data
+rm -rf session-data/*
+
+# Remove Docker images (optional - you'll need to rebuild)
+docker rmi cwru/mri-marshal cwru/robot-marshal \
+  cwru/image-streamer cwru/ecg-client cwru/pose-client \
+  cwru/viz-client cwru/robot-clients
+```
+
+---
+
+## Troubleshooting
+
+### Port Already in Use
+
+```bash
+# Find what's using the port
+sudo lsof -i :8080
+sudo lsof -i :8081
+
+# Stop conflicting services
+docker compose -f docker-compose.demo.yml down
+```
+
+### Container Not Starting
+
+```bash
+# Check logs
+docker compose -f docker-compose.demo.yml logs mri-marshal
+docker compose -f docker-compose.demo.yml logs robot-marshal
+
+# Check container status
+docker ps -a | grep cwru
+```
+
+### Visualization Window Not Showing
+
+```bash
+# Check DISPLAY variable
+echo $DISPLAY
+# Should show something like ":0" or ":1"
+
+# Test X11 (requires x11-apps)
+xeyes
+
+# WSL2: Ensure X server is running on Windows
+# - VcXsrv: Launch XLaunch
+# - Or use WSLg (Windows 11)
+
+# Check .env.demo
+grep ENABLE_VIZ .env.demo
+# Should be: ENABLE_VIZ=true
+```
+
+### Session Data Directory Issues
+
+```bash
+# Permission denied
+sudo chown -R $USER:$USER session-data/
+
+# Device or resource busy
+# This means it's mounted - delete contents instead:
+rm -rf session-data/*
+```
+
+### Services Can't Communicate
+
+```bash
+# Check Docker network
+docker network ls | grep cwru-net
+
+# Verify all services are on same network
+docker compose -f docker-compose.demo.yml ps
+
+# Restart with clean network
+docker compose -f docker-compose.demo.yml down
+docker network prune -f
+docker compose -f docker-compose.demo.yml up
+```
+
+### Images Not Built
+
+```bash
+# Build all images
+./scripts/build-client-images.sh
+
+# Or build specific image
+docker compose -f docker-compose.demo.yml build mri-marshal
+```
+
+---
+
+## Advanced Usage
+
+### Run Services in Background (Daemon Mode)
+
+```bash
+# Start all in background
+docker compose --env-file .env.demo -f docker-compose.demo.yml up -d
+
+# View logs in real-time
+docker compose -f docker-compose.demo.yml logs -f
+
+# View logs from specific service
+docker compose -f docker-compose.demo.yml logs -f mri-marshal
+```
+
+### Restart Specific Service
+
+```bash
+# Without stopping others
+docker compose -f docker-compose.demo.yml restart mri-marshal
+```
+
+### Scale Robot Clients (Advanced)
+
+```bash
+# Run multiple instances of robot clients
+docker compose -f docker-compose.demo.yml up --scale robot-clients=3
+```
+
+---
+
+## Summary
+
+**Minimum Required Terminals: 2**
+- Terminal 1: MRI Marshal
+- Terminal 2: Robot Marshal
+
+**Full Demo Setup: 6-7 Terminals**
+1. MRI Marshal (required)
+2. Robot Marshal (required)
+3. Image Streamer (generates MRI data)
+4. ECG Client (generates biological signals)
+5. Pose Client (generates tracking data)
+6. Robot Clients (5 robot components)
+7. Viz Client (optional - displays images)
+
+**Key Points:**
+- All services use `--env-file .env.demo` for configuration
+- Each terminal shows real-time logs for that service
+- Services communicate over Docker network `cwru-net`
+- Data persists in `session-data/` directory
+- Stop any service with `Ctrl+C`
+- Stop all services with `docker compose down`
+
+---
+
+**For API documentation, see:** `docs/API_REFERENCE.md`
+
+**For external client integration, see:** `docs/EXTERNAL_CLIENT_GUIDE.md`
