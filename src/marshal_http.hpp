@@ -428,8 +428,9 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
         }
     }
 
-    // GET /v1/mrd/frame?path=...&index=...  (read frame from SWMR - safe while writing)
+    // GET /v1/mrd/frame?path=...&index=...  (returns frame metadata for client to read via SWMR)
     // index < 0 or omitted = latest frame
+    // Client receives metadata and does direct HDF5 SWMR read
     if (req.method() == http::verb::get && std::string(req.target()).rfind("/v1/mrd/frame", 0) == 0)
     {
         try
@@ -490,22 +491,22 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
 
             auto result = state.mrd_sink->read_frame(mrd_path, frame_index);
 
-            if (!result.success || result.data.empty())
+            if (!result.success)
                 return make_response(http::status::no_content, {});
 
-            // Return binary frame data with metadata in headers
-            http::response<http::string_body> res{http::status::ok, req.version()};
-            res.set(http::field::content_type, "application/octet-stream");
-            res.set("X-MRD-Frame-Index", std::to_string(result.frame_index));
-            res.set("X-MRD-Total-Frames", std::to_string(result.total_frames));
-            res.set("X-MRD-Dims-X", std::to_string(result.dims.spatial[0]));
-            res.set("X-MRD-Dims-Y", std::to_string(result.dims.spatial[1]));
-            res.set("X-MRD-Dims-Z", std::to_string(result.dims.spatial[2]));
-            res.set("X-MRD-Channels", std::to_string(result.dims.channels));
-            res.set("X-MRD-Datatype", mrd::element_type_to_string(result.element_type));
-            res.body().assign(reinterpret_cast<const char*>(result.data.data()), result.data.size());
-            res.prepare_payload();
-            return res;
+            // Return metadata as JSON - client does the actual HDF5 SWMR read
+            return make_response(http::status::ok, {
+                {"path", mrd_path},
+                {"frame_index", result.frame_index},
+                {"total_frames", result.total_frames},
+                {"dims", {
+                    {"x", result.dims.spatial[0]},
+                    {"y", result.dims.spatial[1]},
+                    {"z", result.dims.spatial[2]}
+                }},
+                {"channels", result.dims.channels},
+                {"datatype", mrd::element_type_to_string(result.element_type)}
+            });
         }
         catch (const std::exception &e)
         {
@@ -513,7 +514,7 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
         }
     }
 
-    // GET /v1/mrd/ingest?path=...  (download complete .mrd file)
+    // GET /v1/mrd/ingest?path=...  (returns file metadata for client to read/copy)
     // If no path provided, uses latest.json to find current file
     if (req.method() == http::verb::get && std::string(req.target()).rfind("/v1/mrd/ingest", 0) == 0)
     {
@@ -560,21 +561,16 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
             if (!fs::exists(mrd_path))
                 return make_response(http::status::not_found, {{"error", "file not found"}});
 
-            std::ifstream ifs(mrd_path, std::ios::binary);
-            if (!ifs)
-                return make_response(http::status::internal_server_error, {{"error", "failed to open file"}});
-
-            std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-
-            // Extract filename from path
+            // Get file size and metadata
+            auto file_size = fs::file_size(mrd_path);
             std::string filename = fs::path(mrd_path).filename().string();
 
-            http::response<http::string_body> res{http::status::ok, req.version()};
-            res.set(http::field::content_type, "application/octet-stream");
-            res.set(http::field::content_disposition, "attachment; filename=\"" + filename + "\"");
-            res.body() = std::move(content);
-            res.prepare_payload();
-            return res;
+            // Return metadata as JSON - client reads/copies the file directly
+            return make_response(http::status::ok, {
+                {"path", mrd_path},
+                {"filename", filename},
+                {"size_bytes", file_size}
+            });
         }
         catch (const std::exception &e)
         {
