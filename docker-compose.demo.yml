@@ -1,5 +1,6 @@
 # CWRU Data Marshal - Demo (Host Networking)
 # Run: ./scripts/demo-docker.sh
+# Environment variables are loaded from .env.demo by the demo script
 
 services:
   mri-marshal:
@@ -32,7 +33,7 @@ services:
   image-streamer:
     image: cwru/image-streamer:latest
     container_name: cwru-image-streamer
-    command: ["./build/image_streamer", "--http", "http://localhost:8080", "--dt-ms", "${IMAGE_INTERVAL_MS}", "--width", "${IMAGE_WIDTH}", "--height", "${IMAGE_HEIGHT}", "--nslices", "${IMAGE_SLICES}"]
+    command: ["./build/image_streamer", "--http", "http://localhost:8080", "--interval", "${IMAGE_INTERVAL}", "--size", "${IMAGE_SIZE}", "--slices", "${IMAGE_SLICES}"]
     depends_on:
       mri-marshal:
         condition: service_healthy

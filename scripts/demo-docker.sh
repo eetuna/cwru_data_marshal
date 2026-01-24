@@ -4,21 +4,10 @@
 cd "$(dirname "$0")/.."
 
 # ===================== CONFIG =====================
-# Match original demo performance: 50ms = 20fps (original was 50ms @ 128x128)
-# Docker overhead adds ~10-20ms latency, so use faster interval to compensate
-DEMO_DURATION=30
-export IMAGE_WIDTH=64
-export IMAGE_HEIGHT=64
-export IMAGE_SLICES=5
-export IMAGE_INTERVAL_MS=50          # 50ms = 20fps target (matches original)
-export ECG_INTERVAL= 1              # 500ms (matches original ECG_INTERVAL_MS=500)
-export ECG_HEART_RATE=72
-export POSE_INTERVAL= 1            # 100ms = 10Hz for smooth trajectory
-export POSE_TRAJECTORY=circular
-export DISPLAY=${DISPLAY:-:0}
-ENABLE_VIZ=true
-CLEANUP_DATA=true                    # Remove mri-data volume after demo (set false to keep data)
-MONITOR_INTERVAL=2  # Print robot client ops count every N seconds
+# Load all configuration from .env.demo (used by docker-compose and this script)
+set -a  # Auto-export all variables
+source .env.demo
+set +a
 # ==================================================
 
 COMPOSE_FILE="docker-compose.demo.yml"
@@ -27,7 +16,7 @@ echo "=========================================="
 echo "  CWRU Data Marshal - Docker Demo"
 echo "=========================================="
 echo "Duration: ${DEMO_DURATION}s"
-echo "Image: ${IMAGE_WIDTH}x${IMAGE_HEIGHT}x${IMAGE_SLICES} @ ${IMAGE_INTERVAL_MS}ms"
+echo "Image: ${IMAGE_SIZE}x${IMAGE_SIZE}x${IMAGE_SLICES} @ ${IMAGE_INTERVAL}ms"
 echo "Cleanup data: ${CLEANUP_DATA}"
 echo "=========================================="
 
@@ -58,7 +47,14 @@ cleanup() {
     echo ""
     echo "Stopping..."
     kill $MONITOR_PID 2>/dev/null || true
-    docker kill cwru-viz-client 2>/dev/null || true
+
+    # Force stop viz-client to close GUI immediately
+    if docker ps --format '{{.Names}}' | grep -q "cwru-viz-client"; then
+        echo "Closing visualization window..."
+        docker stop -t 1 cwru-viz-client 2>/dev/null || true
+        docker rm -f cwru-viz-client 2>/dev/null || true
+    fi
+
     docker compose -f "$COMPOSE_FILE" down
 
     if [ "$CLEANUP_DATA" = "true" ]; then
@@ -107,6 +103,13 @@ fi
 echo ""
 echo "Demo complete."
 docker compose -f "$COMPOSE_FILE" down
+
+# Extra cleanup for viz-client if it's still running
+if docker ps --format '{{.Names}}' | grep -q "cwru-viz-client"; then
+    echo "Closing visualization window..."
+    docker stop -t 1 cwru-viz-client 2>/dev/null || true
+    docker rm -f cwru-viz-client 2>/dev/null || true
+fi
 
 if [ "$CLEANUP_DATA" = "true" ]; then
     echo "Cleaning up mri-data volume..."
