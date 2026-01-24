@@ -1,73 +1,105 @@
-# CWRU Data Marshal - Demo (Host Networking)
+# CWRU Data Marshal - Demo (Bridge Network)
 # Run: ./scripts/demo-docker.sh
-# Environment variables are loaded from .env.demo by the demo script
+# Access: localhost:8080 (MRI), localhost:8081 (Robot), localhost:8090 (WebSocket)
 
 services:
   mri-marshal:
     image: cwru/mri-marshal:latest
     container_name: cwru-mri-marshal
-    user: "${UID:-1000}:${GID:-1000}"
-    command: ["/opt/mri/build/marshal", "--http", "0.0.0.0:8080", "--ws", "0.0.0.0:8090", "--data", "/data/mri_data"]
+    command:
+      - sh
+      - -c
+      - |
+        SESSION=/session-data/run_$$(date +%Y%m%d_%H%M%S)
+        mkdir -p $$SESSION/mrd
+        echo "[MRI Marshal] Starting on http://0.0.0.0:8080, ws://0.0.0.0:8090"
+        echo "[MRI Marshal] Data dir: $$SESSION"
+        exec /opt/mri/build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data $$SESSION
     environment:
       - HDF5_USE_FILE_LOCKING=FALSE
     volumes:
-      - ./session-data:/data/mri_data
+      - ${SESSION_DATA_DIR:-./session-data}:/session-data
+    ports:
+      - "8080:8080"
+      - "8090:8090"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 5s
       timeout: 3s
       start_period: 10s
       retries: 3
-    network_mode: host
+    networks:
+      - cwru-net
 
   robot-marshal:
     image: cwru/robot-marshal:latest
     container_name: cwru-robot-marshal
+    command:
+      - sh
+      - -c
+      - |
+        echo "[Robot Marshal] Starting on http://0.0.0.0:8081"
+        exec ./server
+    ports:
+      - "8081:8081"
     healthcheck:
       test: ["CMD", "curl", "-s", "http://localhost:8081/"]
       interval: 5s
       timeout: 3s
       start_period: 5s
       retries: 3
-    network_mode: host
+    networks:
+      - cwru-net
 
   image-streamer:
     image: cwru/image-streamer:latest
     container_name: cwru-image-streamer
-    command: ["./build/image_streamer", "--http", "http://localhost:8080", "--interval", "${IMAGE_INTERVAL}", "--width", "${IMAGE_WIDTH}", "--height", "${IMAGE_HEIGHT}", "--slices", "${IMAGE_SLICES}"]
+    command: ["./build/image_streamer", "--http", "http://mri-marshal:8080", "--dt-ms", "${IMAGE_INTERVAL}", "--width", "${IMAGE_WIDTH}", "--height", "${IMAGE_HEIGHT}", "--slices", "${IMAGE_SLICES}", "--log-stride", "${IMAGE_LOG_STRIDE}"]
     depends_on:
       mri-marshal:
         condition: service_healthy
-    network_mode: host
+    networks:
+      - cwru-net
 
   ecg-client:
     image: cwru/ecg-client:latest
     container_name: cwru-ecg-client
-    command: ["python3", "ecg_client.py", "--endpoint", "http://localhost:8080", "--count", "0", "--interval", "${ECG_INTERVAL}", "--heart-rate", "${ECG_HEART_RATE}"]
+    command: ["sh", "-c", "sleep 1 && python3 ecg_client.py --endpoint http://mri-marshal:8080 --count 0 --interval ${ECG_INTERVAL} --heart-rate ${ECG_HEART_RATE} --samples 1"]
     depends_on:
       mri-marshal:
         condition: service_healthy
-    network_mode: host
+    networks:
+      - cwru-net
 
   pose-client:
     image: cwru/pose-client:latest
     container_name: cwru-pose-client
-    command: ["python3", "pose_client.py", "--endpoint", "http://localhost:8080", "--count", "0", "--interval", "${POSE_INTERVAL}", "--trajectory", "${POSE_TRAJECTORY}"]
+    command: ["python3", "pose_client.py", "--endpoint", "http://mri-marshal:8080", "--count", "0", "--interval", "${POSE_INTERVAL}", "--trajectory", "${POSE_TRAJECTORY}"]
     depends_on:
       mri-marshal:
         condition: service_healthy
-    network_mode: host
+    networks:
+      - cwru-net
 
   viz-client:
     image: cwru/viz-client:latest
     container_name: cwru-viz-client
-    command: ["./build/viz_client", "--http", "http://localhost:8080/v1/mrd/latest"]
+    command: ["./build/viz_client", "--http", "http://mri-marshal:8080/v1/mrd/latest"]
     environment:
       - DISPLAY=${DISPLAY:-:0}
+      - XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir
+      - WAYLAND_DISPLAY=wayland-0
       - HDF5_USE_FILE_LOCKING=FALSE
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-    network_mode: host
+      - /mnt/wslg:/mnt/wslg:rw
+      - ${SESSION_DATA_DIR:-./session-data}:/session-data:ro
+    depends_on:
+      mri-marshal:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - cwru-net
     profiles:
       - viz
 
@@ -76,57 +108,73 @@ services:
     container_name: cwru-catheter-tracking
     command: ["./catheter-tracking"]
     environment:
-      - ROBOT_MARSHAL_HOST=localhost
+      - ROBOT_MARSHAL_HOST=robot-marshal
       - ROBOT_MARSHAL_PORT=8081
     depends_on:
       robot-marshal:
         condition: service_healthy
-    network_mode: host
+    restart: unless-stopped
+    networks:
+      - cwru-net
 
   controller:
     image: cwru/robot-clients:latest
     container_name: cwru-controller
     command: ["./controller"]
     environment:
-      - ROBOT_MARSHAL_HOST=localhost
+      - ROBOT_MARSHAL_HOST=robot-marshal
       - ROBOT_MARSHAL_PORT=8081
     depends_on:
       robot-marshal:
         condition: service_healthy
-    network_mode: host
+    restart: unless-stopped
+    networks:
+      - cwru-net
 
   planning:
     image: cwru/robot-clients:latest
     container_name: cwru-planning
     command: ["./planning"]
     environment:
-      - ROBOT_MARSHAL_HOST=localhost
+      - ROBOT_MARSHAL_HOST=robot-marshal
       - ROBOT_MARSHAL_PORT=8081
     depends_on:
       robot-marshal:
         condition: service_healthy
-    network_mode: host
+    restart: unless-stopped
+    networks:
+      - cwru-net
 
   front-end:
     image: cwru/robot-clients:latest
     container_name: cwru-front-end
     command: ["./front-end"]
     environment:
-      - ROBOT_MARSHAL_HOST=localhost
+      - ROBOT_MARSHAL_HOST=robot-marshal
       - ROBOT_MARSHAL_PORT=8081
     depends_on:
       robot-marshal:
         condition: service_healthy
-    network_mode: host
+    restart: unless-stopped
+    networks:
+      - cwru-net
 
   surface-tracking:
     image: cwru/robot-clients:latest
     container_name: cwru-surface-tracking
     command: ["./surface-tracking"]
     environment:
-      - ROBOT_MARSHAL_HOST=localhost
+      - ROBOT_MARSHAL_HOST=robot-marshal
       - ROBOT_MARSHAL_PORT=8081
     depends_on:
       robot-marshal:
         condition: service_healthy
-    network_mode: host
+    restart: unless-stopped
+    networks:
+      - cwru-net
+
+networks:
+  cwru-net:
+    name: cwru-demo-net
+    driver: bridge
+    attachable: true
