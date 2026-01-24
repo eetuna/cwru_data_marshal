@@ -1,0 +1,3 @@
+/workspaces/cwru_data_marshal/build/_deps/nlohmann_json-subbuild/CMakeFiles/nlohmann_json-populate.dir
+/workspaces/cwru_data_marshal/build/_deps/nlohmann_json-subbuild/CMakeFiles/edit_cache.dir
+/workspaces/cwru_data_marshal/build/_deps/nlohmann_json-subbuild/CMakeFiles/rebuild_cache.dir

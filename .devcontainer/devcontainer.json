@@ -51,6 +51,7 @@
   "workspaceFolder": "/workspaces/cwru_data_marshal",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/cwru_data_marshal,type=bind,consistency=cached",
   "mounts": [
+    "source=${localWorkspaceFolder}/session-data,target=/workspaces/cwru_data_marshal/session-data,type=bind,consistency=delegated",
     "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind,consistency=cached",
     "source=${localEnv:HOME}/.config/claude,target=/home/vscode/.config/claude,type=bind,consistency=cached",
     "source=${localEnv:HOME}/.vscode-server,target=/home/vscode/.vscode-server,type=bind,consistency=cached",
@@ -63,6 +64,6 @@
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
   ],
   "remoteUser": "vscode",
-  "postCreateCommand": "bash -lc 'set -euo pipefail; mkdir -p /workspaces/cwru_data_marshal/data/mrd /workspaces/cwru_data_marshal/data/dumpbox; echo \"Data root: /workspaces/cwru_data_marshal/data\"; printf \"Devcontainer built using %s\\n\" \".devcontainer/Dockerfile\"; ls -ld /home/vscode/.claude || true; sudo chown -R vscode:vscode /home/vscode/.claude || true'"
+    "postCreateCommand": "bash -lc 'set -euo pipefail; mkdir -p /workspaces/cwru_data_marshal/data/mrd /workspaces/cwru_data_marshal/data/dumpbox; echo \"Data root: /workspaces/cwru_data_marshal/data\"; printf \"Devcontainer built using %s\\n\" \".devcontainer/Dockerfile\"; ls -ld /home/vscode/.claude || true; sudo chown -R vscode:vscode /home/vscode/.claude || true'"
 
 }

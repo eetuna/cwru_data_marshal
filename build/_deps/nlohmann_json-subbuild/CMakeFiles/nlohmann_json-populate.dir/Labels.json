@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/workspaces/cwru_data_marshal/build/_deps/nlohmann_json-subbuild/CMakeFiles/nlohmann_json-populate"
+		},
+		{
+			"file" : "/workspaces/cwru_data_marshal/build/_deps/nlohmann_json-subbuild/CMakeFiles/nlohmann_json-populate.rule"
+		},
+		{
+			"file" : "/workspaces/cwru_data_marshal/build/_deps/nlohmann_json-subbuild/CMakeFiles/nlohmann_json-populate-complete.rule"
+		},
+		{
+			"file" : "/workspaces/cwru_data_marshal/build/_deps/nlohmann_json-subbuild/nlohmann_json-populate-prefix/src/nlohmann_json-populate-stamp/nlohmann_json-populate-build.rule"
+		},
+		{
+			"file" : "/workspaces/cwru_data_marshal/build/_deps/nlohmann_json-subbuild/nlohmann_json-populate-prefix/src/nlohmann_json-populate-stamp/nlohmann_json-populate-configure.rule"
+		},
+		{
+			"file" : "/workspaces/cwru_data_marshal/build/_deps/nlohmann_json-subbuild/nlohmann_json-populate-prefix/src/nlohmann_json-populate-stamp/nlohmann_json-populate-download.rule"
+		},
+		{
+			"file" : "/workspaces/cwru_data_marshal/build/_deps/nlohmann_json-subbuild/nlohmann_json-populate-prefix/src/nlohmann_json-populate-stamp/nlohmann_json-populate-install.rule"
+		},
+		{
+			"file" : "/workspaces/cwru_data_marshal/build/_deps/nlohmann_json-subbuild/nlohmann_json-populate-prefix/src/nlohmann_json-populate-stamp/nlohmann_json-populate-mkdir.rule"
+		},
+		{
+			"file" : "/workspaces/cwru_data_marshal/build/_deps/nlohmann_json-subbuild/nlohmann_json-populate-prefix/src/nlohmann_json-populate-stamp/nlohmann_json-populate-patch.rule"
+		},
+		{
+			"file" : "/workspaces/cwru_data_marshal/build/_deps/nlohmann_json-subbuild/nlohmann_json-populate-prefix/src/nlohmann_json-populate-stamp/nlohmann_json-populate-test.rule"
+		},
+		{
+			"file" : "/workspaces/cwru_data_marshal/build/_deps/nlohmann_json-subbuild/nlohmann_json-populate-prefix/src/nlohmann_json-populate-stamp/nlohmann_json-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"nlohmann_json-populate"
+		],
+		"name" : "nlohmann_json-populate"
+	}
+}
