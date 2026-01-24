@@ -33,7 +33,7 @@ services:
   image-streamer:
     image: cwru/image-streamer:latest
     container_name: cwru-image-streamer
-    command: ["./build/image_streamer", "--http", "http://localhost:8080", "--interval", "${IMAGE_INTERVAL}", "--size", "${IMAGE_SIZE}", "--slices", "${IMAGE_SLICES}"]
+    command: ["./build/image_streamer", "--http", "http://localhost:8080", "--interval", "${IMAGE_INTERVAL}", "--width", "${IMAGE_WIDTH}", "--height", "${IMAGE_HEIGHT}", "--slices", "${IMAGE_SLICES}"]
     depends_on:
       mri-marshal:
         condition: service_healthy

@@ -16,7 +16,7 @@ echo "=========================================="
 echo "  CWRU Data Marshal - Docker Demo"
 echo "=========================================="
 echo "Duration: ${DEMO_DURATION}s"
-echo "Image: ${IMAGE_SIZE}x${IMAGE_SIZE}x${IMAGE_SLICES} @ ${IMAGE_INTERVAL}ms"
+echo "Image: ${IMAGE_WIDTH}x${IMAGE_HEIGHT}x${IMAGE_SLICES} @ ${IMAGE_INTERVAL}ms"
 echo "Cleanup data: ${CLEANUP_DATA}"
 echo "=========================================="
 
