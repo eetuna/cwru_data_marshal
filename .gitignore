@@ -33,6 +33,7 @@ robot_marshal_tmp_src/
 # IDE/editor
 .vscode/
 .idea/
+#.claude/
 *.swp
 *.swo
 *~

@@ -74,7 +74,11 @@
       "Bash(git push:*)",
       "Bash(git branch:*)",
       "Bash(git -C /workspaces/cwru_data_marshal log --oneline)",
-      "Bash(ctest:*)"
+      "Bash(ctest:*)",
+      "Bash(git worktree:*)",
+      "Bash(git -C /workspaces/cwru_data_marshal worktree add:*)",
+      "Bash(./server:*)",
+      "Bash(git stash:*)"
     ]
   }
 }
