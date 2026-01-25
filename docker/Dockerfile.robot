@@ -18,10 +18,7 @@ COPY file*.json /opt/robot/
 # Create directories - /files is where the server looks for data files
 RUN mkdir -p /opt/robot/log_files /files
 
-# Patch server.cpp to listen on 0.0.0.0:8081 instead of hardcoded 172.28.1.10:8080
-RUN sed -i 's/server.listen("172.28.1.10", 8080)/server.listen("0.0.0.0", 8081)/' /opt/robot/server.cpp
-
-# Build the server
+# Build the server (supports --http command-line arg, no sed patch needed)
 RUN g++ -std=c++17 /opt/robot/server.cpp -o /opt/robot/server -lpthread
 
 WORKDIR /opt/robot
@@ -43,4 +40,5 @@ EXPOSE 8081
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -sf http://localhost:8081/ || exit 1
 
-CMD ["./server"]
+# Default command (can override with --http in docker-compose)
+CMD ["./server", "--http", "0.0.0.0:8081"]
