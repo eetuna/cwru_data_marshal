@@ -501,6 +501,8 @@ int main(int argc, char **argv)
         if (fps_elapsed >= 1.0)
         {
             current_fps = frame_count / fps_elapsed;
+            std::cerr << "[FPS DEBUG] Elapsed: " << fps_elapsed << "s, Frames: " << frame_count
+                      << ", FPS: " << current_fps << "\n" << std::flush;
             frame_count = 0;
             fps_start = fps_now;
         }
