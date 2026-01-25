@@ -1,118 +1,204 @@
 # HANDOVER TO NEXT AGENT - MRI Data Marshal
 
-## STATUS: Fixes Applied - Needs Commit & Push
-
-### Changes Made This Session (on `mri-data-marhsal` branch)
-
-1. **✅ Fixed flush parameters**:
-   - `src/marshal_state.hpp:58` - Changed `{4, 50ms}` to `{1, 0ms}`
-   - `src/marshal_main.cpp:100-101` - Changed defaults to `1` and `0`
-   - Marshal now flushes after every frame (correct for SWMR)
-   - Verified working: logs show `flush_frames=1 flush_ms=0`
-
-2. **✅ Added `--log-stride` CLI argument to image_streamer**:
-   - `clients/image_streamer/image_streamer_main.cpp`
-   - Added `log_stride` to Options struct (default: 10)
-   - Added `--log-stride` argument parsing
-   - Fixed "Unknown option: --log-stride" Docker error
-
-### TODO: Commit and Push
-```bash
-git add src/marshal_state.hpp src/marshal_main.cpp clients/image_streamer/image_streamer_main.cpp
-git commit -m "Fix flush defaults to 1/0 and add --log-stride to image_streamer
-
-- Changed flush_max_frames from 4 to 1 (flush every frame)
-- Changed flush_max_ms from 50 to 0 (no time delay)
-- Added --log-stride CLI arg to image_streamer for Docker compatibility
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
-git push origin mri-data-marhsal
-```
-
----
-
-## INVESTIGATION NEEDED: Branch Differences
-
-**User Request:** Investigate what are the differences between branches and why worktrees existed.
-
-### Branches to Compare:
-1. `main` - Base branch (Docker demo configs)
-2. `mri-data-marhsal` - MRI marshal with SWMR metadata-only endpoints
-3. `robot_data_marshal_with_catheter_system_components` - Robot marshal with CLI args
-4. `integrate/robot-catheter` - Older integration branch
-
-### Questions to Answer:
-1. What unique features does each branch have?
-2. Should they be merged into `main`?
-3. Are there conflicts between them?
-4. What's the proper merge order/strategy?
-
-### Worktrees That Existed (now deleted):
-```
-~/research/catheter/cwru_data_marshal/.worktrees/mri_data_marshal    -> mri-data-marhsal
-~/research/catheter/cwru_data_marshal/.worktrees/robot_data_marshal  -> robot_data_marshal_with_catheter_system_components
-```
-
-User removed with: `rm -rf ~/research/catheter/cwru_data_marshal/.worktrees`
-
----
-
-## Branch Differences Summary (from this session's analysis)
-
-### `mri-data-marhsal` vs `integrate/robot-catheter`:
-
-**mri-data-marhsal HAS (integrate/robot-catheter does NOT):**
-- GET `/v1/mrd/frame` endpoint (returns JSON metadata)
-- GET `/v1/mrd/ingest` endpoint (returns JSON metadata)
-- `FrameReadResult` struct in `include/mrd_sink.hpp`
-- `MrdSink::read_frame()` method (~136 lines)
-- Mock clients: `clients/mocks/ecg_client.py`, `pose_client.py`
-- Archive: `archive/http_binary_mode/marshal_http_archive.hpp`
-- Documentation: 5 docs in `docs/` folder
-
-**Both branches have SAME (wrong before fix):**
-- Flush parameters `flush_frames=4, flush_ms=50` (now fixed on mri-data-marhsal)
-
-### `feature/production-safety-improvements` branch:
-- Has the "correct" flush fix (removed FlushPolicy entirely)
-- Commit 3a47c86: "feat: add graceful shutdown and remove batch flush policy"
-- **Never merged into any other branch**
-- We applied a simpler fix (change defaults to 1/0) instead
-
----
-
-## Git History Reference
-
-### Key Commits on `mri-data-marhsal`:
-- **057fa6b** - "fixed the marshal and viz client" - Added SWMR metadata-only endpoints
-- **4de30c4** - "Add GET endpoints for /v1/mrd/frame and /v1/mrd/ingest" - Initial binary endpoints
-
-### What 057fa6b Did:
-- Changed GET `/v1/mrd/frame` from binary to JSON metadata
-- Changed GET `/v1/mrd/ingest` from binary to JSON metadata
-- Added archive file with old binary implementation
-- Added 5 documentation files
-
----
-
-## Current State
+## STATUS: Threading Architecture Implementation Required
 
 **Branch:** `mri-data-marhsal`
 
-**Modified files (not committed):**
-- `src/marshal_state.hpp` - flush policy fix
-- `src/marshal_main.cpp` - flush defaults fix
-- `clients/image_streamer/image_streamer_main.cpp` - --log-stride arg
-
-**Tests:** All 9/9 pass ✓
-
-**Docker:** Marshal shows correct `flush_frames=1 flush_ms=0` in logs
+**Critical Issue:** Single-threaded server causing client timeouts under high load.
 
 ---
 
-## Next Steps
+## Problem Summary
 
-1. Commit and push the changes (see command above)
-2. Investigate branch differences and determine merge strategy
-3. Consider merging `mri-data-marhsal` features into `main`
-4. Rebuild Docker images after merge
+The MRI marshal uses a **single-threaded** `boost::asio::io_context`:
+
+```cpp
+// src/marshal_main.cpp:171
+boost::asio::io_context ioc{1};  // Single thread!
+```
+
+With concurrent clients (image_streamer at 20fps + ecg + pose + viz), the single thread blocks on HDF5 writes, causing other clients to timeout:
+
+```
+cwru-ecg-client  | TimeoutError: timed out
+cwru-pose-client | TimeoutError: timed out
+```
+
+---
+
+## Your Task: Implement Threading Architecture
+
+### Documentation
+
+**READ FIRST:** `docs/THREADING_ARCHITECTURE_OPTIONS.md`
+
+Contains complete implementation details for:
+- **Option 1:** Multi-threaded io_context (simple, 10 min)
+- **Option 2:** Async write queue (better architecture, 2-3 hours)
+- **Option 1+2:** Combined (production-ready)
+
+---
+
+## Implementation Steps
+
+### Step 1: Create branch for Option 1
+
+```bash
+git checkout mri-data-marhsal
+git checkout -b feature/multi-threaded-io
+```
+
+### Step 2: Implement Option 1
+
+**File:** `src/marshal_main.cpp`
+
+**Change line 171:**
+```cpp
+// OLD:
+boost::asio::io_context ioc{1};
+
+// NEW:
+boost::asio::io_context ioc{4};  // 4 threads
+```
+
+**Change line 290:**
+```cpp
+// OLD:
+ioc.run();
+
+// NEW:
+const unsigned int num_threads = 4;
+std::vector<std::thread> io_threads;
+for (unsigned int i = 0; i < num_threads - 1; ++i) {
+    io_threads.emplace_back([&ioc]() { ioc.run(); });
+}
+ioc.run();
+for (auto& t : io_threads) {
+    if (t.joinable()) t.join();
+}
+```
+
+**Add include at top:**
+```cpp
+#include <vector>
+```
+
+### Step 3: Build and Test
+
+```bash
+mkdir -p build && cd build
+cmake .. -DBUILD_TESTING=ON
+cmake --build . --parallel
+ctest --output-on-failure
+```
+
+### Step 4: Rebuild Docker image
+
+```bash
+cd /workspaces/cwru_data_marshal
+./scripts/build-client-images.sh
+```
+
+### Step 5: Run full demo test
+
+```bash
+docker compose --env-file .env.demo -f docker-compose.demo.yml up
+```
+
+**Verify:**
+- No TimeoutError in ecg-client, pose-client logs
+- Demo runs for 5+ minutes without crashes
+- All clients remain connected
+
+### Step 6: Commit and push
+
+```bash
+git add src/marshal_main.cpp
+git commit -m "feat: Multi-threaded io_context for concurrent request handling
+
+- Changed io_context from 1 to 4 threads
+- Added thread pool to run io_context concurrently
+- Fixes timeout issues with concurrent bio/pose/viz clients
+
+Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
+git push origin feature/multi-threaded-io
+```
+
+---
+
+## Optional: Implement Option 2 (Async Write Queue)
+
+If Option 1 performance is insufficient, add Option 2:
+
+```bash
+git checkout -b feature/async-write-queue
+```
+
+See `docs/THREADING_ARCHITECTURE_OPTIONS.md` for full implementation details.
+
+---
+
+## Benchmark Comparison
+
+After implementation, compare:
+
+| Metric | Before | Option 1 | Option 1+2 |
+|--------|--------|----------|------------|
+| ECG timeout rate | High | Low | None |
+| Response latency | 20-50ms | 10-30ms | 1-5ms |
+| Max sustained fps | ~10 | ~30 | ~100+ |
+
+---
+
+## Files Reference
+
+### Key files to modify:
+- `src/marshal_main.cpp` - io_context and thread pool
+- `src/marshal_state.hpp` - add queue members (Option 2 only)
+- `src/marshal_http.hpp` - async write handlers (Option 2 only)
+
+### Documentation:
+- `docs/THREADING_ARCHITECTURE_OPTIONS.md` - **Complete implementation guide**
+- `docs/USAGE_AND_API.md` - API reference
+- `docs/DEMO_GUIDE.md` - Demo instructions
+
+---
+
+## Previous Session Notes
+
+### Already completed:
+- ✅ Fixed flush parameters to `{1, 0ms}` (flush every frame)
+- ✅ Added `--log-stride` CLI arg to image_streamer
+- ✅ Worktrees cleaned up (`git worktree prune`)
+- ✅ Created threading architecture documentation
+
+### Branch structure:
+- `main` - Docker demo configs
+- `mri-data-marhsal` - Current working branch (start here)
+- `integrate/robot-catheter` - Older integration (reference only)
+- `robot_data_marshal_with_catheter_system_components` - Robot marshal with async caching (reference for Option 2)
+
+---
+
+## Quick Start
+
+```bash
+# 1. Switch to branch
+git checkout mri-data-marhsal
+
+# 2. Read the docs
+cat docs/THREADING_ARCHITECTURE_OPTIONS.md
+
+# 3. Create feature branch
+git checkout -b feature/multi-threaded-io
+
+# 4. Make changes to src/marshal_main.cpp (lines 171 and 290)
+
+# 5. Build and test
+mkdir -p build && cd build && cmake .. && make -j
+
+# 6. Run docker demo and verify no timeouts
+docker compose --env-file .env.demo -f docker-compose.demo.yml up
+```
+
+Good luck!
