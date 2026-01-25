@@ -25,6 +25,7 @@ files/
 log_files/
 files.json
 file_routes.json
+session-data/
 
 # Temporary build directories
 robot_marshal_build_tmp/
