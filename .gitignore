@@ -1,8 +1,29 @@
-# Demo data directory (generated at runtime)
+# Build artifacts
+/build/
+/out/
+/bin/
+/obj/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/compile_commands.json
+
+# Data directories (generated at runtime)
 session-data/
+data/
+data_*/
 
 # Worktrees directory (for Docker image builds)
 .worktrees/
 
 # Backup files
 *.bak
+
+# IDE/editor
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+.DS_Store
