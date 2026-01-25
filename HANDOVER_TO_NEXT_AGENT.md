@@ -1,197 +1,118 @@
-# HANDOVER TO NEXT AGENT - MRI Data Marshal Issues
+# HANDOVER TO NEXT AGENT - MRI Data Marshal
 
-## CRITICAL ISSUE: Marshal Implementation is Broken
+## STATUS: Fixes Applied - Needs Commit & Push
 
-The MRI marshal on the `mri-data-marhsal` branch has INCORRECT default flush parameters that were supposed to be removed from the implementation.
+### Changes Made This Session (on `mri-data-marhsal` branch)
 
-### Current Problem
+1. **✅ Fixed flush parameters**:
+   - `src/marshal_state.hpp:58` - Changed `{4, 50ms}` to `{1, 0ms}`
+   - `src/marshal_main.cpp:100-101` - Changed defaults to `1` and `0`
+   - Marshal now flushes after every frame (correct for SWMR)
+   - Verified working: logs show `flush_frames=1 flush_ms=0`
 
-**Location:** `src/marshal_main.cpp:100-101`
+2. **✅ Added `--log-stride` CLI argument to image_streamer**:
+   - `clients/image_streamer/image_streamer_main.cpp`
+   - Added `log_stride` to Options struct (default: 10)
+   - Added `--log-stride` argument parsing
+   - Fixed "Unknown option: --log-stride" Docker error
 
-```cpp
-std::size_t flush_max_frames = 4;  // ← WRONG VALUES
-int flush_max_ms = 50;              // ← WRONG VALUES
+### TODO: Commit and Push
+```bash
+git add src/marshal_state.hpp src/marshal_main.cpp clients/image_streamer/image_streamer_main.cpp
+git commit -m "Fix flush defaults to 1/0 and add --log-stride to image_streamer
+
+- Changed flush_max_frames from 4 to 1 (flush every frame)
+- Changed flush_max_ms from 50 to 0 (no time delay)
+- Added --log-stride CLI arg to image_streamer for Docker compatibility
+
+Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
+git push origin mri-data-marhsal
 ```
-
-**What's showing in logs:**
-```
-marshal listening http=0.0.0.0:8080 ws=0.0.0.0:8090 data=/session-data/run_20260125_001703
-max_body=134217728 sink=mrd flush_frames=4 flush_ms=50 shutdown_timeout=30s
-```
-
-**The Issue:**
-These flush parameters were supposed to be REMOVED from the implementation entirely according to previous work, but they're still there with wrong hardcoded defaults.
 
 ---
 
-## Your Task
+## INVESTIGATION NEEDED: Branch Differences
 
-### Step 1: Review All Documentation
+**User Request:** Investigate what are the differences between branches and why worktrees existed.
 
-**CRITICAL:** Read ALL documentation files in the `mri-data-marhsal` branch to understand what was done previously:
+### Branches to Compare:
+1. `main` - Base branch (Docker demo configs)
+2. `mri-data-marhsal` - MRI marshal with SWMR metadata-only endpoints
+3. `robot_data_marshal_with_catheter_system_components` - Robot marshal with CLI args
+4. `integrate/robot-catheter` - Older integration branch
 
-```bash
-git checkout mri-data-marhsal
+### Questions to Answer:
+1. What unique features does each branch have?
+2. Should they be merged into `main`?
+3. Are there conflicts between them?
+4. What's the proper merge order/strategy?
 
-# Read these files in order:
-cat docs/HANDOVER_SWMR_IMPLEMENTATION.md
-cat docs/CORRECTED_ARCHIVE_IMPLEMENTATION.md
-cat docs/IMPLEMENTATION_STATUS.md
-cat docs/QUICK_REFERENCE.md
-cat docs/PROMPT_FOR_NEXT_AGENT.md
+### Worktrees That Existed (now deleted):
+```
+~/research/catheter/cwru_data_marshal/.worktrees/mri_data_marshal    -> mri-data-marhsal
+~/research/catheter/cwru_data_marshal/.worktrees/robot_data_marshal  -> robot_data_marshal_with_catheter_system_components
 ```
 
-These docs explain:
-- What the SWMR metadata-only architecture should be
-- What changes were made (or should have been made)
-- Why flush parameters are wrong
-- What the correct implementation should look like
-
-### Step 2: Understand the Flush Issue
-
-Based on the documentation, determine:
-1. **Should flush parameters exist at all?**
-   - If yes, what should the values be?
-   - If no, how should they be removed?
-
-2. **What is the correct behavior?**
-   - Check if flush was part of the old binary mode that was removed
-   - Verify if SWMR mode needs different flush handling
-
-### Step 3: Fix the Implementation
-
-After reading the docs, you'll know:
-- Whether to remove flush_max_frames and flush_max_ms entirely
-- Or update them to correct values
-- Or change the implementation approach
-
-**Files to potentially modify:**
-- `src/marshal_main.cpp` (lines 100-101, 181-182, 285-286)
-- `src/mrd_sink.cpp` (flush_policy implementation)
-- `src/marshal_http.hpp` (if related to metadata-only changes)
-
-### Step 4: Verify Against Documentation
-
-Cross-check your changes against:
-- `CORRECTED_ARCHIVE_IMPLEMENTATION.md` - Has the REAL working code
-- `HANDOVER_SWMR_IMPLEMENTATION.md` - Complete implementation guide
-- `IMPLEMENTATION_STATUS.md` - What should be done vs what is done
-
-### Step 5: Test
-
-```bash
-cd /workspaces/cwru_data_marshal
-mkdir -p build && cd build
-cmake .. -DBUILD_TESTING=ON
-cmake --build . --parallel
-ctest --output-on-failure
-```
-
-Expected: All tests pass ✓
-
-### Step 6: Update Docker
-
-After fixing the marshal, rebuild the Docker image:
-```bash
-git checkout main
-./scripts/build-client-images.sh
-```
-
-Test the demo:
-```bash
-./scripts/demo-docker.sh
-```
-
-Verify the marshal logs show correct behavior (no wrong flush values).
+User removed with: `rm -rf ~/research/catheter/cwru_data_marshal/.worktrees`
 
 ---
 
-## Context from Current Session
+## Branch Differences Summary (from this session's analysis)
 
-### What We Accomplished Today
+### `mri-data-marhsal` vs `integrate/robot-catheter`:
 
-1. ✅ **Fixed robot marshal** - Added command-line args to `server.cpp`
-   - Branch: `robot_data_marshal_with_catheter_system_components`
-   - Commit: `0958604` - Added `--http`, `--host`, `--port` arguments
-   - Eliminates sed patch hack
+**mri-data-marhsal HAS (integrate/robot-catheter does NOT):**
+- GET `/v1/mrd/frame` endpoint (returns JSON metadata)
+- GET `/v1/mrd/ingest` endpoint (returns JSON metadata)
+- `FrameReadResult` struct in `include/mrd_sink.hpp`
+- `MrdSink::read_frame()` method (~136 lines)
+- Mock clients: `clients/mocks/ecg_client.py`, `pose_client.py`
+- Archive: `archive/http_binary_mode/marshal_http_archive.hpp`
+- Documentation: 5 docs in `docs/` folder
 
-2. ✅ **Updated main branch** - Removed sed patches
-   - Branch: `main`
-   - Commits: `c2c1180`, `0a6a375`
-   - Updated Dockerfile.robot and docker-compose.demo.yml
-   - Fixed .gitignore
+**Both branches have SAME (wrong before fix):**
+- Flush parameters `flush_frames=4, flush_ms=50` (now fixed on mri-data-marhsal)
 
-3. ✅ **Pushed all branches** - To origin and upstream
-
-### What's Broken
-
-4. ❌ **MRI marshal has wrong flush defaults** - Needs investigation
-   - Branch: `mri-data-marhsal`
-   - Issue: Hardcoded flush_frames=4, flush_ms=50
-   - Previous agent made changes that were "lost when worktree was deleted"
-   - Full documentation exists but implementation doesn't match
+### `feature/production-safety-improvements` branch:
+- Has the "correct" flush fix (removed FlushPolicy entirely)
+- Commit 3a47c86: "feat: add graceful shutdown and remove batch flush policy"
+- **Never merged into any other branch**
+- We applied a simpler fix (change defaults to 1/0) instead
 
 ---
 
-## What Happened - Git History Analysis
+## Git History Reference
 
-**User's report:** "they deleted the latest marshal and brought back the older one"
+### Key Commits on `mri-data-marhsal`:
+- **057fa6b** - "fixed the marshal and viz client" - Added SWMR metadata-only endpoints
+- **4de30c4** - "Add GET endpoints for /v1/mrd/frame and /v1/mrd/ingest" - Initial binary endpoints
 
-**Key commits to investigate:**
-
-1. **057fa6b** - "fixed the marshal and viz client" (Jan 24 23:31)
-   - Added archive/http_binary_mode/marshal_http_archive.hpp
-   - Added 5 new docs (CORRECTED_ARCHIVE_IMPLEMENTATION.md, etc.)
-   - Modified src/marshal_http.hpp
-   - This is where the SWMR metadata-only changes SHOULD have been applied
-
-2. **4de30c4** - "Add GET endpoints for /v1/mrd/frame and /v1/mrd/ingest"
-   - This might have added back old endpoints or overwritten the new ones
-
-**What to check:**
-
-```bash
-# Compare the current marshal_http.hpp with what it should be
-git show 057fa6b:src/marshal_http.hpp > /tmp/marshal_http_057fa6b.hpp
-diff /tmp/marshal_http_057fa6b.hpp src/marshal_http.hpp
-
-# Check if the archive file exists (it should)
-ls -la archive/http_binary_mode/marshal_http_archive.hpp
-
-# Check what 4de30c4 actually changed
-git show 4de30c4 --stat
-git show 4de30c4 src/marshal_http.hpp
-```
-
-**Hypothesis:** Commit 4de30c4 may have overwritten the SWMR metadata-only changes from 057fa6b, bringing back old binary-mode code with flush parameters.
-
-**How to fix:**
-1. Check the diff between 057fa6b and current HEAD
-2. See if marshal_http.hpp was reverted to old implementation
-3. Re-apply the correct SWMR metadata-only changes from docs
-4. Remove flush parameters entirely (they belong to old binary mode)
-
-## Important Notes
-
-- **Don't guess** - Read the documentation files first AND check git history
-- The docs were written by previous agents who understood the architecture
-- `CORRECTED_ARCHIVE_IMPLEMENTATION.md` has REAL C++ code, not just docs
-- The issue might be that SWMR changes were never fully applied
-- Or a later commit reverted the changes back to old binary mode
-- Or the flush implementation conflicts with metadata-only mode
-- **User says: someone deleted the latest marshal and brought back an older one** - investigate commits 057fa6b vs 4de30c4
+### What 057fa6b Did:
+- Changed GET `/v1/mrd/frame` from binary to JSON metadata
+- Changed GET `/v1/mrd/ingest` from binary to JSON metadata
+- Added archive file with old binary implementation
+- Added 5 documentation files
 
 ---
 
 ## Current State
 
-**Branches:**
-- `main` - Clean, ready for demo builds
-- `robot_data_marshal_with_catheter_system_components` - Fixed, pushed to upstream
-- `mri-data-marhsal` - **HAS ISSUES**, needs investigation based on docs
+**Branch:** `mri-data-marhsal`
 
-**Working Directory:** `/workspaces/cwru_data_marshal`
+**Modified files (not committed):**
+- `src/marshal_state.hpp` - flush policy fix
+- `src/marshal_main.cpp` - flush defaults fix
+- `clients/image_streamer/image_streamer_main.cpp` - --log-stride arg
 
-**Current Branch:** `mri-data-marhsal`
+**Tests:** All 9/9 pass ✓
 
-Good luck! Start by reading those docs - they have all the answers.
+**Docker:** Marshal shows correct `flush_frames=1 flush_ms=0` in logs
+
+---
+
+## Next Steps
+
+1. Commit and push the changes (see command above)
+2. Investigate branch differences and determine merge strategy
+3. Consider merging `mri-data-marhsal` features into `main`
+4. Rebuild Docker images after merge
