@@ -97,8 +97,8 @@ int main(int argc, char **argv)
     std::string sink = "mrd"; // "mrd" or "dumpbox"
     std::string dumpbox_root = "./data/dumpbox";
     std::string dumpbox_session = "";
-    std::size_t flush_max_frames = 4;
-    int flush_max_ms = 50;
+    std::size_t flush_max_frames = 1;
+    int flush_max_ms = 0;
     std::size_t max_body_size = 128ULL * 1024ULL * 1024ULL;
     int shutdown_timeout_sec = 30;
 

@@ -55,7 +55,7 @@ struct MarshalState
     std::string dumpbox_root{"./data/dumpbox"};
     std::string dumpbox_session{};
     std::atomic<uint64_t> seq{0};
-    mrd::FlushPolicy flush_policy{4, std::chrono::milliseconds{50}};
+    mrd::FlushPolicy flush_policy{1, std::chrono::milliseconds{0}};
 
     PoseStore poses;
     std::string data_dir{"./data"};
