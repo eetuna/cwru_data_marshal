@@ -26,6 +26,7 @@ struct Options {
     std::uint16_t nx{32};
     std::uint16_t ny{32};
     std::uint16_t nz{4};
+    std::size_t log_stride{10};
 };
 
 Options parse_args(int argc, char **argv) {
@@ -64,6 +65,8 @@ Options parse_args(int argc, char **argv) {
             opt.nz = static_cast<std::uint16_t>(std::stoi(next()));
         } else if (arg == "--nslices") {
             opt.nz = static_cast<std::uint16_t>(std::stoi(next()));
+        } else if (arg == "--log-stride") {
+            opt.log_stride = static_cast<std::size_t>(std::stoull(next()));
         } else {
             std::cerr << "Unknown option: " << arg << "\n";
             std::exit(1);
@@ -173,7 +176,7 @@ int main(int argc, char **argv) {
         std::vector<uint8_t> body(header_bytes + payload_bytes);
         std::size_t frame_index = 0;
         const std::size_t total_frames = opt.frames;
-        const std::size_t log_stride = 10;
+        const std::size_t log_stride = opt.log_stride;
 
         while (total_frames == 0 || frame_index < total_frames) {
             head.image_index = static_cast<uint16_t>((frame_index % 65535) + 1);
