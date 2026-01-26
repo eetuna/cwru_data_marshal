@@ -140,7 +140,15 @@
       "Bash(sudo lsof:*)",
       "Bash(ctest:*)",
       "Bash(mount:*)",
-      "Bash(findmnt:*)"
+      "Bash(findmnt:*)",
+      "Bash(docker container ls:*)",
+      "Bash(docker rmi:*)",
+      "Bash(git -C /workspaces/cwru_data_marshal/.worktrees/mri_data_marshal status include/mrd_io.hpp)",
+      "Bash(docker kill:*)",
+      "Bash(__NEW_LINE_a0eb8f5f9466c0c4__ echo \"Log file size:\")",
+      "Bash(# Run Test 2: fsync disabled echo \"\"Starting Test 2: fsync disabled\"\" docker compose --profile viz --env-file .env.demo -f docker-compose.demo.yml up -d 2>&1 sleep 5 echo \"\"Containers started, waiting 90 seconds...\"\" sleep 90 echo \"\"Capturing logs...\"\" docker logs cwru-viz-client 2>&1)",
+      "Bash(1 echo \"Test 2 complete\")",
+      "Bash(git stash:*)"
     ]
   }
 }
