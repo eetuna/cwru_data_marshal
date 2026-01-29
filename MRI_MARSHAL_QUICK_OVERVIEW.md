@@ -48,53 +48,57 @@
        │
        │ Raw k-space OR Reconstructed
        ▼
-┌────────────────────────────────────────────────────┐
-│            MRI Marshal (Enhanced)                  │
-│                                                    │
-│  ┌──────────────────────────────────────────┐     │
-│  │ POST /v1/mrd/frame (Smart Endpoint)      │     │
-│  │                                          │     │
-│  │         Auto-Detect Data Type            │     │
-│  │    ┌────────────┬────────────┐          │     │
-│  │    │            │            │          │     │
-│  │    ▼            ▼            ▼          │     │
-│  │  Raw K-Space  Image      HDF5          │     │
-│  └────┬────────────┬────────────┬──────────┘     │
-│       │            │            │                 │
-│       ▼            │            │                 │
-│  ┌─────────────┐   │            │                 │
-│  │ Buffer      │   │            │                 │
-│  │ Acquisitions│   │            │                 │
-│  └──────┬──────┘   │            │                 │
-│         │          │            │                 │
-│         ▼          │            │                 │
-│  ┌─────────────┐   │            │                 │
-│  │ Send to     │───┼────────────┘                 │
-│  │ Recon       │   │                              │
-│  │ Service     │   │                              │
-│  └──────┬──────┘   │                              │
-│         │          │                              │
-│         │ callback │                              │
-│         └────────► │                              │
-│                    │                              │
-│                    ▼                              │
-│          ┌──────────────────┐                     │
-│          │  HDF5 Storage    │                     │
-│          │  (demo.mrd)      │                     │
-│          └──────────────────┘                     │
-└────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Viz Clients    │
-└─────────────────┘
-
-           │
-           └──────────────► ┌──────────────────┐
-                            │ Reconstruction   │
-                            │ Service          │
-                            │ (External HTTP)  │
-                            └──────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│              MRI Marshal (Enhanced)                     │
+│                                                         │
+│  ┌───────────────────────────────────────────┐         │
+│  │ POST /v1/mrd/frame OR /v1/mrd/ingest     │         │
+│  │                                           │         │
+│  │       Auto-Detect Data Type               │         │
+│  │    ┌───────────┬──────────┬───────┐      │         │
+│  │    ▼           ▼          ▼       ▼      │         │
+│  │  Raw K       Image     HDF5    Unknown   │         │
+│  └───┬───────────┬──────────┬───────┬───────┘         │
+│      │           │          │       │                  │
+│      │           │          │       └─► HTTP 400       │
+│      │           │          │          "Invalid"       │
+│      │           │          │                          │
+│      │           │          └─► HTTP 201               │
+│      │           │             Store as-is             │
+│      │           │                                     │
+│      │           └─► HTTP 200                          │
+│      │              Store to SWMR ───┐                 │
+│      │                                │                 │
+│      │ HTTP POST                      │                 │
+│      └──────────────┐                 │                 │
+│                     │                 │                 │
+└─────────────────────┼─────────────────┼─────────────────┘
+                      │                 │
+                      ▼                 │
+         ┌──────────────────────┐       │
+         │  Reconstruction      │       │
+         │  Service (External)  │       │
+         │  - Gadgetron         │       │
+         │  - Custom service    │       │
+         └──────────┬───────────┘       │
+                    │                   │
+                    │ HTTP 200          │
+                    │ Reconstructed     │
+                    │ ImageHeader +     │
+                    │ pixels            │
+                    ▼                   │
+         ┌──────────────────────┐       │
+         │  Store to SWMR       │       │
+         │  (demo.mrd)          │       │
+         └──────────┬───────────┘       │
+                    │                   │
+                    └───────────────────┘
+                            │
+                            ▼
+                   ┌─────────────────┐
+                   │  Viz Clients    │
+                   │  (Read SWMR)    │
+                   └─────────────────┘
 ```
 
 ---
@@ -117,9 +121,9 @@ Marshal checks:
 
 | Data Type | /v1/mrd/frame | /v1/mrd/ingest |
 |-----------|---------------|----------------|
-| **Raw k-space** | Not yet supported (future: buffer → recon) | Rejected (use /frame) |
-| **Reconstructed** | Store directly (existing) | Allowed with warning |
-| **HDF5 file** | Forward to /ingest | Save as-is (expected) |
+| **Raw k-space** | → Forward to recon service (future) | → Forward to recon service (future) |
+| **Reconstructed** | → Store directly (existing) | → Allowed with warning |
+| **HDF5 file** | → Forward to /ingest | → Save as-is (expected) |
 
 ### 3. **Store** final result
 

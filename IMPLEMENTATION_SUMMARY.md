@@ -52,19 +52,20 @@ POST /v1/mrd/frame                    POST /v1/mrd/ingest
   ├─ Detect type automatically          ├─ Detect type automatically
   │                                     │
   ├─ ACQUISITION (raw k-space)          ├─ ACQUISITION (raw k-space)
-  │  └─ Return HTTP 501 Not Impl        │  └─ Return HTTP 400 Bad Request
-  │     (Future: buffer → recon)        │     (Use /frame instead)
+  │  └─ HTTP 501 Not Implemented        │  └─ HTTP 501 Not Implemented
+  │     TODO: Forward to recon service  │     TODO: Forward to recon service
   │                                     │
   ├─ HDF5_FILE                          ├─ HDF5_FILE
-  │  └─ Forward to /v1/mrd/ingest       │  └─ Process normally (expected)
+  │  └─ Forward to /v1/mrd/ingest       │  └─ Store as-is (expected)
   │     (Auto-redirect)                 │     (Batch upload)
   │                                     │
   ├─ IMAGE (reconstructed)              ├─ IMAGE (reconstructed)
-  │  └─ Process normally                │  └─ Process with warning
-  │     (Store to SWMR)                 │     (Suggest using /frame)
+  │  └─ Store to SWMR                   │  └─ Store to SWMR (with warning)
+  │     (Existing behavior)             │     (Suggest using /frame)
   │                                     │
   └─ UNKNOWN                            └─ UNKNOWN
-     └─ Return HTTP 400 Bad Request        └─ Return HTTP 400 Bad Request
+     └─ HTTP 400 Bad Request               └─ HTTP 400 Bad Request
+        (Invalid format)                      (Invalid format)
 ```
 
 ## What It Does
