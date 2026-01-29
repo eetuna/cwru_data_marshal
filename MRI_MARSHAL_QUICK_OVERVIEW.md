@@ -84,21 +84,28 @@
                     │                   │
                     │ HTTP 200          │
                     │ Reconstructed     │
-                    │ ImageHeader +     │
-                    │ pixels            │
+                    │ ImageHeader       │
+                    │ + pixels          │
                     ▼                   │
-         ┌──────────────────────┐       │
-         │  Store to SWMR       │       │
-         │  (demo.mrd)          │       │
-         └──────────┬───────────┘       │
-                    │                   │
-                    └───────────────────┘
-                            │
-                            ▼
-                   ┌─────────────────┐
-                   │  Viz Clients    │
-                   │  (Read SWMR)    │
-                   └─────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│              MRI Marshal (Store)                        │
+│                                                         │
+│  If from /frame:  → Append to SWMR                     │
+│  If from /ingest: → Save complete file                 │
+│                                                         │
+│  ┌───────────────────┐      ┌──────────────────┐      │
+│  │  SWMR Storage     │      │  Complete Files  │      │
+│  │  (demo.mrd)       │      │  (batch.mrd)     │      │
+│  │  - Frame-by-frame │      │  - Complete scan │      │
+│  └─────────┬─────────┘      └────────┬─────────┘      │
+└────────────┼────────────────────────┼──────────────────┘
+             │                        │
+             └────────────┬───────────┘
+                          ▼
+                 ┌─────────────────┐
+                 │  Viz Clients    │
+                 │  (Read files)   │
+                 └─────────────────┘
 ```
 
 ---
