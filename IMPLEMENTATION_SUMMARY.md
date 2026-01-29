@@ -37,34 +37,34 @@ enum class MrdDataType {
   - `data_type`: 1-10 (valid ISMRMRD types)
 
 ### 2. `src/marshal_http.hpp` (MODIFIED)
-**Purpose:** Enhanced `/v1/mrd/frame` endpoint with smart routing
+**Purpose:** Enhanced `/v1/mrd/frame` and `/v1/mrd/ingest` endpoints with smart routing
 
 **Changes:**
 1. Added `#include "mrd_type_detector.hpp"`
-2. Added automatic type detection before processing
+2. Added automatic type detection before processing (both endpoints)
 3. Added routing logic based on detected type
 
 **New Behavior:**
 
 ```
-POST /v1/mrd/frame
-  │
-  ├─ Detect type automatically
-  │
-  ├─ ACQUISITION (raw k-space)
-  │  └─ Return HTTP 501 Not Implemented
-  │     (Future: route to reconstruction service)
-  │
-  ├─ HDF5_FILE
-  │  └─ Forward to /v1/mrd/ingest
-  │     (Complete file upload)
-  │
-  ├─ IMAGE (reconstructed)
-  │  └─ Process normally
-  │     (Existing behavior - store to SWMR)
-  │
-  └─ UNKNOWN
-     └─ Return HTTP 400 Bad Request
+POST /v1/mrd/frame                    POST /v1/mrd/ingest
+  │                                     │
+  ├─ Detect type automatically          ├─ Detect type automatically
+  │                                     │
+  ├─ ACQUISITION (raw k-space)          ├─ ACQUISITION (raw k-space)
+  │  └─ Return HTTP 501 Not Impl        │  └─ Return HTTP 400 Bad Request
+  │     (Future: buffer → recon)        │     (Use /frame instead)
+  │                                     │
+  ├─ HDF5_FILE                          ├─ HDF5_FILE
+  │  └─ Forward to /v1/mrd/ingest       │  └─ Process normally (expected)
+  │     (Auto-redirect)                 │     (Batch upload)
+  │                                     │
+  ├─ IMAGE (reconstructed)              ├─ IMAGE (reconstructed)
+  │  └─ Process normally                │  └─ Process with warning
+  │     (Store to SWMR)                 │     (Suggest using /frame)
+  │                                     │
+  └─ UNKNOWN                            └─ UNKNOWN
+     └─ Return HTTP 400 Bad Request        └─ Return HTTP 400 Bad Request
 ```
 
 ## What It Does

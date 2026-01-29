@@ -104,7 +104,7 @@
 ### 1. **Detect** data type automatically
 
 ```
-POST /v1/mrd/frame
+POST /v1/mrd/frame OR POST /v1/mrd/ingest
 Body: [binary data]
 
 Marshal checks:
@@ -115,11 +115,11 @@ Marshal checks:
 
 ### 2. **Route** based on type
 
-| Data Type | Action |
-|-----------|--------|
-| **Raw k-space** | Buffer → Send to reconstruction service |
-| **Reconstructed** | Store directly (existing behavior) |
-| **HDF5 file** | Save as-is |
+| Data Type | /v1/mrd/frame | /v1/mrd/ingest |
+|-----------|---------------|----------------|
+| **Raw k-space** | Not yet supported (future: buffer → recon) | Rejected (use /frame) |
+| **Reconstructed** | Store directly (existing) | Allowed with warning |
+| **HDF5 file** | Forward to /ingest | Save as-is (expected) |
 
 ### 3. **Store** final result
 
