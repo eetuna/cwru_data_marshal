@@ -8,6 +8,23 @@
 
 ---
 
+## ⚠️ IMPLEMENTATION STATUS
+
+**Phase 1 (COMPLETE):** Smart data type detection and routing framework
+- ✅ Auto-detect raw k-space, reconstructed images, HDF5 files
+- ✅ Both `/v1/mrd/frame` and `/v1/mrd/ingest` endpoints enhanced
+- ✅ Backward compatible, production ready
+
+**Phase 2 (PENDING):** Simple HTTP forwarding to external reconstruction service
+- ⏳ Add `--recon-endpoint` CLI flag (~10 lines)
+- ⏳ Forward raw k-space via synchronous HTTP POST (~80 lines)
+- ⏳ Store reconstructed response (uses existing code)
+- **See:** [HANDOFF_RECONSTRUCTION_INTEGRATION.md](HANDOFF_RECONSTRUCTION_INTEGRATION.md) for implementation guide
+
+**NOTE:** This document shows the full architectural vision. Section 3 describes complex async patterns (buffering, polling, callbacks) - **this is NOT what will be implemented**. The actual implementation is much simpler: synchronous HTTP POST/response forwarding to an external service. See the handoff document for the correct simple approach.
+
+---
+
 ## Table of Contents
 
 1. [Current System Overview](#1-current-system-overview)
