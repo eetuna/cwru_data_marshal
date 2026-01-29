@@ -1,9 +1,9 @@
-# Handoff: Reconstruction Service Integration
+# Handoff: Reconstruction Service Integration (Simple HTTP Forwarding)
 
 **For:** Next AI Agent
-**Status:** Phase 1 Complete (Detection) - Ready for Phase 2 (Integration)
-**Priority:** High
-**Estimated Effort:** 3-4 weeks
+**Status:** Phase 1 Complete (Detection) - Ready for Phase 2 (Simple Forwarding)
+**Priority:** Medium
+**Estimated Effort:** 1-2 days (much simpler than originally planned)
 
 ---
 
@@ -16,12 +16,8 @@ Both `/v1/mrd/frame` and `/v1/mrd/ingest` endpoints now automatically detect:
 - ✅ Reconstructed images (ImageHeader)
 - ✅ Complete HDF5 files
 
-**Files implemented:**
-- `include/mrd_type_detector.hpp` - Detection logic
-- `src/marshal_http.hpp` - Enhanced endpoints with routing
-
 **Current behavior:**
-- Raw k-space → Returns HTTP 501 "Not yet implemented"
+- Raw k-space → Returns HTTP 501 "Not yet implemented" with TODO message
 - Reconstructed → Stores normally (works perfectly)
 - HDF5 file → Stores as-is (works perfectly)
 
@@ -29,105 +25,31 @@ Both `/v1/mrd/frame` and `/v1/mrd/ingest` endpoints now automatically detect:
 
 ## What Needs to Be Done 🔨
 
-### Phase 2: Reconstruction Service Integration
+### Phase 2: Simple HTTP Forwarding to External Reconstruction Service
 
-Implement the HTTP client to forward raw k-space data to an external reconstruction service.
+**Key Point:** The reconstruction client/service is EXTERNAL and already exists (e.g., Gadgetron, custom service).
+
+The marshal just needs to:
+1. Accept raw k-space data
+2. Forward it to the external service via HTTP POST
+3. Wait for reconstructed response
+4. Store the reconstructed images
+
+**No complex client implementation needed!** Just simple HTTP forwarding.
 
 ---
 
-## Implementation Plan
+## Simple Implementation (2 Steps)
 
-### Step 1: Create Reconstruction Client (Week 1)
-
-**File:** `include/reconstruction_client.hpp`
-
-**Interface:**
-```cpp
-namespace mrd {
-
-class ReconstructionClient {
-public:
-    struct Config {
-        std::string endpoint;      // e.g., "http://localhost:9002"
-        int timeout_sec = 300;     // 5 minutes
-        int poll_interval_ms = 1000; // Check every 1 second
-    };
-
-    ReconstructionClient(Config config, MarshalState& state);
-    ~ReconstructionClient();
-
-    // Submit k-space data for reconstruction
-    // Returns request_id for tracking
-    std::string submit(
-        const std::string& stream_id,
-        const void* data,
-        size_t size
-    );
-
-    // Callback when reconstruction completes
-    using Callback = std::function<void(
-        const std::string& request_id,
-        const std::string& stream_id,
-        const std::vector<uint8_t>& reconstructed_data
-    )>;
-
-    void set_callback(Callback cb);
-
-    // Check if service is available
-    bool is_available() const;
-
-private:
-    Config config_;
-    MarshalState& state_;
-    Callback callback_;
-    std::thread poll_thread_;
-    std::atomic<bool> running_{true};
-    std::mutex pending_mutex_;
-    std::map<std::string, std::string> pending_requests_; // request_id -> stream_id
-
-    void poll_results_loop();
-    std::optional<std::vector<uint8_t>> poll_result(const std::string& request_id);
-};
-
-} // namespace mrd
-```
-
-**Key Methods:**
-1. `submit()` - POST k-space data to reconstruction service
-2. `set_callback()` - Register callback for completed reconstructions
-3. `poll_results_loop()` - Background thread to check for results
-4. `is_available()` - Health check for reconstruction service
-
-### Step 2: Add to MarshalState (Week 1)
-
-**File:** `src/marshal_state.hpp`
-
-Add to `MarshalState` struct:
-```cpp
-struct MarshalState {
-    // ... existing fields ...
-
-    // Reconstruction service client
-    std::unique_ptr<mrd::ReconstructionClient> recon_client;
-
-    // Configuration
-    std::string recon_endpoint;      // From CLI: --recon-endpoint
-    int recon_timeout_sec{300};       // From CLI: --recon-timeout
-    bool recon_enabled{false};        // Auto-detect if endpoint provided
-};
-```
-
-### Step 3: Add CLI Arguments (Week 1)
+### Step 1: Add CLI Argument for Reconstruction Endpoint (30 minutes)
 
 **File:** `src/marshal_main.cpp`
 
 Add command-line parsing:
 ```cpp
-// In main()
+// In main() function, add to argument parsing:
 std::string recon_endpoint = "";
-int recon_timeout_sec = 300;
 
-// Parse arguments
 for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
 
@@ -136,118 +58,134 @@ for (int i = 1; i < argc; ++i) {
             recon_endpoint = argv[++i];
         }
     }
-    else if (arg == "--recon-timeout") {
-        if (i + 1 < argc) {
-            recon_timeout_sec = std::stoi(argv[++i]);
-        }
-    }
     // ... other arguments ...
 }
 
-// Initialize reconstruction client if endpoint provided
-if (!recon_endpoint.empty()) {
-    state.recon_endpoint = recon_endpoint;
-    state.recon_timeout_sec = recon_timeout_sec;
-    state.recon_enabled = true;
+// Store in state
+state.recon_endpoint = recon_endpoint;
+state.recon_enabled = !recon_endpoint.empty();
 
-    mrd::ReconstructionClient::Config recon_config;
-    recon_config.endpoint = recon_endpoint;
-    recon_config.timeout_sec = recon_timeout_sec;
-
-    state.recon_client = std::make_unique<mrd::ReconstructionClient>(recon_config, state);
-
-    std::cout << "Reconstruction service enabled: " << recon_endpoint << "\n";
+if (state.recon_enabled) {
+    std::cout << "[marshal] Reconstruction service enabled: " << recon_endpoint << "\n";
 }
 ```
 
-### Step 4: Update HTTP Handlers (Week 2)
+**Add to MarshalState:**
+
+**File:** `src/marshal_state.hpp`
+
+```cpp
+struct MarshalState {
+    // ... existing fields ...
+
+    // Reconstruction service configuration
+    std::string recon_endpoint;    // e.g., "http://localhost:9002"
+    bool recon_enabled{false};     // True if --recon-endpoint provided
+};
+```
+
+### Step 2: Update HTTP Handlers to Forward Raw K-Space (2 hours)
 
 **File:** `src/marshal_http.hpp`
 
-Update the ACQUISITION case in both endpoints:
+Replace the ACQUISITION case in `/v1/mrd/ingest`:
 
-**For `/v1/mrd/ingest`:**
 ```cpp
 case mrd::MrdDataType::ACQUISITION:
-    // Check if reconstruction service is enabled
-    if (!state.recon_enabled || !state.recon_client) {
-        return make_response(http::status::not_implemented, {
-            {"error", "reconstruction service not configured"},
-            {"detected_type", "ACQUISITION"},
-            {"message", "Raw k-space detected but no reconstruction service available."},
-            {"hint", "Start marshal with --recon-endpoint http://localhost:9002"}
-        });
-    }
+    // RAW K-SPACE DATA - Forward to external reconstruction service
+    {
+        if (!state.recon_enabled) {
+            return make_response(http::status::not_implemented, {
+                {"error", "reconstruction service not configured"},
+                {"detected_type", "ACQUISITION"},
+                {"message", "Raw k-space detected but no reconstruction service available."},
+                {"hint", "Start marshal with --recon-endpoint http://localhost:9002"}
+            });
+        }
 
-    // Check if service is available
-    if (!state.recon_client->is_available()) {
-        return make_response(http::status::service_unavailable, {
-            {"error", "reconstruction service unavailable"},
-            {"endpoint", state.recon_endpoint},
-            {"message", "Reconstruction service is not responding. Check if it's running."}
-        });
-    }
-
-    // Submit to reconstruction service
-    try {
-        auto stream_id = std::string(req["X-MRD-Stream"]);
-        if (stream_id.empty()) stream_id = "default";
-
-        std::string request_id = state.recon_client->submit(
-            stream_id,
-            body.data(),
-            body.size()
-        );
-
-        std::cout << "[marshal_http] Submitted k-space to reconstruction service "
-                  << "(request_id=" << request_id << ", stream=" << stream_id << ")\n";
-
-        return make_response(http::status::accepted, {
-            {"status", "reconstruction_queued"},
-            {"request_id", request_id},
-            {"stream", stream_id},
-            {"message", "Raw k-space data submitted to reconstruction service. "
-                       "Reconstructed images will be stored automatically when ready."}
-        });
-    }
-    catch (const std::exception& e) {
-        std::cerr << "[marshal_http] ERROR: Failed to submit to reconstruction service: "
-                  << e.what() << "\n";
-        return make_response(http::status::internal_server_error, {
-            {"error", "reconstruction submission failed"},
-            {"what", e.what()}
-        });
-    }
-```
-
-### Step 5: Implement Reconstruction Callback (Week 2)
-
-**File:** `src/marshal_main.cpp`
-
-Setup callback when reconstruction completes:
-```cpp
-// After creating recon_client
-if (state.recon_client) {
-    state.recon_client->set_callback([&state](
-        const std::string& request_id,
-        const std::string& stream_id,
-        const std::vector<uint8_t>& reconstructed_data
-    ) {
-        std::cout << "[reconstruction] Received reconstructed data "
-                  << "(request_id=" << request_id
-                  << ", stream=" << stream_id
-                  << ", size=" << reconstructed_data.size() << " bytes)\n";
+        std::cout << "[marshal_http] Forwarding raw k-space to reconstruction service: "
+                  << state.recon_endpoint << "\n";
 
         try {
-            // Validate it's an ImageHeader
-            if (reconstructed_data.size() < sizeof(ISMRMRD::ImageHeader)) {
-                std::cerr << "[reconstruction] ERROR: Invalid reconstructed data size\n";
-                return;
+            // Simple HTTP POST to external service
+            // POST {recon_endpoint}/reconstruct
+            // Body: raw k-space data (as-is)
+
+            namespace beast = boost::beast;
+            namespace http = beast::http;
+            namespace net = boost::asio;
+            using tcp = net::ip::tcp;
+
+            // Parse endpoint URL
+            std::string host = state.recon_endpoint;  // Simplified: assume "host:port"
+            std::string port = "9002";  // Default port
+
+            // Better: parse URL properly
+            // For now, assume format: http://host:port
+            size_t protocol_pos = host.find("://");
+            if (protocol_pos != std::string::npos) {
+                host = host.substr(protocol_pos + 3);
+            }
+            size_t port_pos = host.find(":");
+            if (port_pos != std::string::npos) {
+                port = host.substr(port_pos + 1);
+                host = host.substr(0, port_pos);
             }
 
-            // Parse ImageHeader
+            // Connect to reconstruction service
+            net::io_context ioc;
+            tcp::resolver resolver(ioc);
+            beast::tcp_stream stream(ioc);
+
+            auto const results = resolver.resolve(host, port);
+            stream.connect(results);
+
+            // Prepare HTTP POST request
+            http::request<http::string_body> req{http::verb::post, "/reconstruct", 11};
+            req.set(http::field::host, host);
+            req.set(http::field::user_agent, "MRI-Marshal/1.0");
+            req.set(http::field::content_type, "application/octet-stream");
+            req.body() = body;  // Forward raw k-space data as-is
+            req.prepare_payload();
+
+            // Send request
+            http::write(stream, req);
+
+            // Read response from reconstruction service
+            beast::flat_buffer buffer;
+            http::response<http::string_body> res;
+            http::read(stream, buffer, res);
+
+            // Close connection
+            beast::error_code ec;
+            stream.socket().shutdown(tcp::socket::shutdown_both, ec);
+
+            std::cout << "[marshal_http] Reconstruction service responded: HTTP "
+                      << res.result_int() << "\n";
+
+            // Check if reconstruction succeeded
+            if (res.result() != http::status::ok && res.result() != http::status::created) {
+                return make_response(http::status::bad_gateway, {
+                    {"error", "reconstruction service failed"},
+                    {"service_status", res.result_int()},
+                    {"service_response", res.body()}
+                });
+            }
+
+            // Reconstructed data is in res.body()
+            // It should be ImageHeader + pixel data
+            const std::string& reconstructed = res.body();
+
+            if (reconstructed.size() < sizeof(ISMRMRD::ImageHeader)) {
+                return make_response(http::status::bad_gateway, {
+                    {"error", "invalid response from reconstruction service"},
+                    {"message", "Response too small to contain ImageHeader"}
+                });
+            }
+
+            // Parse reconstructed ImageHeader
             const auto* img_header = reinterpret_cast<const ISMRMRD::ImageHeader*>(
-                reconstructed_data.data()
+                reconstructed.data()
             );
 
             mrd::ImageDimensions dims;
@@ -259,12 +197,15 @@ if (state.recon_client) {
             dims.channels = img_header->channels ? static_cast<hsize_t>(img_header->channels) : 1;
 
             auto element_type = mrd::element_type_from_ismrmrd(img_header->data_type);
-            const void* payload = reconstructed_data.data() + sizeof(ISMRMRD::ImageHeader);
-            size_t payload_bytes = reconstructed_data.size() - sizeof(ISMRMRD::ImageHeader);
+            const void* payload = reconstructed.data() + sizeof(ISMRMRD::ImageHeader);
+            size_t payload_bytes = reconstructed.size() - sizeof(ISMRMRD::ImageHeader);
+
+            auto stream_id = std::string(req["X-MRD-Stream"]);
+            if (stream_id.empty()) stream_id = "reconstructed";
 
             std::string header_xml = mrd::default_ismrmrd_header(dims, element_type, stream_id);
 
-            // Store to SWMR (same as direct image ingestion)
+            // Store reconstructed image to SWMR (same as normal image path)
             auto result = state.mrd_sink->append_frame(
                 stream_id,
                 dims,
@@ -275,396 +216,187 @@ if (state.recon_client) {
                 "" // session_token
             );
 
-            std::cout << "[reconstruction] Stored reconstructed frame "
-                      << "(stream=" << stream_id
+            std::cout << "[marshal_http] Stored reconstructed image: "
+                      << "stream=" << stream_id
                       << ", frame=" << result.frame_index
-                      << ", path=" << result.file_path.string() << ")\n";
+                      << ", path=" << result.file_path.string() << "\n";
 
-            // Broadcast via WebSocket
-            nlohmann::json event = {
-                {"type", "reconstruction_complete"},
-                {"request_id", request_id},
-                {"stream", stream_id},
-                {"frame_index", result.frame_index},
+            // Return success response
+            return make_response(http::status::created, {
+                {"status", "reconstructed_and_stored"},
                 {"path", result.file_path.string()},
-                {"timestamp", mrd::iso8601_now_ms()}
-            };
-
-            state.ws_emit(event.dump());
-            state.ws_emit_topic(event.dump(), "reconstruction");
+                {"frame_index", result.frame_index},
+                {"stream", stream_id},
+                {"message", "Raw k-space was reconstructed and stored successfully"}
+            });
         }
         catch (const std::exception& e) {
-            std::cerr << "[reconstruction] ERROR: Failed to store reconstructed data: "
+            std::cerr << "[marshal_http] ERROR: Reconstruction forwarding failed: "
                       << e.what() << "\n";
-
-            // Broadcast error event
-            nlohmann::json error_event = {
-                {"type", "reconstruction_error"},
-                {"request_id", request_id},
-                {"stream", stream_id},
-                {"error", e.what()},
-                {"timestamp", mrd::iso8601_now_ms()}
-            };
-
-            state.ws_emit(error_event.dump());
+            return make_response(http::status::bad_gateway, {
+                {"error", "reconstruction forwarding failed"},
+                {"what", e.what()},
+                {"endpoint", state.recon_endpoint}
+            });
         }
-    });
-}
-```
-
-### Step 6: Implement HTTP Client Logic (Week 3)
-
-**File:** `src/reconstruction_client.cpp`
-
-**Key Functions:**
-
-1. **Submit k-space data:**
-```cpp
-std::string ReconstructionClient::submit(
-    const std::string& stream_id,
-    const void* data,
-    size_t size
-) {
-    // Generate unique request ID
-    std::string request_id = generate_uuid();
-
-    // Prepare HTTP POST request
-    // POST {endpoint}/reconstruct
-    // Headers:
-    //   X-Stream-ID: {stream_id}
-    //   X-Request-ID: {request_id}
-    //   Content-Type: application/octet-stream
-    // Body: raw k-space data
-
-    // Use Boost.Beast or libcurl
-    http::request<http::string_body> req{http::verb::post, "/reconstruct", 11};
-    req.set(http::field::host, config_.endpoint);
-    req.set(http::field::user_agent, "MRI-Marshal/1.0");
-    req.set("X-Stream-ID", stream_id);
-    req.set("X-Request-ID", request_id);
-    req.set(http::field::content_type, "application/octet-stream");
-    req.body() = std::string(static_cast<const char*>(data), size);
-    req.prepare_payload();
-
-    // Send request
-    // ... (HTTP client code) ...
-
-    // Track pending request
-    {
-        std::lock_guard<std::mutex> lock(pending_mutex_);
-        pending_requests_[request_id] = stream_id;
     }
-
-    return request_id;
-}
 ```
 
-2. **Poll for results:**
-```cpp
-void ReconstructionClient::poll_results_loop() {
-    while (running_) {
-        std::vector<std::string> to_check;
-        {
-            std::lock_guard<std::mutex> lock(pending_mutex_);
-            for (const auto& [request_id, stream_id] : pending_requests_) {
-                to_check.push_back(request_id);
-            }
-        }
+---
 
-        for (const auto& request_id : to_check) {
-            auto result = poll_result(request_id);
-            if (result) {
-                // Result ready! Invoke callback
-                std::string stream_id;
-                {
-                    std::lock_guard<std::mutex> lock(pending_mutex_);
-                    stream_id = pending_requests_[request_id];
-                    pending_requests_.erase(request_id);
-                }
+## That's It!
 
-                if (callback_) {
-                    callback_(request_id, stream_id, *result);
-                }
-            }
-        }
+The external reconstruction service is responsible for:
+- Receiving raw k-space data (HTTP POST)
+- Performing reconstruction
+- Returning reconstructed ImageHeader + pixel data (HTTP response body)
 
-        // Wait before next poll
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(config_.poll_interval_ms)
-        );
-    }
-}
+The marshal just forwards and stores the result.
 
-std::optional<std::vector<uint8_t>> ReconstructionClient::poll_result(
-    const std::string& request_id
-) {
-    // GET {endpoint}/reconstruct/result/{request_id}
-    // Returns:
-    //   HTTP 200 + reconstructed data (if ready)
-    //   HTTP 202 (still processing)
-    //   HTTP 404 (not found)
-    //   HTTP 500 (failed)
+---
 
-    // ... (HTTP GET implementation) ...
+## External Reconstruction Service API (What It Must Provide)
 
-    return std::nullopt; // Not ready yet
-}
+### Endpoint: POST /reconstruct
+
+**Request:**
+```
+POST /reconstruct HTTP/1.1
+Content-Type: application/octet-stream
+Body: [raw k-space data - ISMRMRD acquisitions or HDF5]
 ```
 
-### Step 7: Add Health Check Endpoint (Week 3)
+**Response:**
+```
+HTTP/1.1 200 OK
+Content-Type: application/octet-stream
+Body: [ISMRMRD ImageHeader (340 bytes) + pixel data]
+```
 
-**File:** `src/marshal_http.hpp`
+**That's all the external service needs to implement!**
 
-Add new endpoint:
-```cpp
-// GET /v1/reconstruction/status
-if (req.method() == http::verb::get && req.target() == "/v1/reconstruction/status")
+---
+
+## Usage Example
+
+### Start Marshal with Reconstruction Service
+
+```bash
+# Reconstruction service running on localhost:9002
+./build/marshal \
+    --data ./data \
+    --http 0.0.0.0:8080 \
+    --ws 0.0.0.0:8090 \
+    --recon-endpoint http://localhost:9002
+```
+
+### Send Raw K-Space Data
+
+```bash
+# Marshal will automatically detect it's raw k-space,
+# forward to http://localhost:9002/reconstruct,
+# receive reconstructed image,
+# and store to SWMR
+curl -X POST http://localhost:8080/v1/mrd/ingest \
+    -H "X-MRD-Stream: cardiac_scan" \
+    -H "Content-Type: application/octet-stream" \
+    --data-binary @raw_kspace.bin
+
+# Response:
 {
-    if (!state.recon_enabled) {
-        return make_response(http::status::ok, {
-            {"enabled", false},
-            {"message", "Reconstruction service not configured"}
-        });
-    }
-
-    bool available = state.recon_client->is_available();
-
-    return make_response(http::status::ok, {
-        {"enabled", true},
-        {"endpoint", state.recon_endpoint},
-        {"available", available},
-        {"timeout_sec", state.recon_timeout_sec}
-    });
+  "status": "reconstructed_and_stored",
+  "path": "/data/mrd/cardiac_scan.mrd",
+  "frame_index": 0,
+  "stream": "cardiac_scan"
 }
 ```
 
-### Step 8: Testing (Week 4)
+---
 
-**Create mock reconstruction service:**
+## Testing with Mock Service
 
-**File:** `tests/mock_recon_service.py`
+**Simple Python Mock (tests/mock_recon_service.py):**
 
 ```python
 #!/usr/bin/env python3
-from flask import Flask, request, jsonify, send_file
-import uuid
-import time
-import os
+from flask import Flask, request, Response
+import struct
 
 app = Flask(__name__)
-pending = {}  # request_id -> (stream_id, data, start_time)
-results = {}  # request_id -> reconstructed_data
 
 @app.route('/reconstruct', methods=['POST'])
-def submit():
-    stream_id = request.headers.get('X-Stream-ID', 'default')
-    request_id = request.headers.get('X-Request-ID', str(uuid.uuid4()))
-    data = request.data
+def reconstruct():
+    # Receive raw k-space
+    raw_kspace = request.data
+    print(f"[mock-recon] Received {len(raw_kspace)} bytes of k-space")
 
-    print(f"[mock-recon] Received k-space: request_id={request_id}, stream={stream_id}, size={len(data)} bytes")
+    # "Reconstruct" by creating fake ImageHeader + pixels
+    # In reality, this would be Gadgetron doing real reconstruction
 
-    # Simulate async processing
-    pending[request_id] = (stream_id, data, time.time())
+    # Create minimal ISMRMRD ImageHeader
+    header = bytearray(340)
+    struct.pack_into('H', header, 0, 1)  # version = 1
+    struct.pack_into('H', header, 48, 64)  # matrix_size[0] = 64
+    struct.pack_into('H', header, 50, 64)  # matrix_size[1] = 64
+    struct.pack_into('H', header, 52, 1)   # matrix_size[2] = 1
+    struct.pack_into('H', header, 54, 1)   # channels = 1
+    struct.pack_into('H', header, 56, 5)   # data_type = 5 (FLOAT)
 
-    return jsonify({
-        'request_id': request_id,
-        'status': 'queued',
-        'estimated_time_sec': 5
-    }), 202
+    # Create fake pixel data (64x64x1x1 = 4096 floats = 16384 bytes)
+    pixels = b'\x00' * (64 * 64 * 4)  # All zeros (black image)
 
-@app.route('/reconstruct/status/<request_id>')
-def status(request_id):
-    if request_id in results:
-        return jsonify({
-            'request_id': request_id,
-            'status': 'complete',
-            'result_url': f'/reconstruct/result/{request_id}'
-        })
-    elif request_id in pending:
-        elapsed = time.time() - pending[request_id][2]
-        if elapsed > 5:  # Simulate 5 second processing
-            # "Reconstruct" by creating fake ImageHeader + data
-            stream_id, raw_data, _ = pending.pop(request_id)
-            reconstructed = create_fake_image(stream_id, len(raw_data))
-            results[request_id] = reconstructed
-            return jsonify({
-                'request_id': request_id,
-                'status': 'complete',
-                'result_url': f'/reconstruct/result/{request_id}'
-            })
-        return jsonify({
-            'request_id': request_id,
-            'status': 'processing',
-            'progress': min(1.0, elapsed / 5.0)
-        })
-    return jsonify({'error': 'not found'}), 404
+    reconstructed = bytes(header) + pixels
 
-@app.route('/reconstruct/result/<request_id>')
-def result(request_id):
-    if request_id in results:
-        # Return reconstructed ImageHeader + pixel data
-        return results[request_id], 200, {'Content-Type': 'application/octet-stream'}
-    return jsonify({'error': 'not found'}), 404
+    print(f"[mock-recon] Returning {len(reconstructed)} bytes reconstructed data")
 
-def create_fake_image(stream_id, original_size):
-    # Create minimal ISMRMRD ImageHeader + fake pixel data
-    import struct
-    header = struct.pack('HQ', 1, 0)  # version=1, flags=0
-    header += b'\x00' * (340 - len(header))  # Pad to 340 bytes
-    pixels = b'\x00' * 1024  # Fake pixel data
-    return header + pixels
+    return Response(reconstructed, mimetype='application/octet-stream')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=9002)
 ```
 
-**Test script:**
-
+**Run test:**
 ```bash
-#!/bin/bash
-# tests/test_reconstruction_flow.sh
+# Terminal 1: Start mock reconstruction service
+python3 tests/mock_recon_service.py
 
-echo "1. Start mock reconstruction service..."
-python3 tests/mock_recon_service.py &
-MOCK_PID=$!
-sleep 2
+# Terminal 2: Start marshal with reconstruction enabled
+./build/marshal --data ./data --recon-endpoint http://localhost:9002
 
-echo "2. Start MRI Marshal with reconstruction enabled..."
-./build/marshal \
-    --data ./test_data \
-    --recon-endpoint http://localhost:9002 \
-    --recon-timeout 30 &
-MARSHAL_PID=$!
-sleep 2
-
-echo "3. Send raw k-space data..."
+# Terminal 3: Send raw k-space
 curl -X POST http://localhost:8080/v1/mrd/ingest \
-    -H "X-MRD-Stream: test_scan" \
-    -H "Content-Type: application/octet-stream" \
-    --data-binary @tests/data/raw_kspace.bin
-
-echo "4. Wait for reconstruction to complete..."
-sleep 10
-
-echo "5. Check if reconstructed data was stored..."
-ls -lh test_data/mrd/*.mrd
-
-echo "6. Cleanup..."
-kill $MARSHAL_PID
-kill $MOCK_PID
+    -H "X-MRD-Stream: test" \
+    --data-binary @tests/data/sample_kspace.bin
 ```
 
 ---
 
-## External Reconstruction Service Requirements
+## Configuration
 
-The external service (Gadgetron, custom service, etc.) must implement:
-
-### API Contract
-
-**1. Submit Reconstruction**
-```
-POST /reconstruct
-Headers:
-  X-Stream-ID: {stream_name}
-  X-Request-ID: {unique_id}
-  Content-Type: application/octet-stream
-Body: Raw k-space data (ISMRMRD acquisitions or HDF5 with /dataset/data)
-
-Response:
-{
-  "request_id": "uuid",
-  "status": "queued",
-  "estimated_time_sec": 45
-}
-```
-
-**2. Check Status**
-```
-GET /reconstruct/status/{request_id}
-
-Response (Processing):
-{
-  "request_id": "uuid",
-  "status": "processing",
-  "progress": 0.65
-}
-
-Response (Complete):
-{
-  "request_id": "uuid",
-  "status": "complete",
-  "result_url": "/reconstruct/result/{request_id}"
-}
-```
-
-**3. Get Result**
-```
-GET /reconstruct/result/{request_id}
-
-Response: Binary data
-  - ISMRMRD ImageHeader (340 bytes)
-  - Pixel data (float32, complex64, etc.)
-```
-
----
-
-## Configuration Examples
-
-### Start with reconstruction enabled:
+### Enable Reconstruction
 ```bash
 ./build/marshal \
     --data ./data \
-    --http 0.0.0.0:8080 \
-    --ws 0.0.0.0:8090 \
-    --recon-endpoint http://localhost:9002 \
-    --recon-timeout 300
+    --recon-endpoint http://reconstruction-server:9002
 ```
 
-### Start without reconstruction (existing behavior):
+### Disable Reconstruction (Default)
 ```bash
-./build/marshal \
-    --data ./data \
-    --http 0.0.0.0:8080 \
-    --ws 0.0.0.0:8090
+./build/marshal --data ./data
+# Raw k-space will return HTTP 501 "Not configured"
 ```
 
 ---
 
-## Testing Checklist
+## Error Handling
 
-- [ ] Reconstruction service starts successfully
-- [ ] MRI Marshal connects to reconstruction service
-- [ ] Health check returns service status
-- [ ] Raw k-space submission returns HTTP 202
-- [ ] Polling detects completed reconstruction
-- [ ] Callback stores reconstructed data to SWMR
-- [ ] WebSocket events broadcast reconstruction status
-- [ ] Existing reconstructed image flow still works
-- [ ] Service unavailable fallback works
-- [ ] Timeout handling works (300 sec default)
-
----
-
-## Current Code Locations
-
-### Detection (Already Implemented)
-- `include/mrd_type_detector.hpp` - Type detection
-- `src/marshal_http.hpp:345-460` - `/v1/mrd/frame` with detection
-- `src/marshal_http.hpp:461-521` - `/v1/mrd/ingest` with detection
-
-### Placeholders (Need Implementation)
-- Line 480-489: Raw k-space case in `/v1/mrd/ingest` → **TODO: Call recon_client->submit()**
-- Line 365-374: Raw k-space case in `/v1/mrd/frame` → **TODO: Call recon_client->submit()**
-
----
-
-## Documentation References
-
-- **Full Design:** [MRI_MARSHAL_RECONSTRUCTION_ROUTING.md](MRI_MARSHAL_RECONSTRUCTION_ROUTING.md)
-- **Quick Overview:** [MRI_MARSHAL_QUICK_OVERVIEW.md](MRI_MARSHAL_QUICK_OVERVIEW.md)
-- **Implementation Summary:** [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)
-- **ISMRMRD Docs:** https://ismrmrd.readthedocs.io/
+| Scenario | HTTP Status | Message |
+|----------|-------------|---------|
+| No `--recon-endpoint` | 501 Not Implemented | "Start marshal with --recon-endpoint" |
+| Service unreachable | 502 Bad Gateway | "Could not connect to service" |
+| Service returns error | 502 Bad Gateway | "Reconstruction service failed" |
+| Invalid response | 502 Bad Gateway | "Invalid response from service" |
+| Success | 201 Created | "Reconstructed and stored" |
 
 ---
 
@@ -673,39 +405,64 @@ Response: Binary data
 When done, this workflow should work:
 
 ```
-1. Scanner sends raw k-space to /v1/mrd/ingest
+1. Start external reconstruction service (Gadgetron, custom, etc.)
+   → Listening on port 9002
+   → Implements POST /reconstruct endpoint
+
+2. Start marshal with --recon-endpoint
+   → Marshal knows where to forward raw k-space
+
+3. Scanner sends raw k-space to marshal
    → Marshal detects: "ACQUISITION"
-   → Marshal submits to reconstruction service
-   → Returns HTTP 202 with request_id
-
-2. Reconstruction service processes (30-90 seconds)
-   → Marshal polls every 1 second
-   → Detects completion
-
-3. Marshal retrieves reconstructed images
-   → Callback stores to SWMR
-   → Broadcasts WebSocket event
+   → Marshal forwards to reconstruction service
+   → Service reconstructs and returns ImageHeader + pixels
+   → Marshal stores to SWMR
+   → Returns HTTP 201 "Reconstructed and stored"
 
 4. Visualization clients see new frames
-   → Read from SWMR file
-   → Display images normally
+   → Read from SWMR file normally
+   → Everything works as if images were sent directly
 ```
-
-**End result:** Scanner can send raw or reconstructed data - marshal handles both automatically!
 
 ---
 
-## Git Branches
+## What the Implementation Does NOT Need
 
-- **Main repo:** `feature/reconstruction-routing`
-- **Worktree:** `feature/bio-memory-cache`
+- ❌ **NO** complex ReconstructionClient class
+- ❌ **NO** background polling threads
+- ❌ **NO** async queuing or buffering
+- ❌ **NO** k-space accumulation logic
+- ❌ **NO** callback mechanisms
+
+**Just simple synchronous HTTP POST and response!**
+
+---
+
+## Summary
+
+**Phase 1 (Complete):** ✅ Detection and routing framework
+**Phase 2 (This handoff):** Simple HTTP forwarding to external service
+
+**Implementation time:** 1-2 days (not 3-4 weeks!)
+
+**Key insight:** The reconstruction service is external and already handles all complexity. The marshal just needs to forward data and store the result.
+
+---
+
+## Files to Modify
+
+1. ✅ `src/marshal_state.hpp` - Add `recon_endpoint` field (5 lines)
+2. ✅ `src/marshal_main.cpp` - Add CLI parsing (10 lines)
+3. ✅ `src/marshal_http.hpp` - Add forwarding logic (80 lines)
+
+**Total: ~100 lines of code!**
+
+---
 
 ## Current Status
 
 - ✅ Phase 1: Detection complete
-- ⏳ Phase 2: Integration (THIS HANDOFF)
-- ⏳ Phase 3: Testing & optimization
+- ⏳ Phase 2: Simple forwarding (THIS HANDOFF - 1-2 days)
+- ⏳ Phase 3: Testing with real Gadgetron
 
----
-
-**Good luck! The framework is ready - just need to implement the HTTP client and wire up the callbacks.**
+**Much simpler than originally thought - the external service does all the heavy lifting!**
