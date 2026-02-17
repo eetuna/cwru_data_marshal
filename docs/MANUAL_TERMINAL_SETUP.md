@@ -48,6 +48,8 @@ Expected images:
 - `cwru/image-streamer`
 - `cwru/ecg-client`
 - `cwru/pose-client`
+- `cwru/kspace-streamer`
+- `cwru/mock-recon`
 - `cwru/viz-client`
 - `cwru/robot-clients`
 
@@ -108,6 +110,16 @@ ECG_INTERVAL=0.5      # Seconds between samples (0.5 = 2 Hz)
 
 # Pose tracking update rate
 POSE_INTERVAL=0.1     # Seconds between updates (0.1 = 10 Hz)
+```
+
+### K-Space Streaming Settings
+
+```bash
+# K-Space streaming rate (raw acquisition data)
+KSPACE_INTERVAL=100   # Milliseconds between volumes (100ms = 10 volumes/sec)
+
+# Number of slices per volume
+KSPACE_SLICES=5       # Slices in each 3D k-space volume (default: 5)
 ```
 
 ### Robot Client Settings
@@ -177,6 +189,62 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up mri-marshal
 - Health check: http://localhost:8080/health
 
 **Leave this running.** Open a new terminal for the next service.
+
+---
+
+### About Reconstruction
+
+The MRI marshal can forward raw k-space data to an external reconstruction service. This is **optional** - the demo works without it since the image streamer sends pre-reconstructed images.
+
+#### When You Need Reconstruction
+
+- **Demo/Testing**: NOT needed - image streamer sends reconstructed images (ImageHeader)
+- **Real Scanner**: NEEDED - scanners send raw k-space (AcquisitionHeader)
+
+#### Data Flow with Reconstruction (Async/Callback)
+
+```
+K-Space Streamer                  MRI Marshal                    Recon Service
+     │                                 │                              │
+     │ POST /v1/mrd/frame              │                              │
+     │ (raw k-space)                   │                              │
+     │────────────────────────────────>│                              │
+     │                                 │ Detects ACQUISITION          │
+     │                                 │                              │
+     │ HTTP 202 Accepted               │                              │
+     │ (immediate response ~7-16ms)    │                              │
+     │<────────────────────────────────│                              │
+     │                                 │                              │
+     │                                 │ [Detached Thread]            │
+     │                                 │ POST /reconstruct            │
+     │                                 │ X-MRD-Callback: http://...   │
+     │                                 │ X-MRD-Job-Id: xxx            │
+     │                                 │─────────────────────────────>│
+     │                                 │                              │
+     │                                 │ HTTP 202 Accepted            │
+     │                                 │<─────────────────────────────│
+     │                                 │                              │
+     │                                 │                              │
+     │                                 │   [Background Processing]    │
+     │                                 │   (~0.5s simulated delay)    │
+     │                                 │                              │
+     │                                 │ POST /v1/mrd/callback        │
+     │                                 │ (reconstructed image)        │
+     │                                 │<─────────────────────────────│
+     │                                 │                              │
+     │                                 │ Store to SWMR                │
+     │                                 │ WebSocket emit "mrd"         │
+     │                                 │ HTTP 200 OK                  │
+     │                                 │─────────────────────────────>│
+```
+
+**Key Features:**
+- **Non-blocking**: K-space sender gets HTTP 202 immediately (doesn't wait for reconstruction)
+- **Callback-based**: Recon service POSTs result back when done via `/v1/mrd/callback`
+- **Event-driven**: Viz clients get WebSocket notification when image arrives (no polling needed)
+- **Concurrent**: Multiple k-space frames can reconstruct simultaneously
+
+**Note:** To test the full reconstruction flow, start the mock-recon service (Terminal 6) and k-space streamer (Terminal 8). The `RECON_ENDPOINT` is already configured in `.env.demo`.
 
 ---
 
@@ -282,7 +350,42 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up pose-client
 
 ---
 
-### Terminal 6: Robot Clients (All 5 Together)
+### Terminal 6: Mock Reconstruction Service
+
+The mock reconstruction service simulates k-space to image reconstruction. This is required if you want to test the full reconstruction pipeline with the k-space streamer.
+
+```bash
+cd /path/to/cwru_data_marshal
+
+# Run mock reconstruction service
+docker compose --env-file .env.demo -f docker-compose.demo.yml up mock-recon
+```
+
+**What you'll see:**
+```
+[mock-recon] Starting ASYNC mock reconstruction service on port 9002
+[mock-recon] Simulated reconstruction delay: 0.5s
+[mock-recon] Endpoints:
+[mock-recon]   POST /reconstruct - Receive k-space, process async, callback with image
+[mock-recon]   GET /health - Health check
+```
+
+**Endpoints:**
+- Reconstruct: POST http://localhost:9002/reconstruct
+- Health: GET http://localhost:9002/health
+
+**How it works:**
+1. Receives k-space data with `X-MRD-Callback` header
+2. Returns HTTP 202 immediately (non-blocking)
+3. Spawns background thread to process reconstruction
+4. Simulates 0.5s processing delay (configurable in code)
+5. POSTs reconstructed image back to callback URL
+
+**Note:** The `RECON_ENDPOINT` environment variable in `.env.demo` is already configured to point to this service.
+
+---
+
+### Terminal 7: Robot Clients (All 5 Together)
 
 Runs all 5 robot clients in a single container:
 - Catheter tracking
@@ -315,7 +418,37 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up robot-clients
 
 ---
 
-### Terminal 7: Visualization Client (Optional - Requires X11)
+### Terminal 8: K-Space Streamer (Raw K-Space Data Generator)
+
+Generates synthetic raw k-space data and sends it to the MRI marshal. When reconstruction is configured, the marshal forwards this data to the reconstruction service.
+
+```bash
+cd /path/to/cwru_data_marshal
+
+# Run k-space streamer
+docker compose --env-file .env.demo -f docker-compose.demo.yml up kspace-streamer
+```
+
+**What you'll see:**
+```
+[kspace-streamer] Starting
+[kspace-streamer]   slices/volume: 5
+[kspace-streamer]   interval: 0.1s
+[kspace-streamer] volume 0 (5 slices) -> HTTP 202
+[kspace-streamer] volume 10 (5 slices) -> HTTP 202
+...
+```
+
+**Configuration:**
+- Frame rate: `KSPACE_INTERVAL` (default: 100ms = 10fps)
+- Slices per volume: `KSPACE_SLICES` (default: 5)
+- Sends multi-slice raw AcquisitionHeader data to: http://mri-marshal:8080/v1/mrd/frame
+
+**Note:** To test the full reconstruction flow, ensure the mock-recon service (Terminal 6) is running. The marshal will automatically forward k-space data to the reconstruction endpoint.
+
+---
+
+### Terminal 9: Visualization Client (Optional - Requires X11)
 
 Displays MRI frames in real-time.
 
@@ -423,19 +556,59 @@ curl -X POST http://localhost:8081/write/user_input \
   -d '{"values": [10.0, 20.0, 30.0], "sent_at": 1706126625123456789}'
 ```
 
-### WebSocket Notifications
+### WebSocket Notifications (Real-time Push)
+
+The marshal emits WebSocket events when new data arrives - this is the **recommended way** for viz clients to know when to fetch new frames (instead of polling).
 
 ```bash
 # Connect to WebSocket (using wscat)
 npm install -g wscat
-wscat -c ws://localhost:8090/ws
+wscat -c ws://localhost:8090
 
-# Subscribe to MRD updates
-> {"subscribe": "mrd"}
-
-# You'll receive notifications like:
-< {"type": "mrd_update", "frame_index": 1234, "timestamp": "2026-01-24T18:23:45.123Z"}
+# You'll receive notifications automatically when data arrives:
+< {"type":"mrd","stream":"demo_stream","frame_index":0,"path":"/session-data/...","dims":{...}}
+< {"type":"mrd","stream":"demo_stream","frame_index":1,"path":"/session-data/...","dims":{...}}
 ```
+
+**For Viz Clients (JavaScript/Python):**
+
+```javascript
+// JavaScript example
+const ws = new WebSocket('ws://mri-marshal:8090');
+
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  if (data.type === 'mrd') {
+    console.log('New image available:', data.frame_index);
+    // Fetch the actual image
+    fetch(`http://mri-marshal:8080/v1/mrd/latest`)
+      .then(r => r.json())
+      .then(img => displayImage(img));
+  }
+};
+```
+
+```python
+# Python example
+import websocket
+import json
+
+def on_message(ws, message):
+    data = json.loads(message)
+    if data.get('type') == 'mrd':
+        print(f"New image: frame {data['frame_index']}")
+        # Fetch and display image
+
+ws = websocket.WebSocketApp('ws://mri-marshal:8090',
+                            on_message=on_message)
+ws.run_forever()
+```
+
+**Why WebSocket over polling?**
+- ✅ **Real-time**: Instant notification when frames arrive
+- ✅ **Efficient**: No wasted requests (90% waste at 50ms polling with 0.5s recon)
+- ✅ **Scalable**: Works with any frame rate (0.5 fps to 100+ fps)
+- ✅ **Low latency**: 0ms delay vs 0-50ms average with polling
 
 ---
 
@@ -629,14 +802,16 @@ docker compose -f docker-compose.demo.yml up --scale robot-clients=3
 - Terminal 1: MRI Marshal
 - Terminal 2: Robot Marshal
 
-**Full Demo Setup: 6-7 Terminals**
+**Full Demo Setup: 8-9 Terminals**
 1. MRI Marshal (required)
 2. Robot Marshal (required)
 3. Image Streamer (generates MRI data)
 4. ECG Client (generates biological signals)
 5. Pose Client (generates tracking data)
-6. Robot Clients (5 robot components)
-7. Viz Client (optional - displays images)
+6. Mock Reconstruction Service (simulates image reconstruction)
+7. Robot Clients (5 robot components)
+8. K-Space Streamer (generates raw k-space data)
+9. Viz Client (optional - displays images)
 
 **Key Points:**
 - All services use `--env-file .env.demo` for configuration

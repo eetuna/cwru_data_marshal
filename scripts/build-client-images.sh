@@ -16,7 +16,10 @@ echo ""
 git worktree prune
 
 # Ensure required branches exist (fetch directly from upstream repo)
-MRI_BRANCH="mri-data-marhsal"
+#MRI_BRANCH="mri-data-marhsal"
+#MRI_BRANCH="fix/swmr-realtime-optimization"
+#MRI_BRANCH="fix/async-json-writer"
+MRI_BRANCH="feature/bio-memory-cache"
 ROBOT_BRANCH="robot_data_marshal_with_catheter_system_components"
 UPSTREAM_REPO="https://github.com/cwru-mercis/cwru_data_marshal.git"
 
@@ -60,6 +63,8 @@ echo "  - cwru/ecg-client"
 echo "  - cwru/pose-client"
 echo "  - cwru/image-streamer"
 echo "  - cwru/viz-client"
+echo "  - cwru/kspace-streamer"
+echo "  - cwru/mock-recon"
 echo ""
 
 cd "$MRI_WORKTREE"
@@ -83,6 +88,14 @@ docker build -f "$PROJECT_ROOT/docker/Dockerfile.image-streamer" -t cwru/image-s
 # Build Viz Client (C++ with OpenCV - takes longest)
 echo "Building cwru/viz-client (C++ with OpenCV)..."
 docker build -f "$PROJECT_ROOT/docker/Dockerfile.viz-client" -t cwru/viz-client:latest .
+
+# Build K-Space Streamer (C++)
+echo "Building cwru/kspace-streamer (C++ compilation)..."
+docker build -f "$PROJECT_ROOT/docker/Dockerfile.kspace-streamer" -t cwru/kspace-streamer:latest .
+
+# Build Mock Reconstruction Service (Python)
+echo "Building cwru/mock-recon..."
+docker build -f "$PROJECT_ROOT/docker/Dockerfile.mock-recon" -t cwru/mock-recon:latest .
 
 echo ""
 echo "[2/3] Building Robot Marshal and Clients..."
@@ -108,6 +121,8 @@ REQUIRED_IMAGES=(
     "cwru/image-streamer"
     "cwru/ecg-client"
     "cwru/pose-client"
+    "cwru/kspace-streamer"
+    "cwru/mock-recon"
     "cwru/viz-client"
     "cwru/robot-clients"
 )
@@ -126,7 +141,7 @@ done
 echo ""
 if [ "$ALL_GOOD" = true ]; then
     echo "============================================"
-    echo "  Build complete! All 7 images ready."
+    echo "  Build complete! All 9 images ready."
     echo "============================================"
     echo ""
     echo "Next steps:"

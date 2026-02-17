@@ -14,9 +14,15 @@ services:
         mkdir -p $$SESSION/mrd
         echo "[MRI Marshal] Starting on http://0.0.0.0:8080, ws://0.0.0.0:8090"
         echo "[MRI Marshal] Data dir: $$SESSION"
-        exec /opt/mri/build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data $$SESSION
+        if [ -n "$$RECON_ENDPOINT" ]; then
+          echo "[MRI Marshal] Reconstruction endpoint: $$RECON_ENDPOINT"
+          exec /opt/mri/build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data $$SESSION --recon-endpoint $$RECON_ENDPOINT
+        else
+          exec /opt/mri/build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data $$SESSION
+        fi
     environment:
       - HDF5_USE_FILE_LOCKING=FALSE
+      - RECON_ENDPOINT=${RECON_ENDPOINT:-}
     volumes:
       - ${SESSION_DATA_DIR:-./session-data}:/session-data
     ports:
@@ -75,6 +81,30 @@ services:
     image: cwru/pose-client:latest
     container_name: cwru-pose-client
     command: ["python3", "pose_client.py", "--endpoint", "http://mri-marshal:8080", "--count", "0", "--interval", "${POSE_INTERVAL}", "--trajectory", "${POSE_TRAJECTORY}"]
+    depends_on:
+      mri-marshal:
+        condition: service_healthy
+    networks:
+      - cwru-net
+
+  mock-recon:
+    image: cwru/mock-recon:latest
+    container_name: cwru-mock-recon
+    ports:
+      - "9002:9002"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9002/health"]
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    networks:
+      - cwru-net
+
+  kspace-streamer:
+    image: cwru/kspace-streamer:latest
+    container_name: cwru-kspace-streamer
+    command: ["./build/kspace_streamer", "--http", "http://mri-marshal:8080", "--stream", "raw_scan", "--dt-ms", "${KSPACE_INTERVAL:-100}", "--slices", "${KSPACE_SLICES:-5}"]
     depends_on:
       mri-marshal:
         condition: service_healthy

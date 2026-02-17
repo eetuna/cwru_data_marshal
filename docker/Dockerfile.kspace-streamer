@@ -1,0 +1,45 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build dependencies (same as image-streamer)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    ninja-build \
+    pkg-config \
+    curl \
+    ca-certificates \
+    git \
+    libboost-all-dev \
+    libhdf5-dev \
+    libpugixml-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build ISMRMRD from source (required for kspace_streamer)
+RUN git clone --depth 1 --branch v1.13.7 https://github.com/ismrmrd/ismrmrd.git /tmp/ismrmrd \
+    && cmake -S /tmp/ismrmrd -B /tmp/ismrmrd/build \
+       -DCMAKE_BUILD_TYPE=Release \
+       -DCMAKE_INSTALL_PREFIX=/usr/local \
+    && cmake --build /tmp/ismrmrd/build --target install \
+    && rm -rf /tmp/ismrmrd
+
+# Copy MRI source from build context
+COPY . /opt/mri
+
+# Build kspace_streamer only
+RUN cmake -S /opt/mri -B /opt/mri/build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_PREFIX_PATH=/usr/local \
+    -DENABLE_VIZ_CLIENT=OFF \
+    -GNinja \
+    && cmake --build /opt/mri/build --target kspace_streamer
+
+WORKDIR /opt/mri
+
+# Default connection to MRI marshal (override via environment or command line)
+ENV MRI_MARSHAL_HTTP=http://mri-marshal:8080
+
+# Default: run kspace_streamer with configurable parameters
+# Override with docker run command or docker-compose command
+CMD ["./build/kspace_streamer", "--http", "http://mri-marshal:8080", "--stream", "kspace_stream", "--interval", "0.1"]

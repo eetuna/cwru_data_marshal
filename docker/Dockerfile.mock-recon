@@ -1,0 +1,19 @@
+FROM python:3.11-slim
+
+# Install curl for healthcheck and flask for the service
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir flask requests
+
+# Copy mock reconstruction service
+COPY tests/mock_recon_service.py /app/mock_recon_service.py
+
+WORKDIR /app
+
+# Disable Python output buffering so logs appear immediately
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 9002
+
+# Default: run mock reconstruction service on port 9002
+CMD ["python3", "-u", "mock_recon_service.py", "9002"]
