@@ -67,9 +67,8 @@ TEST_CASE("HTTP Handler: Pose Operations", "[http]")
     {
         http::request<http::string_body> req{http::verb::get, "/v1/pose/current", 11};
         auto res = handle_http_request(req, state);
-        REQUIRE(res.result() == http::status::ok);
-        auto body = json::parse(res.body());
-        CHECK(body["data"]["pose"]["p"] == std::vector<double>{0, 0, 0});
+        // Cache is empty on startup -> 204 No Content
+        REQUIRE(res.result() == http::status::no_content);
     }
 
     SECTION("Update pose valid")
@@ -95,9 +94,12 @@ TEST_CASE("HTTP Handler: Pose Operations", "[http]")
         CHECK(p.p[0] == 1.0);
         CHECK(p.source == "test_source");
 
-        // Verify persistence
-        fs::path pose_log = fs::path(temp) / "mrd" / "poses.jsonl";
-        CHECK(fs::exists(pose_log));
+        // Verify write was queued (async writer not running in tests)
+        {
+            std::lock_guard<std::mutex> lock(state.json_queue_mutex);
+            CHECK(!state.json_write_queue.empty());
+            CHECK(state.json_write_queue.front().type == MarshalState::WriteType::POSE);
+        }
     }
 
     SECTION("Update pose invalid (missing fields)")
@@ -128,41 +130,54 @@ TEST_CASE("HTTP Handler: MRD Ingest and Retrieval", "[http][mrd]")
 
     SECTION("Ingest MRD file")
     {
-        std::string content = "fake mrd content";
+        // Build payload with HDF5 magic signature so detect_mrd_type() recognizes it
+        const uint8_t hdf5_sig[] = {0x89, 0x48, 0x44, 0x46, 0x0d, 0x0a, 0x1a, 0x0a};
+        std::string content(reinterpret_cast<const char*>(hdf5_sig), sizeof(hdf5_sig));
+        content += "fake hdf5 payload data";
+
         http::request<http::string_body> req{http::verb::post, "/v1/mrd/ingest", 11};
         req.body() = content;
         req.prepare_payload();
 
         auto res = handle_http_request(req, state);
         REQUIRE(res.result() == http::status::created);
-        
+
         auto body = json::parse(res.body());
         CHECK(body["status"] == "ok");
         CHECK(body["data"].contains("path"));
         CHECK(body["data"].contains("ts"));
-        
+
         // Verify file exists
         std::string filepath = body["data"]["path"];
         CHECK(fs::exists(filepath));
-        
+
         // Verify index.jsonl
         CHECK(fs::exists(fs::path(temp) / "mrd" / "index.jsonl"));
-        
+
         // Verify latest.json
         CHECK(fs::exists(fs::path(temp) / "mrd" / "latest.json"));
     }
 
     SECTION("Get Latest MRD")
     {
-        // Setup initial state
-        fs::path latest_path = fs::path(temp) / "mrd" / "latest.json";
-        std::ofstream(latest_path) << R"({"id": "file1.mrd"})";
+        // Handler reads from in-memory cache, not from file
+        {
+            std::lock_guard<std::mutex> lock(state.latest_mrd_mutex);
+            state.latest_mrd_json = R"({"id": "file1.mrd"})";
+        }
 
         http::request<http::string_body> req{http::verb::get, "/v1/mrd/latest", 11};
         auto res = handle_http_request(req, state);
         REQUIRE(res.result() == http::status::ok);
         auto body = json::parse(res.body());
         CHECK(body["data"]["id"] == "file1.mrd");
+    }
+
+    SECTION("Get Latest MRD (empty cache)")
+    {
+        http::request<http::string_body> req{http::verb::get, "/v1/mrd/latest", 11};
+        auto res = handle_http_request(req, state);
+        REQUIRE(res.result() == http::status::no_content);
     }
 
     SECTION("Get MRD Since")
@@ -207,8 +222,10 @@ TEST_CASE("HTTP Handler: ISMRMRD Frame", "[http][ismrmrd]")
     dims.channels = 1;
     
     // Create valid ISMRMRD Image Header
+    // version must be non-zero for detect_mrd_type() to recognize as IMAGE
     ISMRMRD::ImageHeader img_header;
     std::memset(&img_header, 0, sizeof(img_header));
+    img_header.version = 1;
     img_header.matrix_size[0] = 2;
     img_header.matrix_size[1] = 2;
     img_header.matrix_size[2] = 1;

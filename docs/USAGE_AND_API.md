@@ -178,12 +178,9 @@ X-Frame-Dtype: float32
 <binary frame data>
 ```
 
-**Error Response (no frames yet):**
+**Response (no frames yet):**
 ```http
-HTTP/1.1 404 Not Found
-Content-Type: application/json
-
-{"status": "error", "message": "No frames available"}
+HTTP/1.1 204 No Content
 ```
 
 ---
@@ -305,8 +302,8 @@ def get_latest_frame(marshal_url="http://127.0.0.1:8080"):
     """Fetch the latest MRI frame from the marshal."""
     response = requests.get(f"{marshal_url}/v1/mrd/latest")
 
-    if response.status_code == 404:
-        return None
+    if response.status_code == 204:
+        return None  # No frames available yet
 
     response.raise_for_status()
 
@@ -600,9 +597,13 @@ Subsequent messages are binary frame data.
 | HTTP Code | Meaning | Cause |
 |-----------|---------|-------|
 | 200 | Success | Operation completed |
-| 400 | Bad Request | Invalid frame data or parameters |
-| 404 | Not Found | No frames available yet |
+| 201 | Created | File ingested successfully |
+| 202 | Accepted | K-space queued for async reconstruction |
+| 204 | No Content | No data available yet (empty cache) |
+| 400 | Bad Request | Invalid frame data, unknown format, or missing parameters |
 | 500 | Server Error | SWMR write failed, disk full, etc. |
+| 501 | Not Implemented | Reconstruction service not configured |
+| 502 | Bad Gateway | Reconstruction service failed |
 | 503 | Service Unavailable | Server overloaded or shutting down |
 
 ---

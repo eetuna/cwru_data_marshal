@@ -101,6 +101,9 @@ endif()
 add_executable(image_streamer clients/image_streamer/image_streamer_main.cpp)
 target_link_libraries(image_streamer PRIVATE Boost::system Threads::Threads ${ismrmrd_target})
 
+add_executable(kspace_streamer clients/kspace_streamer/kspace_streamer_main.cpp)
+target_link_libraries(kspace_streamer PRIVATE Boost::system Threads::Threads ${ismrmrd_target})
+
 add_executable(mk_mrd src/mk_mrd.cpp)
 target_link_libraries(mk_mrd PRIVATE ${ismrmrd_target} hdf5_serial)
 target_compile_features(mk_mrd PRIVATE cxx_std_17)

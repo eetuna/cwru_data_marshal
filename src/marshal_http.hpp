@@ -20,6 +20,7 @@
 
 #include <nlohmann/json.hpp>
 #include "mrd_io.hpp"
+#include "mrd_type_detector.hpp"
 
 #include <array>
 #include <chrono>
@@ -148,14 +149,26 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
         return make_response(http::status::ok, {{"uptime_s", up}});
     }
 
-    // GET /v1/pose/current
+    // GET /v1/pose/current  (reads from in-memory cache)
     if (req.method() == http::verb::get && req.target() == "/v1/pose/current")
     {
-        auto p = state.poses.get();
-        auto jpose = pose_to_json(p);
-        jpose["ts"] = iso8601_now();
-        jpose["t_ms"] = mrd::now_ms_epoch();
-        return make_response(http::status::ok, {{"pose", jpose}, {"source", p.source}});
+        std::string cached_json;
+        {
+            std::lock_guard<std::mutex> lock(state.latest_pose_mutex);
+            cached_json = state.latest_pose_json;
+        }
+
+        if (!cached_json.empty())
+        {
+            try {
+                auto pose_data = json::parse(cached_json);
+                return make_response(http::status::ok, {{"pose", pose_data}, {"source", pose_data.value("source", "unknown")}});
+            } catch (...) {
+                return make_response(http::status::internal_server_error,
+                    {{"error", "failed to parse pose cache"}});
+            }
+        }
+        return make_response(http::status::no_content, json::object());
     }
 
     // POST /v1/pose/update
@@ -178,39 +191,51 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                 return make_response(http::status::bad_request, {{"error", "invalid shapes"}, {"p_len", jp.size()}, {"R_len", jR.size()}});
             }
 
+            // Build pose JSON with server timestamp
+            std::string frame = body.value("frame", std::string("scanner"));
+            std::string source = body.value("source", std::string("api"));
+            std::string ts = mrd::iso8601_now_ms();
+            int64_t t_ms = mrd::now_ms_epoch();
+
+            json pose_data = {
+                {"p", jp},
+                {"R", jR},
+                {"frame", frame},
+                {"source", source},
+                {"ts", ts},
+                {"t_ms", t_ms}
+            };
+            const std::string pose_json = pose_data.dump();
+
+            // Update in-memory cache (for GET /v1/pose/current)
+            {
+                std::lock_guard<std::mutex> lock(state.latest_pose_mutex);
+                state.latest_pose_json = pose_json;
+            }
+
+            // Also update PoseStore (keep for potential internal use)
             Pose pose{};
-            pose.frame = body.value("frame", std::string("scanner"));
-            pose.source = body.value("source", std::string("api"));
+            pose.frame = frame;
+            pose.source = source;
             for (int i = 0; i < 3; ++i)
                 pose.p[i] = static_cast<double>(jp[i]);
             for (int i = 0; i < 9; ++i)
                 pose.R[i] = static_cast<double>(jR[i]);
             pose.t = std::chrono::system_clock::now();
-
             state.poses.set(pose);
 
-            // Persist pose to disk
-            try
+            // Queue pose for async persistence (NON-BLOCKING!)
             {
-                auto paths = mrd::resolve_sink_paths(state);
-                fs::path pose_log = paths.index_root / "poses.jsonl";
-                auto j_persist = pose_to_json(pose);
-                j_persist["ts"] = mrd::iso8601_now_ms();
-                mrd::append_line(pose_log, j_persist.dump());
+                std::lock_guard<std::mutex> lock(state.json_queue_mutex);
+                state.json_write_queue.push({MarshalState::WriteType::POSE, pose_json});
             }
-            catch (const std::exception &e)
-            {
-                std::cerr << "Pose persistence failed: " << e.what() << "\n";
-            }
+            state.json_queue_cv.notify_one();
 
             // WS: broadcast pose (non-fatal if WS not set)
             try
             {
-                nlohmann::json evt = {
-                    {"type", "pose"},
-                    {"p", {pose.p[0], pose.p[1], pose.p[2]}},
-                    {"R", {pose.R[0], pose.R[1], pose.R[2], pose.R[3], pose.R[4], pose.R[5], pose.R[6], pose.R[7], pose.R[8]}},
-                    {"ts", mrd::iso8601_now_ms()}};
+                json evt = pose_data;
+                evt["type"] = "pose";
                 if (state.ws_emit_topic) {
                     state.ws_emit_topic(evt.dump(), "pose");
                 }
@@ -220,11 +245,7 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                 std::cerr << "Pose WS broadcast failed: " << e.what() << "\n";
             }
 
-            auto jpose = pose_to_json(pose);
-            jpose["ts"] = iso8601_now();
-            jpose["t_ms"] = mrd::now_ms_epoch();
-
-            return make_response(http::status::ok, {{"pose", jpose}});
+            return make_response(http::status::ok, {{"pose", pose_data}});
         }
         catch (const std::exception &e)
         {
@@ -254,20 +275,20 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
 
             // Server generates timestamp
             body["ts"] = mrd::iso8601_now_ms();
+            const std::string bio_json = body.dump();
 
-            // Persist to disk
-            try
+            // Update in-memory cache (for GET /v1/bio/latest)
             {
-                auto paths = mrd::resolve_sink_paths(state);
-                fs::path bio_log = paths.index_root / "bio.jsonl";
-                mrd::append_line(bio_log, body.dump());
+                std::lock_guard<std::mutex> lock(state.latest_bio_mutex);
+                state.latest_bio_json = bio_json;
             }
-            catch (const std::exception &e)
+
+            // Queue bio for async persistence (NON-BLOCKING!)
             {
-                std::cerr << "Bio persistence failed: " << e.what() << "\n";
-                // Continue to broadcast even if disk fails? Or fail? 
-                // Following pose pattern: catch and continue, but we log it now.
+                std::lock_guard<std::mutex> lock(state.json_queue_mutex);
+                state.json_write_queue.push({MarshalState::WriteType::BIO, bio_json});
             }
+            state.json_queue_cv.notify_one();
 
             // WS: broadcast (topic="bio")
             try
@@ -295,43 +316,25 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
         }
     }
 
-    // GET /v1/bio/latest
-    // Returns the most recent bio signal entry from bio.jsonl
+    // GET /v1/bio/latest  (reads from in-memory cache)
     if (req.method() == http::verb::get && req.target() == "/v1/bio/latest")
     {
-        try
+        std::string cached_json;
         {
-            auto paths = mrd::resolve_sink_paths(state);
-            fs::path bio_log = paths.index_root / "bio.jsonl";
-
-            if (!fs::exists(bio_log))
-            {
-                return make_response(http::status::no_content, json::object());
-            }
-
-            // Read the last line from bio.jsonl
-            std::ifstream ifs(bio_log);
-            std::string last_line;
-            std::string line;
-            while (std::getline(ifs, line))
-            {
-                if (!line.empty())
-                    last_line = line;
-            }
-
-            if (last_line.empty())
-            {
-                return make_response(http::status::no_content, json::object());
-            }
-
-            auto bio_entry = json::parse(last_line);
-            return make_response(http::status::ok, bio_entry);
+            std::lock_guard<std::mutex> lock(state.latest_bio_mutex);
+            cached_json = state.latest_bio_json;
         }
-        catch (const std::exception &e)
+
+        if (!cached_json.empty())
         {
-            return make_response(http::status::internal_server_error,
-                {{"error", "failed to read bio log"}, {"what", e.what()}});
+            try {
+                return make_response(http::status::ok, json::parse(cached_json));
+            } catch (...) {
+                return make_response(http::status::internal_server_error,
+                    {{"error", "failed to parse bio cache"}});
+            }
         }
+        return make_response(http::status::no_content, json::object());
     }
 
     // GET /v1/config
@@ -340,7 +343,187 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
         return make_response(http::status::ok, {{"data_dir", state.data_dir}, {"ws_port", 8090}, {"max_entries", 100000}});
     }
 
-    // POST /v1/mrd/frame  (append ISMRMRD Image to SWMR dataset)
+    // POST /v1/mrd/callback  (receives reconstructed images from async recon service)
+    if (req.method() == http::verb::post && req.target() == "/v1/mrd/callback")
+    {
+        using namespace std::string_literals;
+        try
+        {
+            if (!state.mrd_sink)
+                throw std::runtime_error("MRD sink unavailable");
+
+            auto stream_header = std::string(req["X-MRD-Stream"]);
+            if (stream_header.empty())
+                throw std::runtime_error("missing X-MRD-Stream header");
+
+            const std::string &body = req.body();
+            if (body.empty())
+                throw std::runtime_error("empty body");
+
+            // Optional job tracking ID (for debugging/monitoring)
+            auto job_id = std::string(req["X-MRD-Job-Id"]);
+
+            std::cout << "[marshal_http] Received reconstruction callback: "
+                      << "stream=" << stream_header
+                      << ", size=" << body.size() << " bytes";
+            if (!job_id.empty()) std::cout << ", job_id=" << job_id;
+            std::cout << "\n";
+
+            // Validate ImageHeader
+            if (body.size() < sizeof(ISMRMRD::ImageHeader))
+                throw std::runtime_error("body too small for ISMRMRD ImageHeader");
+
+            const auto *img_header = reinterpret_cast<const ISMRMRD::ImageHeader *>(body.data());
+            mrd::ImageDimensions dims;
+            dims.spatial = {
+                static_cast<hsize_t>(img_header->matrix_size[0]),
+                static_cast<hsize_t>(img_header->matrix_size[1]),
+                static_cast<hsize_t>(img_header->matrix_size[2] ? img_header->matrix_size[2] : 1)
+            };
+            dims.channels = img_header->channels ? static_cast<hsize_t>(img_header->channels) : 1;
+
+            if (dims.spatial[0] == 0 || dims.spatial[1] == 0)
+                throw std::runtime_error("invalid matrix size in header");
+
+            auto element_type = mrd::element_type_from_ismrmrd(img_header->data_type);
+            const size_t payload_bytes = body.size() - sizeof(ISMRMRD::ImageHeader);
+            const size_t expected_bytes = mrd::element_type_bytes(element_type) *
+                                          static_cast<size_t>(dims.spatial[0]) *
+                                          static_cast<size_t>(dims.spatial[1]) *
+                                          static_cast<size_t>(dims.spatial[2]) *
+                                          static_cast<size_t>(dims.channels);
+
+            if (payload_bytes != expected_bytes)
+                throw std::runtime_error("payload size (" + std::to_string(payload_bytes) +
+                                         ") does not match expected (" + std::to_string(expected_bytes) + ")");
+
+            std::string header_xml = mrd::default_ismrmrd_header(dims, element_type, stream_header);
+            std::string session_header = std::string(req["X-MRD-Session"]);
+            const void *payload = body.data() + sizeof(ISMRMRD::ImageHeader);
+
+            // THREAD-SAFE: MrdSink::append_frame has internal mutex protection
+            auto result = state.mrd_sink->append_frame(
+                stream_header,
+                dims,
+                element_type,
+                header_xml,
+                payload,
+                payload_bytes,
+                session_header
+            );
+
+            std::cout << "[marshal_http] Stored reconstructed callback image: "
+                      << "stream=" << stream_header
+                      << ", frame=" << result.frame_index
+                      << ", path=" << result.file_path.string() << "\n";
+
+            json resp_data = {
+                {"status", "stored"},
+                {"path", result.file_path.string()},
+                {"stream", result.stream_id},
+                {"frame_index", result.frame_index},
+                {"flushed", result.flushed},
+                {"ts", result.timestamp},
+                {"t_ms", mrd::now_ms_epoch()},
+                {"dims", {result.dims.spatial[0], result.dims.spatial[1], result.dims.spatial[2]}},
+                {"channels", result.dims.channels},
+                {"datatype", mrd::element_type_to_string(result.element_type)},
+                {"size_bytes", result.bytes},
+                {"callback", true}
+            };
+
+            if (!job_id.empty()) resp_data["job_id"] = job_id;
+
+            // Forward reconstructed image to scanner if reply-to URL was provided
+            if (!job_id.empty()) {
+                std::string reply_to;
+                {
+                    std::lock_guard<std::mutex> lock(state.reply_to_mutex);
+                    auto it = state.reply_to_urls.find(job_id);
+                    if (it != state.reply_to_urls.end()) {
+                        reply_to = it->second;
+                        state.reply_to_urls.erase(it);
+                    }
+                }
+
+                if (!reply_to.empty()) {
+                    std::cout << "[marshal_http] Forwarding reconstructed image to scanner: "
+                              << reply_to << " (job_id=" << job_id << ")\n";
+
+                    // ASYNC: Forward to scanner without blocking callback response
+                    std::string image_data = body;
+                    std::thread([reply_to, image_data = std::move(image_data),
+                                 stream_header, job_id]() {
+                        try {
+                            namespace beast = boost::beast;
+                            namespace net = boost::asio;
+                            using tcp = net::ip::tcp;
+
+                            std::string host = reply_to;
+                            std::string port = "80";
+                            std::string path = "/";
+
+                            size_t protocol_pos = host.find("://");
+                            if (protocol_pos != std::string::npos) {
+                                host = host.substr(protocol_pos + 3);
+                            }
+                            size_t path_pos = host.find("/");
+                            if (path_pos != std::string::npos) {
+                                path = host.substr(path_pos);
+                                host = host.substr(0, path_pos);
+                            }
+                            size_t port_pos = host.find(":");
+                            if (port_pos != std::string::npos) {
+                                port = host.substr(port_pos + 1);
+                                host = host.substr(0, port_pos);
+                            }
+
+                            net::io_context ioc;
+                            tcp::resolver resolver(ioc);
+                            beast::tcp_stream stream(ioc);
+
+                            auto const results = resolver.resolve(host, port);
+                            stream.connect(results);
+
+                            http::request<http::string_body> scanner_req{http::verb::post, path, 11};
+                            scanner_req.set(http::field::host, host);
+                            scanner_req.set(http::field::user_agent, "MRI-Marshal/1.0");
+                            scanner_req.set(http::field::content_type, "application/octet-stream");
+                            scanner_req.set("X-MRD-Stream", stream_header);
+                            scanner_req.set("X-MRD-Job-Id", job_id);
+                            scanner_req.body() = image_data;
+                            scanner_req.prepare_payload();
+
+                            http::write(stream, scanner_req);
+
+                            beast::flat_buffer buf;
+                            http::response<http::string_body> scanner_res;
+                            http::read(stream, buf, scanner_res);
+
+                            beast::error_code ec;
+                            stream.socket().shutdown(tcp::socket::shutdown_both, ec);
+
+                            std::cout << "[marshal_http] Scanner reply-to response: HTTP "
+                                      << scanner_res.result_int() << " (job_id=" << job_id << ")\n";
+                        }
+                        catch (const std::exception& e) {
+                            std::cerr << "[marshal_http] ERROR: Failed to forward image to scanner: "
+                                      << e.what() << " (job_id=" << job_id << ")\n";
+                        }
+                    }).detach();
+                }
+            }
+
+            return make_response(http::status::ok, resp_data);
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "[marshal_http] ERROR: Callback processing failed: " << e.what() << "\n";
+            return make_response(http::status::bad_request, {{"error", e.what()}});
+        }
+    }
+
+    // POST /v1/mrd/frame  (append ISMRMRD data with smart type detection)
     if (req.method() == http::verb::post && req.target() == "/v1/mrd/frame")
     {
         using namespace std::string_literals;
@@ -354,6 +537,169 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
             const std::string &body = req.body();
             if (body.empty())
                 throw std::runtime_error("empty body");
+
+            // SMART DETECTION: Determine data type automatically
+            mrd::MrdDataType detected_type = mrd::detect_mrd_type(body.data(), body.size());
+            std::cout << "[marshal_http] Detected MRD type: " << mrd::mrd_data_type_to_string(detected_type)
+                      << " (stream=" << stream_header << ", size=" << body.size() << " bytes)\n";
+
+            // Route based on detected type
+            switch (detected_type)
+            {
+            case mrd::MrdDataType::ACQUISITION:
+                // RAW K-SPACE DATA - Forward to external reconstruction service ASYNCHRONOUSLY
+                {
+                    if (!state.recon_enabled) {
+                        return make_response(http::status::not_implemented, {
+                            {"error", "reconstruction service not configured"},
+                            {"detected_type", "ACQUISITION"},
+                            {"message", "Raw k-space detected but no reconstruction service available."},
+                            {"hint", "Start marshal with --recon-endpoint http://localhost:9002"}
+                        });
+                    }
+
+                    std::cout << "[marshal_http] ASYNC: Queuing k-space for reconstruction: "
+                              << state.recon_endpoint << "\n";
+
+                    // Capture data for async task (COPY - body will be invalid after response)
+                    std::string kspace_data = body;
+                    std::string stream_id = stream_header;
+                    std::string session_id = std::string(req["X-MRD-Session"]);
+                    std::string recon_endpoint = state.recon_endpoint;
+
+                    // Build callback URL (Docker internal hostname)
+                    const std::string callback_url = "http://mri-marshal:8080/v1/mrd/callback";
+
+                    // Generate unique job ID for tracking
+                    const std::string job_id = stream_id + "_" + mrd::iso8601_now_ms();
+
+                    // Capture reply-to URL if provided (for returning images to scanner)
+                    std::string reply_to = std::string(req["X-MRD-Reply-To"]);
+                    if (!reply_to.empty()) {
+                        std::lock_guard<std::mutex> lock(state.reply_to_mutex);
+                        state.reply_to_urls[job_id] = reply_to;
+                    }
+
+                    // ASYNC: Spawn detached thread to forward to recon
+                    // Note: Using detached thread is acceptable here because:
+                    //   1. The thread only does network I/O (no shared state mutation)
+                    //   2. Failure is logged but non-fatal (recon might be slow/down)
+                    //   3. The callback endpoint handles actual storage
+                    std::thread([kspace_data = std::move(kspace_data),
+                                 stream_id,          // Copy for thread (original moved above)
+                                 session_id = std::move(session_id),
+                                 recon_endpoint = std::move(recon_endpoint),
+                                 callback_url,       // Copy for thread (need original for response)
+                                 job_id]() {         // Copy for thread (need original for response)
+                        try {
+                            namespace beast = boost::beast;
+                            namespace net = boost::asio;
+                            using tcp = net::ip::tcp;
+
+                            // Parse endpoint URL (format: http://host:port)
+                            std::string host = recon_endpoint;
+                            std::string port = "9002";
+
+                            size_t protocol_pos = host.find("://");
+                            if (protocol_pos != std::string::npos) {
+                                host = host.substr(protocol_pos + 3);
+                            }
+                            size_t port_pos = host.find(":");
+                            if (port_pos != std::string::npos) {
+                                port = host.substr(port_pos + 1);
+                                host = host.substr(0, port_pos);
+                            }
+                            size_t path_pos = port.find("/");
+                            if (path_pos != std::string::npos) {
+                                port = port.substr(0, path_pos);
+                            }
+
+                            // Connect to reconstruction service
+                            net::io_context ioc;
+                            tcp::resolver resolver(ioc);
+                            beast::tcp_stream stream(ioc);
+
+                            auto const results = resolver.resolve(host, port);
+                            stream.connect(results);
+
+                            // Prepare HTTP POST request with CALLBACK HEADER
+                            http::request<http::string_body> recon_req{http::verb::post, "/reconstruct", 11};
+                            recon_req.set(http::field::host, host);
+                            recon_req.set(http::field::user_agent, "MRI-Marshal/1.0");
+                            recon_req.set(http::field::content_type, "application/octet-stream");
+                            recon_req.set("X-MRD-Stream", stream_id);
+                            recon_req.set("X-MRD-Session", session_id);
+                            recon_req.set("X-MRD-Callback", callback_url);  // Callback URL for async response
+                            recon_req.set("X-MRD-Job-Id", job_id);          // Job tracking ID
+                            recon_req.body() = kspace_data;
+                            recon_req.prepare_payload();
+
+                            // Send request
+                            http::write(stream, recon_req);
+
+                            // Read acknowledgment (should be 202 Accepted quickly)
+                            beast::flat_buffer recon_buffer;
+                            http::response<http::string_body> recon_res;
+                            http::read(stream, recon_buffer, recon_res);
+
+                            // Close connection
+                            beast::error_code ec;
+                            stream.socket().shutdown(tcp::socket::shutdown_both, ec);
+
+                            std::cout << "[marshal_http] ASYNC: Recon service acknowledged job " << job_id
+                                      << ": HTTP " << recon_res.result_int() << "\n";
+
+                            if (recon_res.result() != http::status::accepted &&
+                                recon_res.result() != http::status::ok &&
+                                recon_res.result() != http::status::created) {
+                                std::cerr << "[marshal_http] ASYNC WARNING: Recon returned unexpected status: "
+                                          << recon_res.result_int() << " - " << recon_res.body() << "\n";
+                            }
+                        }
+                        catch (const std::exception& e) {
+                            std::cerr << "[marshal_http] ASYNC ERROR: Failed to forward to recon: "
+                                      << e.what() << "\n";
+                        }
+                    }).detach();
+
+                    // Return 202 IMMEDIATELY - don't wait for reconstruction
+                    return make_response(http::status::accepted, {
+                        {"status", "processing"},
+                        {"job_id", job_id},
+                        {"stream", stream_header},
+                        {"recon_endpoint", state.recon_endpoint},
+                        {"callback_url", callback_url},
+                        {"message", "K-space queued for asynchronous reconstruction. "
+                                    "Results will be POSTed to callback URL."}
+                    });
+                }
+
+            case mrd::MrdDataType::HDF5_FILE:
+                // COMPLETE HDF5 FILE - Forward to /v1/mrd/ingest
+                std::cout << "[marshal_http] HDF5 file detected, forwarding to /v1/mrd/ingest\n";
+                {
+                    auto entry = mrd::ingest_payload(state, body.data(), body.size(), "http");
+                    return make_response(http::status::created, entry);
+                }
+
+            case mrd::MrdDataType::IMAGE:
+                // RECONSTRUCTED IMAGE - Process normally (existing logic below)
+                std::cout << "[marshal_http] Reconstructed image (ImageHeader) detected, processing normally\n";
+                break;
+
+            case mrd::MrdDataType::UNKNOWN:
+            default:
+                std::cerr << "[marshal_http] ERROR: Unknown or invalid MRD data format\n";
+                return make_response(http::status::bad_request, {
+                    {"error", "unknown MRD data format"},
+                    {"detected_type", "UNKNOWN"},
+                    {"message", "Could not identify data as AcquisitionHeader, ImageHeader, or HDF5 file"},
+                    {"stream", stream_header},
+                    {"body_size", body.size()}
+                });
+            }
+
+            // EXISTING LOGIC: Process reconstructed image (ImageHeader)
             if (body.size() < sizeof(ISMRMRD::ImageHeader))
                 throw std::runtime_error("body too small for ISMRMRD ImageHeader");
 
@@ -408,7 +754,7 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
         }
     }
 
-    // POST /v1/mrd/ingest  (writes ${data_dir}/mrd/*.mrd and updates index/latest)
+    // POST /v1/mrd/ingest  (writes ${data_dir}/mrd/*.mrd with smart type detection)
     if (req.method() == http::verb::post && req.target() == "/v1/mrd/ingest")
     {
         try
@@ -419,6 +765,211 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                 return make_response(http::status::bad_request, {{"error", "empty body"}});
             }
 
+            // SMART DETECTION: Determine data type automatically
+            mrd::MrdDataType detected_type = mrd::detect_mrd_type(body.data(), body.size());
+            std::cout << "[marshal_http] /v1/mrd/ingest - Detected type: " << mrd::mrd_data_type_to_string(detected_type)
+                      << " (size=" << body.size() << " bytes)\n";
+
+            // Route based on detected type
+            switch (detected_type)
+            {
+            case mrd::MrdDataType::ACQUISITION:
+                // RAW K-SPACE DATA - Forward to external reconstruction service
+                {
+                    if (!state.recon_enabled) {
+                        return make_response(http::status::not_implemented, {
+                            {"error", "reconstruction service not configured"},
+                            {"detected_type", "ACQUISITION"},
+                            {"message", "Raw k-space detected but no reconstruction service available."},
+                            {"hint", "Start marshal with --recon-endpoint http://localhost:9002"}
+                        });
+                    }
+
+                    std::cout << "[marshal_http] /ingest: Forwarding raw k-space to reconstruction service: "
+                              << state.recon_endpoint << "\n";
+
+                    try {
+                        namespace beast = boost::beast;
+                        namespace net = boost::asio;
+                        using tcp = net::ip::tcp;
+
+                        // Parse endpoint URL
+                        std::string host = state.recon_endpoint;
+                        std::string port = "9002";
+
+                        size_t protocol_pos = host.find("://");
+                        if (protocol_pos != std::string::npos) {
+                            host = host.substr(protocol_pos + 3);
+                        }
+                        size_t port_pos = host.find(":");
+                        if (port_pos != std::string::npos) {
+                            port = host.substr(port_pos + 1);
+                            host = host.substr(0, port_pos);
+                        }
+                        size_t path_pos = port.find("/");
+                        if (path_pos != std::string::npos) {
+                            port = port.substr(0, path_pos);
+                        }
+
+                        // Connect to reconstruction service
+                        net::io_context ioc;
+                        tcp::resolver resolver(ioc);
+                        beast::tcp_stream stream(ioc);
+
+                        auto const results = resolver.resolve(host, port);
+                        stream.connect(results);
+
+                        // Get stream name from header or generate one
+                        std::string stream_name = std::string(req["X-MRD-Stream"]);
+                        if (stream_name.empty()) {
+                            stream_name = "ingest_" + mrd::iso8601_now_ms();
+                        }
+
+                        // Prepare HTTP POST request
+                        http::request<http::string_body> recon_req{http::verb::post, "/reconstruct", 11};
+                        recon_req.set(http::field::host, host);
+                        recon_req.set(http::field::user_agent, "MRI-Marshal/1.0");
+                        recon_req.set(http::field::content_type, "application/octet-stream");
+                        recon_req.set("X-MRD-Stream", stream_name);
+                        recon_req.body() = body;
+                        recon_req.prepare_payload();
+
+                        http::write(stream, recon_req);
+
+                        beast::flat_buffer recon_buffer;
+                        http::response<http::string_body> recon_res;
+                        http::read(stream, recon_buffer, recon_res);
+
+                        beast::error_code ec;
+                        stream.socket().shutdown(tcp::socket::shutdown_both, ec);
+
+                        std::cout << "[marshal_http] /ingest: Reconstruction service responded: HTTP "
+                                  << recon_res.result_int() << "\n";
+
+                        if (recon_res.result() != http::status::ok && recon_res.result() != http::status::created) {
+                            return make_response(http::status::bad_gateway, {
+                                {"error", "reconstruction service failed"},
+                                {"service_status", recon_res.result_int()},
+                                {"service_response", recon_res.body()}
+                            });
+                        }
+
+                        // For /ingest, save reconstructed data as complete file
+                        const std::string& reconstructed = recon_res.body();
+
+                        // Use ingest_payload to save the reconstructed data as a complete file
+                        auto entry = mrd::ingest_payload(state, reconstructed.data(), reconstructed.size(), "http-reconstructed");
+
+                        std::cout << "[marshal_http] /ingest: Saved reconstructed data as complete file\n";
+
+                        // Forward to scanner if reply-to URL provided
+                        std::string reply_to = std::string(req["X-MRD-Reply-To"]);
+                        if (!reply_to.empty()) {
+                            std::cout << "[marshal_http] /ingest: Forwarding reconstructed image to scanner: "
+                                      << reply_to << "\n";
+
+                            std::thread([reply_to, reconstructed, stream_name]() {
+                                try {
+                                    namespace beast = boost::beast;
+                                    namespace net = boost::asio;
+                                    using tcp = net::ip::tcp;
+
+                                    std::string host = reply_to;
+                                    std::string port = "80";
+                                    std::string path = "/";
+
+                                    size_t protocol_pos = host.find("://");
+                                    if (protocol_pos != std::string::npos) {
+                                        host = host.substr(protocol_pos + 3);
+                                    }
+                                    size_t path_pos = host.find("/");
+                                    if (path_pos != std::string::npos) {
+                                        path = host.substr(path_pos);
+                                        host = host.substr(0, path_pos);
+                                    }
+                                    size_t port_pos = host.find(":");
+                                    if (port_pos != std::string::npos) {
+                                        port = host.substr(port_pos + 1);
+                                        host = host.substr(0, port_pos);
+                                    }
+
+                                    net::io_context ioc;
+                                    tcp::resolver resolver(ioc);
+                                    beast::tcp_stream stream(ioc);
+
+                                    auto const results = resolver.resolve(host, port);
+                                    stream.connect(results);
+
+                                    http::request<http::string_body> scanner_req{http::verb::post, path, 11};
+                                    scanner_req.set(http::field::host, host);
+                                    scanner_req.set(http::field::user_agent, "MRI-Marshal/1.0");
+                                    scanner_req.set(http::field::content_type, "application/octet-stream");
+                                    scanner_req.set("X-MRD-Stream", stream_name);
+                                    scanner_req.body() = reconstructed;
+                                    scanner_req.prepare_payload();
+
+                                    http::write(stream, scanner_req);
+
+                                    beast::flat_buffer buf;
+                                    http::response<http::string_body> scanner_res;
+                                    http::read(stream, buf, scanner_res);
+
+                                    beast::error_code ec;
+                                    stream.socket().shutdown(tcp::socket::shutdown_both, ec);
+
+                                    std::cout << "[marshal_http] /ingest: Scanner reply-to response: HTTP "
+                                              << scanner_res.result_int() << "\n";
+                                }
+                                catch (const std::exception& e) {
+                                    std::cerr << "[marshal_http] /ingest ERROR: Failed to forward image to scanner: "
+                                              << e.what() << "\n";
+                                }
+                            }).detach();
+
+                            entry["reply_to"] = reply_to;
+                        }
+
+                        // Add reconstruction info to response
+                        entry["reconstructed"] = true;
+                        entry["message"] = "Raw k-space reconstructed and saved as complete file";
+
+                        return make_response(http::status::created, entry);
+                    }
+                    catch (const std::exception& e) {
+                        std::cerr << "[marshal_http] ERROR: /ingest reconstruction forwarding failed: "
+                                  << e.what() << "\n";
+                        return make_response(http::status::bad_gateway, {
+                            {"error", "reconstruction forwarding failed"},
+                            {"what", e.what()},
+                            {"endpoint", state.recon_endpoint}
+                        });
+                    }
+                }
+
+            case mrd::MrdDataType::IMAGE:
+                // SINGLE IMAGE FRAME - Should use /v1/mrd/frame instead
+                std::cout << "[marshal_http] WARNING: Single ImageHeader detected on /v1/mrd/ingest. "
+                          << "Consider using /v1/mrd/frame for streaming.\n";
+                // Allow it but log warning (user might intentionally upload single frame)
+                break;
+
+            case mrd::MrdDataType::HDF5_FILE:
+                // COMPLETE HDF5 FILE - This is the expected format
+                std::cout << "[marshal_http] HDF5 file detected, proceeding with ingest\n";
+                break;
+
+            case mrd::MrdDataType::UNKNOWN:
+            default:
+                std::cerr << "[marshal_http] ERROR: Unknown data format for /v1/mrd/ingest\n";
+                return make_response(http::status::bad_request, {
+                    {"error", "unknown data format"},
+                    {"detected_type", "UNKNOWN"},
+                    {"message", "Expected complete ISMRMRD HDF5 file. Could not identify data format."},
+                    {"body_size", body.size()}
+                });
+            }
+
+            // Process the data (works for both HDF5 files and single frames)
             auto entry = mrd::ingest_payload(state, body.data(), body.size(), "http");
             return make_response(http::status::created, entry);
         }
@@ -578,20 +1129,21 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
         }
     }
 
-    // GET /v1/mrd/latest  (reads ${data_dir}/mrd/latest.json)
+    // GET /v1/mrd/latest  (reads from in-memory cache)
     if (req.method() == http::verb::get && req.target() == "/v1/mrd/latest")
     {
-        fs::path latest_path = fs::path(state.data_dir) / "mrd" / "latest.json";
-        if (fs::exists(latest_path))
+        std::string cached_json;
         {
-            std::string s;
-            if (read_file_all(latest_path, s) && !s.empty())
-            {
-                try {
-                    return make_response(http::status::ok, json::parse(s));
-                } catch (...) {
-                    return make_response(http::status::internal_server_error, {{"error", "failed to parse latest.json"}});
-                }
+            std::lock_guard<std::mutex> lock(state.latest_mrd_mutex);
+            cached_json = state.latest_mrd_json;
+        }
+
+        if (!cached_json.empty())
+        {
+            try {
+                return make_response(http::status::ok, json::parse(cached_json));
+            } catch (...) {
+                return make_response(http::status::internal_server_error, {{"error", "failed to parse latest JSON"}});
             }
         }
         return make_response(http::status::no_content, {});

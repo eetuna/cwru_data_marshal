@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -395,8 +396,6 @@ bool MrdFile::perform_flush(bool force)
 
     if (H5Dflush(dataset_) < 0)
         throw std::runtime_error("H5Dflush failed");
-    if (H5Fflush(file_, H5F_SCOPE_LOCAL) < 0)
-        throw std::runtime_error("H5Fflush failed");
 
     frames_since_flush_ = 0;
     last_flush_ = std::chrono::steady_clock::now();
@@ -608,10 +607,20 @@ FrameAppendResult MrdSink::append_frame(const std::string &stream_id,
     entry["seq"] = seq;
     const std::string entry_dump = entry.dump();
 
-    append_line(sink.index_root / "index.jsonl", entry_dump);
-    const std::string latest = entry_dump;
-    write_atomic(sink.index_root / "latest.json", latest.data(), latest.size());
+    // Update in-memory cache (for /v1/mrd/latest endpoint)
+    {
+        std::lock_guard<std::mutex> lock(state_.latest_mrd_mutex);
+        state_.latest_mrd_json = entry_dump;
+    }
 
+    // Enqueue for background write (NON-BLOCKING!)
+    {
+        std::lock_guard<std::mutex> lock(state_.json_queue_mutex);
+        state_.json_write_queue.push({MarshalState::WriteType::MRD, entry_dump});
+    }
+    state_.json_queue_cv.notify_one();
+
+    // WebSocket emit
     try
     {
         state_.ws_emit_topic(entry_dump, "mrd");

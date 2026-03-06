@@ -39,21 +39,20 @@ To verify the entire system (Unit, Integration, and Stress tests):
 
 ## 📖 Documentation Map
 
-### Core Guides
-- **[Setup & Ingest](docs/guides/USAGE_WITH_CLIENTS.md):** How to install and start ingesting data.
-- **[Mode A: Live Mode](docs/guides/README_MODE_A.md):** Real-time SWMR streaming documentation.
-- **[Mode B: Dumpbox Mode](docs/guides/README_MODE_B.md):** Archival recording and playback documentation.
-- **[Troubleshooting](docs/guides/TROUBLESHOOTING.md):** Common issues and solutions.
+### Guides
+- **[Usage & API](docs/USAGE_AND_API.md):** Configuration, endpoints, and client integration.
+- **[Client API Reference](docs/CLIENT_API_REFERENCE.md):** HTTP endpoint specifications.
+- **[Demo Guide](docs/DEMO_GUIDE.md):** How to run the interactive demo.
 
-### Technical Architecture
-- **[System Architecture](docs/technical/ARCHITECTURE.md):** High-level design and data flow.
-- **[API Reference](docs/technical/API_REFERENCE.md):** REST and WebSocket endpoint specifications.
-- **[Branch Comparison](docs/technical/BRANCH_COMPARISON.md):** MRI Marshal (SWMR) vs. Robot Marshal (Lightweight Cache).
+### Architecture
+- **[SWMR & Robot Marshal Overview](docs/SWMR_AND_ROBOT_MARSHAL_OVERVIEW.md):** High-level design and data flow.
+- **[Caching Architecture](docs/CACHING_ARCHITECTURE.md):** Write-behind caching and async queue pattern.
+- **[HDF5 Locking Notes](docs/HDF5_LOCKING_NOTES.md):** WSL2-specific HDF5 file locking.
 
-### Reports & Performance
-- **[Performance Report](docs/reports/PERFORMANCE_REPORT.md):** Throughput and latency benchmarks.
-- **[Verification Report](docs/reports/REFACTORING_AND_TESTING_REPORT.md):** Audit of current implementation vs. DataFlow design.
-- **[Project Roadmap](docs/ROADMAP_IMPROVEMENTS.md):** Current status and planned enhancements.
+### Performance
+- **[Improvements & Optimization](docs/IMPROVEMENTS_AND_OPTIMIZATION.md):** Throughput baselines and optimization strategies.
+- **[SWMR Stress Analysis](docs/SWMR_CONTINUOUS_BENCH_ANALYSIS.md):** Continuous benchmark results and HDF5 constraints.
+- **[Presentation](docs/MRI_DATA_MARSHAL_PRESENTATION.md):** Faculty/researcher overview.
 
 ---
 
