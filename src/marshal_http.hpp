@@ -11,6 +11,10 @@
  */
 
 #pragma once
+
+#undef LOG_COMPONENT
+#define LOG_COMPONENT "marshal_http"
+#include "logging.hpp"
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/version.hpp>
@@ -107,7 +111,7 @@ inline void parse_ts_limit(const std::string &target, std::string &ts, size_t &l
 }
 
 template <class Body>
-http::response<http::string_body> handle_http_request(const http::request<Body> &req, MarshalState &state)
+http::response<http::string_body> handle_http_request(const http::request<Body> &req, MarshalState &state, const std::string &req_id = "")
 {
     using nlohmann::json;
 
@@ -115,7 +119,9 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
     {
         http::response<http::string_body> res{status, req.version()};
         res.set(http::field::content_type, "application/json");
-        
+        if (!req_id.empty())
+            res.set("X-Request-Id", req_id);
+
         if (status == http::status::no_content) {
             res.body() = "";
             res.prepare_payload();
@@ -146,7 +152,22 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
     if (req.method() == http::verb::get && req.target() == "/health")
     {
         auto up = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.start).count();
-        return make_response(http::status::ok, {{"uptime_s", up}});
+        bool sink_ok = (state.mrd_sink != nullptr);
+        bool writer_ok = state.json_writer_running.load();
+        size_t queue_depth = 0;
+        {
+            std::lock_guard<std::mutex> lock(state.json_queue_mutex);
+            queue_depth = state.json_write_queue.size();
+        }
+        bool healthy = sink_ok && writer_ok;
+        auto status = healthy ? http::status::ok : http::status::service_unavailable;
+        return make_response(status, {
+            {"status", healthy ? "healthy" : "degraded"},
+            {"uptime_s", up},
+            {"hdf5_sink", sink_ok},
+            {"json_writer", writer_ok},
+            {"json_queue_depth", queue_depth}
+        });
     }
 
     // GET /v1/pose/current  (reads from in-memory cache)
@@ -242,7 +263,7 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
             }
             catch (const std::exception &e)
             {
-                std::cerr << "Pose WS broadcast failed: " << e.what() << "\n";
+                LOG_WARN("req=" << req_id << " Pose WS broadcast failed: " << e.what());
             }
 
             return make_response(http::status::ok, {{"pose", pose_data}});
@@ -305,7 +326,7 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
             }
             catch (const std::exception &e)
             {
-                std::cerr << "Bio WS broadcast failed: " << e.what() << "\n";
+                LOG_WARN("req=" << req_id << " Bio WS broadcast failed: " << e.what());
             }
 
             return make_response(http::status::ok, {{"count", body["data"].size()}});
@@ -363,11 +384,10 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
             // Optional job tracking ID (for debugging/monitoring)
             auto job_id = std::string(req["X-MRD-Job-Id"]);
 
-            std::cout << "[marshal_http] Received reconstruction callback: "
+            LOG_INFO("req=" << req_id << " Received reconstruction callback: "
                       << "stream=" << stream_header
-                      << ", size=" << body.size() << " bytes";
-            if (!job_id.empty()) std::cout << ", job_id=" << job_id;
-            std::cout << "\n";
+                      << ", size=" << body.size() << " bytes"
+                      << (job_id.empty() ? "" : ", job_id=" + job_id));
 
             // Validate ImageHeader
             if (body.size() < sizeof(ISMRMRD::ImageHeader))
@@ -412,10 +432,10 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                 session_header
             );
 
-            std::cout << "[marshal_http] Stored reconstructed callback image: "
+            LOG_INFO("req=" << req_id << " Stored reconstructed callback image: "
                       << "stream=" << stream_header
                       << ", frame=" << result.frame_index
-                      << ", path=" << result.file_path.string() << "\n";
+                      << ", path=" << result.file_path.string());
 
             json resp_data = {
                 {"status", "stored"},
@@ -447,8 +467,8 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                 }
 
                 if (!reply_to.empty()) {
-                    std::cout << "[marshal_http] Forwarding reconstructed image to scanner: "
-                              << reply_to << " (job_id=" << job_id << ")\n";
+                    LOG_INFO("req=" << req_id << " Forwarding reconstructed image to scanner: "
+                              << reply_to << " (job_id=" << job_id << ")");
 
                     // ASYNC: Forward to scanner without blocking callback response
                     std::string image_data = body;
@@ -503,12 +523,12 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                             beast::error_code ec;
                             stream.socket().shutdown(tcp::socket::shutdown_both, ec);
 
-                            std::cout << "[marshal_http] Scanner reply-to response: HTTP "
-                                      << scanner_res.result_int() << " (job_id=" << job_id << ")\n";
+                            LOG_INFO("Scanner reply-to response: HTTP "
+                                      << scanner_res.result_int() << " (job_id=" << job_id << ")");
                         }
                         catch (const std::exception& e) {
-                            std::cerr << "[marshal_http] ERROR: Failed to forward image to scanner: "
-                                      << e.what() << " (job_id=" << job_id << ")\n";
+                            LOG_ERROR("Failed to forward image to scanner: "
+                                      << e.what() << " (job_id=" << job_id << ")");
                         }
                     }).detach();
                 }
@@ -518,7 +538,7 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
         }
         catch (const std::exception &e)
         {
-            std::cerr << "[marshal_http] ERROR: Callback processing failed: " << e.what() << "\n";
+            LOG_ERROR("req=" << req_id << " Callback processing failed: " << e.what());
             return make_response(http::status::bad_request, {{"error", e.what()}});
         }
     }
@@ -540,8 +560,8 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
 
             // SMART DETECTION: Determine data type automatically
             mrd::MrdDataType detected_type = mrd::detect_mrd_type(body.data(), body.size());
-            std::cout << "[marshal_http] Detected MRD type: " << mrd::mrd_data_type_to_string(detected_type)
-                      << " (stream=" << stream_header << ", size=" << body.size() << " bytes)\n";
+            LOG_INFO("req=" << req_id << " Detected MRD type: " << mrd::mrd_data_type_to_string(detected_type)
+                      << " (stream=" << stream_header << ", size=" << body.size() << " bytes)");
 
             // Route based on detected type
             switch (detected_type)
@@ -558,8 +578,8 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                         });
                     }
 
-                    std::cout << "[marshal_http] ASYNC: Queuing k-space for reconstruction: "
-                              << state.recon_endpoint << "\n";
+                    LOG_INFO("req=" << req_id << " ASYNC: Queuing k-space for reconstruction: "
+                              << state.recon_endpoint);
 
                     // Capture data for async task (COPY - body will be invalid after response)
                     std::string kspace_data = body;
@@ -646,19 +666,19 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                             beast::error_code ec;
                             stream.socket().shutdown(tcp::socket::shutdown_both, ec);
 
-                            std::cout << "[marshal_http] ASYNC: Recon service acknowledged job " << job_id
-                                      << ": HTTP " << recon_res.result_int() << "\n";
+                            LOG_INFO("ASYNC: Recon service acknowledged job " << job_id
+                                      << ": HTTP " << recon_res.result_int());
 
                             if (recon_res.result() != http::status::accepted &&
                                 recon_res.result() != http::status::ok &&
                                 recon_res.result() != http::status::created) {
-                                std::cerr << "[marshal_http] ASYNC WARNING: Recon returned unexpected status: "
-                                          << recon_res.result_int() << " - " << recon_res.body() << "\n";
+                                LOG_WARN("ASYNC: Recon returned unexpected status: "
+                                          << recon_res.result_int() << " - " << recon_res.body());
                             }
                         }
                         catch (const std::exception& e) {
-                            std::cerr << "[marshal_http] ASYNC ERROR: Failed to forward to recon: "
-                                      << e.what() << "\n";
+                            LOG_ERROR("ASYNC: Failed to forward to recon: "
+                                      << e.what());
                         }
                     }).detach();
 
@@ -676,7 +696,7 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
 
             case mrd::MrdDataType::HDF5_FILE:
                 // COMPLETE HDF5 FILE - Forward to /v1/mrd/ingest
-                std::cout << "[marshal_http] HDF5 file detected, forwarding to /v1/mrd/ingest\n";
+                LOG_INFO("req=" << req_id << " HDF5 file detected, forwarding to /v1/mrd/ingest");
                 {
                     auto entry = mrd::ingest_payload(state, body.data(), body.size(), "http");
                     return make_response(http::status::created, entry);
@@ -684,12 +704,12 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
 
             case mrd::MrdDataType::IMAGE:
                 // RECONSTRUCTED IMAGE - Process normally (existing logic below)
-                std::cout << "[marshal_http] Reconstructed image (ImageHeader) detected, processing normally\n";
+                LOG_INFO("req=" << req_id << " Reconstructed image (ImageHeader) detected, processing normally");
                 break;
 
             case mrd::MrdDataType::UNKNOWN:
             default:
-                std::cerr << "[marshal_http] ERROR: Unknown or invalid MRD data format\n";
+                LOG_ERROR("req=" << req_id << " Unknown or invalid MRD data format");
                 return make_response(http::status::bad_request, {
                     {"error", "unknown MRD data format"},
                     {"detected_type", "UNKNOWN"},
@@ -767,8 +787,8 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
 
             // SMART DETECTION: Determine data type automatically
             mrd::MrdDataType detected_type = mrd::detect_mrd_type(body.data(), body.size());
-            std::cout << "[marshal_http] /v1/mrd/ingest - Detected type: " << mrd::mrd_data_type_to_string(detected_type)
-                      << " (size=" << body.size() << " bytes)\n";
+            LOG_INFO("req=" << req_id << " /v1/mrd/ingest - Detected type: " << mrd::mrd_data_type_to_string(detected_type)
+                      << " (size=" << body.size() << " bytes)");
 
             // Route based on detected type
             switch (detected_type)
@@ -785,8 +805,8 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                         });
                     }
 
-                    std::cout << "[marshal_http] /ingest: Forwarding raw k-space to reconstruction service: "
-                              << state.recon_endpoint << "\n";
+                    LOG_INFO("req=" << req_id << " /ingest: Forwarding raw k-space to reconstruction service: "
+                              << state.recon_endpoint);
 
                     try {
                         namespace beast = boost::beast;
@@ -843,8 +863,8 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                         beast::error_code ec;
                         stream.socket().shutdown(tcp::socket::shutdown_both, ec);
 
-                        std::cout << "[marshal_http] /ingest: Reconstruction service responded: HTTP "
-                                  << recon_res.result_int() << "\n";
+                        LOG_INFO("req=" << req_id << " /ingest: Reconstruction service responded: HTTP "
+                                  << recon_res.result_int());
 
                         if (recon_res.result() != http::status::ok && recon_res.result() != http::status::created) {
                             return make_response(http::status::bad_gateway, {
@@ -860,13 +880,13 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                         // Use ingest_payload to save the reconstructed data as a complete file
                         auto entry = mrd::ingest_payload(state, reconstructed.data(), reconstructed.size(), "http-reconstructed");
 
-                        std::cout << "[marshal_http] /ingest: Saved reconstructed data as complete file\n";
+                        LOG_INFO("req=" << req_id << " /ingest: Saved reconstructed data as complete file");
 
                         // Forward to scanner if reply-to URL provided
                         std::string reply_to = std::string(req["X-MRD-Reply-To"]);
                         if (!reply_to.empty()) {
-                            std::cout << "[marshal_http] /ingest: Forwarding reconstructed image to scanner: "
-                                      << reply_to << "\n";
+                            LOG_INFO("req=" << req_id << " /ingest: Forwarding reconstructed image to scanner: "
+                                      << reply_to);
 
                             std::thread([reply_to, reconstructed, stream_name]() {
                                 try {
@@ -917,12 +937,12 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                                     beast::error_code ec;
                                     stream.socket().shutdown(tcp::socket::shutdown_both, ec);
 
-                                    std::cout << "[marshal_http] /ingest: Scanner reply-to response: HTTP "
-                                              << scanner_res.result_int() << "\n";
+                                    LOG_INFO("/ingest: Scanner reply-to response: HTTP "
+                                              << scanner_res.result_int());
                                 }
                                 catch (const std::exception& e) {
-                                    std::cerr << "[marshal_http] /ingest ERROR: Failed to forward image to scanner: "
-                                              << e.what() << "\n";
+                                    LOG_ERROR("/ingest: Failed to forward image to scanner: "
+                                              << e.what());
                                 }
                             }).detach();
 
@@ -936,8 +956,8 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
                         return make_response(http::status::created, entry);
                     }
                     catch (const std::exception& e) {
-                        std::cerr << "[marshal_http] ERROR: /ingest reconstruction forwarding failed: "
-                                  << e.what() << "\n";
+                        LOG_ERROR("req=" << req_id << " /ingest reconstruction forwarding failed: "
+                                  << e.what());
                         return make_response(http::status::bad_gateway, {
                             {"error", "reconstruction forwarding failed"},
                             {"what", e.what()},
@@ -948,19 +968,19 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
 
             case mrd::MrdDataType::IMAGE:
                 // SINGLE IMAGE FRAME - Should use /v1/mrd/frame instead
-                std::cout << "[marshal_http] WARNING: Single ImageHeader detected on /v1/mrd/ingest. "
-                          << "Consider using /v1/mrd/frame for streaming.\n";
+                LOG_WARN("req=" << req_id << " Single ImageHeader detected on /v1/mrd/ingest. "
+                          << "Consider using /v1/mrd/frame for streaming.");
                 // Allow it but log warning (user might intentionally upload single frame)
                 break;
 
             case mrd::MrdDataType::HDF5_FILE:
                 // COMPLETE HDF5 FILE - This is the expected format
-                std::cout << "[marshal_http] HDF5 file detected, proceeding with ingest\n";
+                LOG_INFO("req=" << req_id << " HDF5 file detected, proceeding with ingest");
                 break;
 
             case mrd::MrdDataType::UNKNOWN:
             default:
-                std::cerr << "[marshal_http] ERROR: Unknown data format for /v1/mrd/ingest\n";
+                LOG_ERROR("req=" << req_id << " Unknown data format for /v1/mrd/ingest");
                 return make_response(http::status::bad_request, {
                     {"error", "unknown data format"},
                     {"detected_type", "UNKNOWN"},
@@ -1369,7 +1389,17 @@ private:
 
         void handle()
         {
-            respond(handle_http_request(req, state));
+            auto rid = marshal_log::generate_request_id();
+            auto start = std::chrono::steady_clock::now();
+            auto res = handle_http_request(req, state, rid);
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            LOG_INFO("req=" << rid
+                << " " << req.method_string()
+                << " " << req.target()
+                << " status=" << static_cast<int>(res.result())
+                << " ms=" << elapsed_ms);
+            respond(std::move(res));
         }
     };
 };

@@ -12,6 +12,9 @@
  */
 
 #pragma once
+#undef LOG_COMPONENT
+#define LOG_COMPONENT "marshal_ws"
+#include "logging.hpp"
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/asio.hpp>
@@ -142,7 +145,7 @@ public:
             }
             catch (const std::exception &e)
             {
-                std::cerr << "WS individual broadcast failed: " << e.what() << "\n";
+                LOG_WARN("WS individual broadcast failed: " << e.what());
             }
         }
     }
@@ -160,7 +163,7 @@ public:
             }
             catch (const std::exception &e)
             {
-                std::cerr << "WS topic broadcast failed: " << e.what() << "\n";
+                LOG_WARN("WS topic broadcast failed: " << e.what());
             }
         }
     }
@@ -325,7 +328,7 @@ private:
                 if (write_queue_.size() >= kMaxQueueSize)
                 {
                     // Log dropped message but don't block
-                    std::cerr << "WS: dropping message, queue full for slow client\n";
+                    LOG_WARN("WS: dropping message, queue full for slow client");
                     return;
                 }
 

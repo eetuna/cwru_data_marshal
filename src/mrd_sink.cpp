@@ -1,3 +1,7 @@
+#undef LOG_COMPONENT
+#define LOG_COMPONENT "mrd_sink"
+#include "logging.hpp"
+
 #include "mrd_sink.hpp"
 
 #include <algorithm>
@@ -567,7 +571,7 @@ void MrdSink::flush_all()
             try {
                 stream_state->file->flush();
             } catch (const std::exception& e) {
-                std::cerr << "flush_all: failed to flush stream: " << e.what() << "\n";
+                LOG_ERROR("flush_all: failed to flush stream: " << e.what());
             }
         }
     }
@@ -627,7 +631,7 @@ FrameAppendResult MrdSink::append_frame(const std::string &stream_id,
     }
     catch (const std::exception &e)
     {
-        std::cerr << "MRD sink WS emit failed: " << e.what() << "\n";
+        LOG_WARN("MRD sink WS emit failed: " << e.what());
     }
 
     return result;

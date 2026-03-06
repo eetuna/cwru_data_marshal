@@ -9,6 +9,10 @@
  * Last updated: 2025-09-21
  */
 
+#undef LOG_COMPONENT
+#define LOG_COMPONENT "marshal_main"
+#include "logging.hpp"
+
 #include <algorithm>
 #include <iostream>
 #include <fstream>
@@ -190,7 +194,7 @@ int main(int argc, char **argv)
         {
             if (!parse_size_arg(argv[++i], max_body_size))
             {
-                std::cerr << "Invalid --max-body-size value\n";
+                LOG_ERROR("Invalid --max-body-size value");
                 return 1;
             }
         }
@@ -198,7 +202,7 @@ int main(int argc, char **argv)
         {
             if (!parse_size_arg(argv[++i], flush_max_frames))
             {
-                std::cerr << "Invalid --flush-max-frames value\n";
+                LOG_ERROR("Invalid --flush-max-frames value");
                 return 1;
             }
         }
@@ -206,7 +210,7 @@ int main(int argc, char **argv)
         {
             if (!parse_int_arg(argv[++i], flush_max_ms))
             {
-                std::cerr << "Invalid --flush-max-ms value\n";
+                LOG_ERROR("Invalid --flush-max-ms value");
                 return 1;
             }
         }
@@ -214,7 +218,7 @@ int main(int argc, char **argv)
         {
             if (!parse_int_arg(argv[++i], shutdown_timeout_sec))
             {
-                std::cerr << "Invalid --shutdown-timeout-sec value\n";
+                LOG_ERROR("Invalid --shutdown-timeout-sec value");
                 return 1;
             }
         }
@@ -226,12 +230,12 @@ int main(int argc, char **argv)
     unsigned short ws_port = 0;
     if (!parse_host_port(http_bind, http_host, http_port))
     {
-        std::cerr << "Invalid --http bind (expected host:port)\n";
+        LOG_ERROR("Invalid --http bind (expected host:port)");
         return 1;
     }
     if (!parse_host_port(ws_bind, ws_host, ws_port))
     {
-        std::cerr << "Invalid --ws bind (expected host:port)\n";
+        LOG_ERROR("Invalid --ws bind (expected host:port)");
         return 1;
     }
 
@@ -258,8 +262,7 @@ int main(int argc, char **argv)
         fs::create_directories(fs::path(state.data_dir) / "mrd", ec);
         if (ec)
         {
-            std::cerr << "WARN: ensure " << (fs::path(state.data_dir) / "mrd")
-                      << " failed: " << ec.message() << "\n";
+            LOG_WARN("ensure " << (fs::path(state.data_dir) / "mrd") << " failed: " << ec.message());
         }
     }
     else
@@ -271,9 +274,7 @@ int main(int argc, char **argv)
         fs::create_directories(fs::path(state.dumpbox_root) / session_name / "files", ec);
         if (ec)
         {
-            std::cerr << "WARN: ensure "
-                      << (fs::path(state.dumpbox_root) / session_name / "files")
-                      << " failed: " << ec.message() << "\n";
+            LOG_WARN("ensure " << (fs::path(state.dumpbox_root) / session_name / "files") << " failed: " << ec.message());
         }
     }
 
@@ -321,31 +322,30 @@ int main(int argc, char **argv)
         {
             if (shutdown_started.exchange(true))
                 return;
-            std::cerr << "\n[SHUTDOWN] Received signal " << signum
-                      << ", shutting down (timeout: " << shutdown_timeout_sec << "s)...\n";
+            LOG_INFO("Received signal " << signum << ", shutting down (timeout: " << shutdown_timeout_sec << "s)...");
 
             // Start timeout timer
             shutdown_timer->expires_after(std::chrono::seconds(shutdown_timeout_sec));
             shutdown_timer->async_wait([&](const boost::system::error_code &) {
-                std::cerr << "[SHUTDOWN] Timeout reached, forcing exit.\n";
+                LOG_ERROR("Shutdown timeout reached, forcing exit");
                 std::exit(1);
             });
 
             // Flush on background thread so timer can still fire.
             flush_thread = std::thread([&]() {
                 // Stop JSON writer thread and drain queue
-                std::cerr << "[SHUTDOWN] Stopping JSON writer thread...\n";
+                LOG_INFO("Stopping JSON writer thread...");
                 state.json_writer_running = false;
                 state.json_queue_cv.notify_all();
                 if (state.json_writer_thread.joinable())
                     state.json_writer_thread.join();
-                std::cerr << "[SHUTDOWN] JSON writer stopped.\n";
+                LOG_INFO("JSON writer stopped");
 
                 if (state.mrd_sink)
                 {
-                    std::cerr << "[SHUTDOWN] Flushing all HDF5 streams...\n";
+                    LOG_INFO("Flushing all HDF5 streams...");
                     state.mrd_sink->flush_all();
-                    std::cerr << "[SHUTDOWN] Flush complete.\n";
+                    LOG_INFO("HDF5 flush complete");
                 }
                 boost::asio::post(ioc, [shutdown_timer, &ioc]() {
                     shutdown_timer->cancel();
@@ -356,33 +356,36 @@ int main(int argc, char **argv)
     });
 
     // Log effective config
-    std::cout << "marshal listening http=" << http_bind
-              << " ws=" << ws_bind
-              << " data=" << state.data_dir
-              << " max_body=" << state.max_body_bytes;
-    if (state.sink_mode == SinkMode::DUMPBOX)
     {
-        std::cout << " dumpbox_root=" << state.dumpbox_root
-                  << " session=" << state.dumpbox_session;
+        std::ostringstream cfg;
+        cfg << "listening http=" << http_bind
+            << " ws=" << ws_bind
+            << " data=" << state.data_dir
+            << " max_body=" << state.max_body_bytes;
+        if (state.sink_mode == SinkMode::DUMPBOX)
+        {
+            cfg << " dumpbox_root=" << state.dumpbox_root
+                << " session=" << state.dumpbox_session;
+        }
+        else
+        {
+            cfg << " sink=mrd"
+                << " flush_frames=" << state.flush_policy.max_pending_frames
+                << " flush_ms=" << state.flush_policy.max_pending_interval.count();
+        }
+        cfg << " shutdown_timeout=" << shutdown_timeout_sec << "s";
+        if (state.recon_enabled)
+        {
+            cfg << " recon_endpoint=" << state.recon_endpoint;
+        }
+        LOG_INFO(cfg.str());
     }
-    else
-    {
-        std::cout << " sink=mrd"
-                  << " flush_frames=" << state.flush_policy.max_pending_frames
-                  << " flush_ms=" << state.flush_policy.max_pending_interval.count();
-    }
-    std::cout << " shutdown_timeout=" << shutdown_timeout_sec << "s";
-    if (state.recon_enabled)
-    {
-        std::cout << " recon_endpoint=" << state.recon_endpoint;
-    }
-    std::cout << "\n";
 
     ioc.run();
 
     if (flush_thread.joinable())
         flush_thread.join();
 
-    std::cerr << "[SHUTDOWN] Server stopped.\n";
+    LOG_INFO("Server stopped");
     return 0;
 }

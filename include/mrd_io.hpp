@@ -1,4 +1,7 @@
 #pragma once
+#undef LOG_COMPONENT
+#define LOG_COMPONENT "mrd_io"
+#include "logging.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -232,7 +235,7 @@ inline nlohmann::json ingest_payload(MarshalState &state,
     }
     catch (const std::exception &e)
     {
-        std::cerr << "WS emit failed: " << e.what() << "\n";
+        LOG_WARN("WS emit failed: " << e.what());
     }
 
     try
@@ -251,7 +254,7 @@ inline nlohmann::json ingest_payload(MarshalState &state,
     }
     catch (const std::exception &e)
     {
-        std::cerr << "WS legacy emit failed: " << e.what() << "\n";
+        LOG_WARN("WS legacy emit failed: " << e.what());
     }
 
     return entry;

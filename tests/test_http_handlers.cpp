@@ -28,6 +28,8 @@ TEST_CASE("HTTP Handler: Health Check", "[http]")
 {
     MarshalState state;
     state.start = std::chrono::steady_clock::now();
+    state.mrd_sink = std::make_shared<mrd::MrdSink>(state);
+    state.json_writer_running = true;
 
     http::request<http::string_body> req{http::verb::get, "/health", 11};
     auto res = handle_http_request(req, state);
@@ -35,7 +37,11 @@ TEST_CASE("HTTP Handler: Health Check", "[http]")
     REQUIRE(res.result() == http::status::ok);
     auto body = json::parse(res.body());
     CHECK(body["status"] == "ok");
+    CHECK(body["data"]["status"] == "healthy");
     CHECK(body["data"].contains("uptime_s"));
+    CHECK(body["data"]["hdf5_sink"] == true);
+    CHECK(body["data"]["json_writer"] == true);
+    CHECK(body["data"]["json_queue_depth"] == 0);
 }
 
 TEST_CASE("HTTP Handler: Configuration", "[http]")
