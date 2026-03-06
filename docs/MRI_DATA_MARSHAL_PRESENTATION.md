@@ -163,7 +163,7 @@ Headers:
   X-MRD-Session: session_2024_01_15
   Content-Type: application/octet-stream
 
-Body: [ISMRMRD ImageHeader (340 bytes)] + [Raw pixel data]
+Body: [ISMRMRD ImageHeader (198 bytes)] + [Raw pixel data]
 
 Response (201 Created):
 {

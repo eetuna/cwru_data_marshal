@@ -538,30 +538,30 @@ For real-time streaming without polling.
 ### Connection
 
 ```javascript
-const ws = new WebSocket('ws://127.0.0.1:8090/v1/mrd/stream');
+const ws = new WebSocket('ws://127.0.0.1:8090/ws');
 
 ws.onmessage = (event) => {
-    const frame = new Float32Array(event.data);
-    // Process frame...
+    const metadata = JSON.parse(event.data);
+    // Process metadata notification...
+    console.log(metadata.type, metadata.ts);
 };
 ```
 
 ### Message Format
 
-Binary messages containing raw frame data in `float32` format.
+JSON metadata notifications broadcast on subscribed topics (e.g., `mrd`, `pose`, `bio`).
 
-**Frame metadata** is sent as the first message after connection:
+**Example notification:**
 ```json
 {
-  "type": "metadata",
-  "width": 192,
-  "height": 192,
-  "slices": 10,
-  "dtype": "float32"
+  "type": "mrd",
+  "stream_id": "cardiac_scan",
+  "seq": 42,
+  "ts": "2026-01-15T10:30:45.123Z"
 }
 ```
 
-Subsequent messages are binary frame data.
+Clients read actual frame data via SWMR HDF5 file access, not via WebSocket.
 
 ---
 

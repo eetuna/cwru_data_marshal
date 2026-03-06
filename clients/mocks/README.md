@@ -45,6 +45,6 @@ cd /workspaces/cwru_data_marshal
 docker compose up -d
 
 # Run mock clients
-python3 /workspaces/mri_data_marshal_worktree/clients/mocks/ecg_client.py --count 5
-python3 /workspaces/mri_data_marshal_worktree/clients/mocks/pose_client.py --count 20
+python3 /workspaces/cwru_data_marshal/.worktrees/mri_data_marshal/clients/mocks/ecg_client.py --count 5
+python3 /workspaces/cwru_data_marshal/.worktrees/mri_data_marshal/clients/mocks/pose_client.py --count 20
 ```

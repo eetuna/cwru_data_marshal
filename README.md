@@ -8,12 +8,12 @@ A high-performance, dual-marshal architecture for synchronized MRI and robotic d
 
 The marshal runs in one of two explicit modes to ensure data integrity:
 
-### [Mode A: Live Mode](docs/guides/README_MODE_A.md)
+### Mode A: Live Mode
 *   **Purpose:** Real-time data streaming and feedback.
 *   **Workflow:** Scanner → Marshal → **Live Files** → Clients.
 *   **Storage:** Data is written to `./data/mrd`.
 
-### [Mode B: Dumpbox Mode](docs/guides/README_MODE_B.md)
+### Mode B: Dumpbox Mode
 *   **Purpose:** High-integrity archival recording and offline playback.
 *   **Workflow:** Scanner → Marshal → **Session Folders** → Playback → Live.
 *   **Storage:** Data is siloed into `./data/dumpbox/<session>`.

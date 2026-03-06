@@ -212,8 +212,8 @@ BASE = "http://localhost:8080"
 
 # Send MRI frame (SWMR mode) - requires ISMRMRD header + pixel data
 def send_mrd_frame(stream_id, width, height, slices, pixel_data):
-    # Build minimal ISMRMRD ImageHeader (340 bytes)
-    header = bytearray(340)
+    # Build minimal ISMRMRD ImageHeader (198 bytes)
+    header = bytearray(198)
     struct.pack_into('<H', header, 0, 1)  # version
     struct.pack_into('<H', header, 4, 7)  # data_type (float)
     struct.pack_into('<HHH', header, 100, width, height, slices)  # matrix_size

@@ -25,11 +25,11 @@ Pose-client and ecg-client were timing out after ~8 requests because `POST /v1/p
 │         │                           │                       │        │
 │         ▼                           ▼                       ▼        │
 │  ┌─────────────┐            ┌─────────────┐         ┌─────────────┐ │
-│  │ IN-MEMORY   │            │ IN-MEMORY   │         │ NO CACHE    │ │
-│  │ CACHE       │            │ CACHE       │         │ (queue only)│ │
+│  │ IN-MEMORY   │            │ IN-MEMORY   │         │ IN-MEMORY   │ │
+│  │ CACHE       │            │ CACHE       │         │ CACHE      │ │
 │  │             │            │             │         │             │ │
-│  │ latest_mrd_ │            │ PoseStore   │         │     ❌      │ │
-│  │ json        │            │ poses       │         │             │ │
+│  │ latest_mrd_ │            │ PoseStore   │         │latest_bio_ │ │
+│  │ json        │            │ poses       │         │ json        │ │
 │  └──────┬──────┘            └──────┬──────┘         └──────┬──────┘ │
 │         │                          │                       │        │
 │         ▼                          ▼                       ▼        │
@@ -81,9 +81,9 @@ Pose-client and ecg-client were timing out after ~8 requests because `POST /v1/p
 
 | Data Type | Cache Variable | Location | Updated On POST? | Used by GET? |
 |-----------|----------------|----------|------------------|--------------|
-| **MRD** | `state.latest_mrd_json` | marshal_state.hpp:99 | ✅ Yes (mrd_sink.cpp:612) | ✅ Yes (marshal_http.hpp:1133) |
-| **Pose** | `state.latest_pose_json` + `state.poses` | marshal_state.hpp:104-105 | ✅ Yes (marshal_http.hpp:213) | ✅ Yes (marshal_http.hpp:158) |
-| **Bio** | `state.latest_bio_json` | marshal_state.hpp:101-102 | ✅ Yes (marshal_http.hpp:283) | ✅ Yes (marshal_http.hpp:325) |
+| **MRD** | `state.latest_mrd_json` | marshal_state.hpp:98 | ✅ Yes (mrd_sink.cpp:613) | ✅ Yes (marshal_http.hpp:574) |
+| **Pose** | `state.poses` (PoseStore) | marshal_state.hpp:64 | ✅ Yes (marshal_http.hpp:190) | ✅ Yes (marshal_http.hpp:154) |
+| **Bio** | `state.latest_bio_json` | marshal_state.hpp:101-102 | ✅ Yes (marshal_http.hpp:282) | ✅ Yes (marshal_http.hpp:324) |
 
 ### Cache Details
 
@@ -100,10 +100,9 @@ Pose-client and ecg-client were timing out after ~8 requests because `POST /v1/p
 - Read: `GET /v1/pose/current` reads from cache (marshal_http.hpp:154)
 
 **Bio Cache (`latest_bio_json`):**
-- Type: `std::string` (raw JSON)
-- Mutex: `latest_bio_mutex`
-- Updated: Before queueing in `marshal_http.hpp:280-283`
-- Read: `GET /v1/bio/latest` reads from cache (marshal_http.hpp:319-325)
+- Declared: `marshal_state.hpp:101-102`
+- Updated: Before queueing in `marshal_http.hpp:282`
+- Read: `GET /v1/bio/latest` reads from cache (marshal_http.hpp:324)
 
 ---
 
@@ -172,11 +171,11 @@ std::filesystem::path json_pose_path;    // poses.jsonl
 
 ### POST /v1/bio/signal
 ```
-1. state.latest_bio_json = bio_json       ← CACHE UPDATE
+1. state.latest_bio_json = body.dump()    ← CACHE (in-memory)
 2. queue.push({BIO, body.dump()})         ← QUEUE (non-blocking)
-3. cv.notify_one()
-4. WebSocket broadcast
-5. Return HTTP 200
+2. cv.notify_one()
+3. WebSocket broadcast
+4. Return HTTP 200
 ```
 
 ---
@@ -190,15 +189,20 @@ std::filesystem::path json_pose_path;    // poses.jsonl
 - Reads from `state.poses` (in-memory) ✅ Fast
 
 ### GET /v1/bio/latest
-- Reads from `state.latest_bio_json` (in-memory) ✅ Fast
+- Reads from `bio.jsonl` FILE ⚠️ Could be stale/slow
 
 ---
 
-## Known Gaps (Resolved)
+## Known Gaps
 
-~~### 1. Bio has no in-memory cache~~ **FIXED**: `latest_bio_json` cache added (marshal_state.hpp:101-102, marshal_http.hpp:280-283)
+### ~~1. Bio has no in-memory cache~~ **FIXED**
+`latest_bio_json` cache added in marshal_state.hpp:101-102. Same pattern as MRD and Pose.
 
-~~### 2. `/v1/mrd/ingest` still blocking~~ **FIXED**: Ingest now uses `ingest_payload()` which writes atomically without blocking the async queue.
+
+### 2. `/v1/mrd/ingest` still blocking
+**Location:** `mrd_io.hpp:224` still calls `append_line()` directly
+**Impact:** Legacy ingest endpoint still blocks on fsync
+**Fix:** Route through queue or deprecate endpoint
 
 ---
 
@@ -236,7 +240,7 @@ docker logs -f cwru-ecg-client
 | Endpoint | Blocking Before | Blocking After | Cache |
 |----------|-----------------|----------------|-------|
 | POST /v1/mrd/frame | JSON only | ✅ Non-blocking | ✅ `latest_mrd_json` |
-| POST /v1/pose/update | ❌ fsync | ✅ Non-blocking | ✅ `latest_pose_json` + `PoseStore` |
+| POST /v1/pose/update | ❌ fsync | ✅ Non-blocking | ✅ `PoseStore` |
 | POST /v1/bio/signal | ❌ fsync | ✅ Non-blocking | ✅ `latest_bio_json` |
 | GET /v1/mrd/latest | - | - | ✅ From memory |
 | GET /v1/pose/current | - | - | ✅ From memory |
@@ -246,5 +250,5 @@ docker logs -f cwru-ecg-client
 
 **Next Steps:**
 1. Test the fix with `docker compose up --profile viz`
-2. Consider adding bio cache if `GET /v1/bio/latest` needs to be fast/fresh
+2. ~~Consider adding bio cache~~ **DONE** — `latest_bio_json` added
 3. Consider fixing `/v1/mrd/ingest` if it's still used

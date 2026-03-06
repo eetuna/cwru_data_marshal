@@ -8,7 +8,14 @@ This directory contains the official documentation for the MRI Data Marshal proj
 - **[MRI_DATA_MARSHAL_PRESENTATION.md](MRI_DATA_MARSHAL_PRESENTATION.md)** - Professional presentation for faculty and researchers
 - **[DEMO_GUIDE.md](DEMO_GUIDE.md)** - How to run the simultaneous operations demo
 - **[USAGE_AND_API.md](USAGE_AND_API.md)** - Complete usage instructions and API reference
+- **[CLIENT_API_REFERENCE.md](CLIENT_API_REFERENCE.md)** - HTTP endpoint specs with curl, Python, and C++ examples
+- **[CACHING_ARCHITECTURE.md](CACHING_ARCHITECTURE.md)** - Write-behind caching design for MRD, Bio, and Pose
 - **[IMPROVEMENTS_AND_OPTIMIZATION.md](IMPROVEMENTS_AND_OPTIMIZATION.md)** - Performance tuning and optimization guide
+
+### SWMR and HDF5
+- **[SWMR_AND_ROBOT_MARSHAL_OVERVIEW.md](SWMR_AND_ROBOT_MARSHAL_OVERVIEW.md)** - SWMR explanation and MRI/Robot marshal coordination
+- **[SWMR_CONTINUOUS_BENCH_ANALYSIS.md](SWMR_CONTINUOUS_BENCH_ANALYSIS.md)** - Detailed SWMR benchmark analysis
+- **[HDF5_LOCKING_NOTES.md](HDF5_LOCKING_NOTES.md)** - WSL2 file locking workarounds
 
 ## Quick Links
 
