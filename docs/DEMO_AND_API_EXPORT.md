@@ -290,7 +290,7 @@ To write your own client that interacts with the marshals:
 
 ### For MRI Frame Streaming
 - ISMRMRD library (or manual binary packing)
-- Understanding of ISMRMRD ImageHeader struct (340 bytes)
+- Understanding of ISMRMRD ImageHeader struct (198 bytes)
 
 ### For Real-time Notifications
 - WebSocket client library

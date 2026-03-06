@@ -225,4 +225,4 @@ RECON_ENDPOINT=http://mock-recon:9002
 ./marshal --recon-endpoint http://localhost:9002
 ```
 
-If no endpoint is configured, marshal returns HTTP 400 when it receives raw k-space data.
+If no endpoint is configured, marshal returns HTTP 501 Not Implemented when it receives raw k-space data.

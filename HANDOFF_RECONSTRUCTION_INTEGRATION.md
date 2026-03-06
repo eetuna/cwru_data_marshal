@@ -270,7 +270,7 @@ Body: [raw k-space data - ISMRMRD acquisitions or HDF5]
 ```
 HTTP/1.1 200 OK
 Content-Type: application/octet-stream
-Body: [ISMRMRD ImageHeader (340 bytes) + pixel data]
+Body: [ISMRMRD ImageHeader (198 bytes) + pixel data]
 ```
 
 **That's all the external service needs to implement!**

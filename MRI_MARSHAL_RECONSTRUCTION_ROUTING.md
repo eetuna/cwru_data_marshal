@@ -103,7 +103,7 @@ Headers:
   X-MRD-Stream: demo
   Content-Type: application/octet-stream
 Body:
-  [ISMRMRD::ImageHeader (340 bytes)]
+  [ISMRMRD::ImageHeader (198 bytes)]
   [Pixel data (~48KB float32)]
 
 # Response
@@ -458,7 +458,7 @@ struct ISMRMRD_ImageHeader {
     uint16_t image_series_index;
     // ... user fields ...
 };
-// Total: ~340 bytes
+// Total: ~198 bytes
 ```
 
 **Key Differences:**
