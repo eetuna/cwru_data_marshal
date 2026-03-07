@@ -165,7 +165,7 @@ Headers:
 
 Body: [ISMRMRD ImageHeader (198 bytes)] + [Raw pixel data]
 
-Response (201 Created):
+Response (200 OK):
 {
   "path": "/data/mrd/acquisition_001.h5",
   "stream": "acquisition_001",
