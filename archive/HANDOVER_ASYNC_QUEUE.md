@@ -189,7 +189,7 @@ std::filesystem::path json_pose_path;    // poses.jsonl
 - Reads from `state.poses` (in-memory) ✅ Fast
 
 ### GET /v1/bio/latest
-- Reads from `bio.jsonl` FILE ⚠️ Could be stale/slow
+- Reads from `state.latest_bio_json` (in-memory) ✅ Fast
 
 ---
 

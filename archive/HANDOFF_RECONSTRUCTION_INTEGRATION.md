@@ -334,7 +334,7 @@ def reconstruct():
     # In reality, this would be Gadgetron doing real reconstruction
 
     # Create minimal ISMRMRD ImageHeader
-    header = bytearray(340)
+    header = bytearray(198)
     struct.pack_into('H', header, 0, 1)  # version = 1
     struct.pack_into('H', header, 48, 64)  # matrix_size[0] = 64
     struct.pack_into('H', header, 50, 64)  # matrix_size[1] = 64

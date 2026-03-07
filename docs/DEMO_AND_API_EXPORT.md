@@ -26,7 +26,7 @@ curl http://localhost:8080/health
 
 ### Stream MRI Frame (Binary)
 ```bash
-# ISMRMRD header (340 bytes) + voxel data
+# ISMRMRD ImageHeader (198 bytes) + voxel data
 curl -X POST http://localhost:8080/v1/mrd/frame \
   -H "Content-Type: application/octet-stream" \
   -H "X-MRD-Stream: my_scan" \

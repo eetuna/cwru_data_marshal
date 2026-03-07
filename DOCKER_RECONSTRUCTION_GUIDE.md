@@ -437,6 +437,6 @@ reconstruction-service:
 
 - **Current Demo:** [docker-compose.demo.yml](docker-compose.demo.yml)
 - **With Reconstruction:** [docker-compose.recon.yml](docker-compose.recon.yml)
-- **Implementation Guide:** [HANDOFF_RECONSTRUCTION_INTEGRATION.md](HANDOFF_RECONSTRUCTION_INTEGRATION.md)
-- **Quick Overview:** [MRI_MARSHAL_QUICK_OVERVIEW.md](MRI_MARSHAL_QUICK_OVERVIEW.md)
+- **Reconstruction Interface:** [docs/RECONSTRUCTION_INTERFACE.md](docs/RECONSTRUCTION_INTERFACE.md)
+- **System Diagram:** [SYSTEM_DIAGRAM_COMPLETE.md](SYSTEM_DIAGRAM_COMPLETE.md)
 - **Gadgetron:** https://gadgetron.github.io/

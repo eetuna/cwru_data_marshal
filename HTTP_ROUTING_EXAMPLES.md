@@ -216,9 +216,9 @@ Content-Length: 262484
 ```
 6. Marshal receives reconstruction response (262484 bytes)
 7. Marshal parses reconstructed response:
-   - Read first 340 bytes as ImageHeader
+   - Read first 198 bytes as ImageHeader
    - Validate: version=1, matrix_size=[256,256,1], channels=1, data_type=5
-   - Extract pixel data from bytes 340-262484
+   - Extract pixel data from bytes 198-262484
 8. Marshal stores to SWMR:
    - Stream: "cardiac_scan"
    - File: /session-data/run_20260129_123456/mrd/cardiac_scan.mrd
@@ -440,9 +440,9 @@ Content-Length: 262484
 ```
 6. Marshal receives reconstruction response (262484 bytes)
 7. Marshal parses reconstructed response:
-   - Read first 340 bytes as ImageHeader
+   - Read first 198 bytes as ImageHeader
    - Validate: version=1, matrix_size=[256,256,1], channels=1, data_type=5
-   - Extract pixel data from bytes 340-262484
+   - Extract pixel data from bytes 198-262484
 8. Marshal saves as COMPLETE FILE (this is /ingest, not SWMR):
    - Generate filename: cardiac_scan_reconstructed.mrd
    - Create HDF5 file structure
@@ -577,7 +577,7 @@ Client ↔ Marshal ↔ Reconstruction Service
 
 The marshal inspects binary headers to determine data type:
 - **HDF5**: First 8 bytes = `89 48 44 46 0D 0A 1A 0A`
-- **ImageHeader**: Version + matrix_size + channels + data_type (340 bytes)
+- **ImageHeader**: Version + matrix_size + channels + data_type (198 bytes)
 - **AcquisitionHeader**: Version + number_of_samples + active_channels (340 bytes)
 
 No client-side declaration needed - fully automatic.
@@ -626,7 +626,6 @@ curl -X POST http://localhost:8080/v1/mrd/frame \
 
 ## References
 
-- **Implementation:** [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)
-- **Handoff for Phase 2:** [HANDOFF_RECONSTRUCTION_INTEGRATION.md](HANDOFF_RECONSTRUCTION_INTEGRATION.md)
 - **Docker Setup:** [DOCKER_RECONSTRUCTION_GUIDE.md](DOCKER_RECONSTRUCTION_GUIDE.md)
-- **Quick Overview:** [MRI_MARSHAL_QUICK_OVERVIEW.md](MRI_MARSHAL_QUICK_OVERVIEW.md)
+- **System Diagram:** [SYSTEM_DIAGRAM_COMPLETE.md](SYSTEM_DIAGRAM_COMPLETE.md)
+- **Reconstruction Interface:** [docs/RECONSTRUCTION_INTERFACE.md](docs/RECONSTRUCTION_INTERFACE.md)
