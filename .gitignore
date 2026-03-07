@@ -16,6 +16,9 @@ data_*/
 # Worktrees directory (for Docker image builds)
 .worktrees/
 
+# Archive (old docs/scripts, not needed in repo)
+archive/
+
 # Backup files
 *.bak
 
