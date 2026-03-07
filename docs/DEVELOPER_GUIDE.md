@@ -7,20 +7,29 @@ How the repository is organized, how to work with branches and worktrees, and ho
 ## Branch Architecture
 
 ```
-main                          ← Generic marshal server (shared core)
-├── mri-data-marshal          ← MRI-specific clients (image streamer, viz, k-space)
-└── robot-data-marshal        ← Robot-specific clients (catheter, controller, planning)
+main                          ← Umbrella branch (docs, Docker configs, scripts — no application code)
+├── mri-data-marshal          ← MRI marshal server + MRI clients (image streamer, viz, k-space)
+└── robot-data-marshal        ← Robot marshal server + robot clients (catheter, controller, planning)
 ```
+
+`main` does **not** contain the marshal server source code or any client code. It is an umbrella/orchestration branch that holds:
+- Documentation (`docs/`, `README.md`)
+- Dockerfiles (`docker/`)
+- Docker Compose files (`docker-compose.*.yml`)
+- Build and demo scripts (`scripts/`)
+- Configuration (`.env.demo`, `.gitignore`)
+
+The actual C++ server code and client code live on the domain branches. `main` ties them together for building and running via worktrees.
 
 | Branch | What it contains | Who works on it |
 |--------|-----------------|-----------------|
-| `main` | Marshal HTTP server, Docker configs, scripts, docs | Everyone (shared) |
-| `mri-data-marshal` | MRI image streamer, k-space streamer, viz client, ECG/pose mock clients | MRI team |
-| `robot-data-marshal` | Catheter tracking, controller, planning, front-end, surface tracking | Robot team |
+| `main` | Docs, Dockerfiles, compose files, scripts (no source code) | Everyone (shared) |
+| `mri-data-marshal` | MRI marshal server (C++), image streamer, k-space streamer, viz client, ECG/pose clients | MRI team |
+| `robot-data-marshal` | Robot marshal server (C++), catheter tracking, controller, planning, front-end, surface tracking | Robot team |
 
 **Rules:**
-- Shared server changes go into `main`, then merge `main` into domain branches
-- Domain branches never merge back into `main` — they only diverge with their own clients
+- Docs, Dockerfiles, and scripts go into `main`, then merge `main` into domain branches
+- Domain branches never merge back into `main` — they only diverge with their own code
 - New domain (e.g. ultrasound) = new branch off `main`
 
 ---
