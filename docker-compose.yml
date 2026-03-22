@@ -66,6 +66,19 @@ services:
     networks:
       cppnet:
         ipv4_address: 172.28.1.15
+  client-webgl:
+    build:
+      context: .
+      dockerfile: Dockerfile.client-webgl
+    container_name: cpp_client-webgl
+    depends_on:
+      - server
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+    networks:
+      cppnet:
+        ipv4_address: 172.28.1.16
 networks:
   cppnet:
     driver: bridge

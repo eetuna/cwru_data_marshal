@@ -1,0 +1,12 @@
+FROM node:18
+
+WORKDIR /app
+
+COPY package.json ./
+RUN npm install
+
+COPY server.js backend-write-server.js file_routes.json index.html webgl-demo.js render-2d-image.js gl-matrix-min.js ./
+
+COPY entrypoint-webgl.sh ./
+RUN chmod +x entrypoint-webgl.sh
+CMD ["./entrypoint-webgl.sh"]
