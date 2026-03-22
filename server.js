@@ -52,21 +52,6 @@ function getClientRoutes(clientId) {
   return routesConfig[clientId] || null;
 }
 
-// Helper function to load fallback data from the files directory
-function loadFallbackData(fileName) {
-  try {
-    const filePath = path.join(__dirname, 'files', fileName);
-    if (fs.existsSync(filePath)) {
-      const data = fs.readFileSync(filePath, 'utf-8');
-      console.log(`Loaded fallback data for '${fileName}' from: ${filePath}`);
-      return JSON.parse(data);
-    }
-  } catch (error) {
-    console.error(`Error loading fallback data for '${fileName}':`, error);
-  }
-  return null;
-}
-
 // API endpoint: Read from data marshal server
 app.get('/api/read/:clientId/:fileKey', async (req, res) => {
   try {
@@ -101,13 +86,12 @@ app.get('/api/read/:clientId/:fileKey', async (req, res) => {
         console.log(`Proxied ${fileName} from streaming-server`);
         return res.json(response.data);
       } catch (streamError) {
-        console.warn(`Streaming server unavailable for ${fileName}, falling back: ${streamError.message}`);
-        const fallback = loadFallbackData(fileName);
-        if (fallback) {
-          fallback.timestamp = Date.now();
-          return res.json(fallback);
-        }
-        return res.status(404).json({ error: `Unable to load ${fileName} from streaming server or files/` });
+        console.error(`Streaming server unavailable for ${fileName}: ${streamError.message}`);
+        return res.status(503).json({
+          error: 'Streaming server unavailable',
+          details: streamError.message,
+          fileName: fileName
+        });
       }
     }
 
@@ -118,13 +102,12 @@ app.get('/api/read/:clientId/:fileKey', async (req, res) => {
         console.log(`Proxied ${fileName} from streaming-server`);
         return res.json(response.data);
       } catch (streamError) {
-        console.warn(`Streaming server unavailable for ${fileName}, falling back: ${streamError.message}`);
-        const fallback = loadFallbackData(fileName);
-        if (fallback) {
-          fallback.timestamp = Date.now();
-          return res.json(fallback);
-        }
-        return res.status(404).json({ error: `Unable to load ${fileName} from streaming server or files/` });
+        console.error(`Streaming server unavailable for ${fileName}: ${streamError.message}`);
+        return res.status(503).json({
+          error: 'Streaming server unavailable',
+          details: streamError.message,
+          fileName: fileName
+        });
       }
     }
 
@@ -134,16 +117,10 @@ app.get('/api/read/:clientId/:fileKey', async (req, res) => {
       console.log(`Fetched ${fileName} from C++ data marshal`);
       return res.json(response.data);
     } catch (backendError) {
-      console.warn(`C++ data marshal unavailable, falling back to files/: ${backendError.message}`);
-      const fallback = loadFallbackData(fileName);
-      if (fallback) {
-        fallback.timestamp = Date.now();
-        console.log(`Served fallback ${fileName} from files/`);
-        return res.json(fallback);
-      }
+      console.error(`C++ data marshal unavailable for ${fileName}: ${backendError.message}`);
       return res.status(503).json({
-        error: 'Data marshal server unavailable and no fallback data found in files/',
-        details: `Backend error: ${backendError.message}`,
+        error: 'Data marshal server unavailable',
+        details: backendError.message,
         fileName: fileName
       });
     }
@@ -185,23 +162,12 @@ app.post('/api/write/:clientId/:fileKey', async (req, res) => {
       console.log(`✓ Posted data to C++ data marshal for ${fileName}`);
       return res.json({ success: true, message: `Data written to ${fileName}`, data: response.data });
     } catch (backendError) {
-      console.warn(`C++ data marshal unavailable, saving to local file instead: ${backendError.message}`);
-
-      // Fallback: save to local files directory
-      try {
-        const filePath = path.join(__dirname, 'files', fileName);
-        const fileData = {
-          ...data,
-          timestamp: Date.now(),
-          _source: 'local_fallback'
-        };
-        fs.writeFileSync(filePath, JSON.stringify(fileData, null, 2));
-        console.log(`✓ Saved data to local file: ${filePath}`);
-        return res.json({ success: true, message: `Data written to local file (backend unavailable)`, fileName: fileName });
-      } catch (fileError) {
-        console.error(`Failed to save to local file: ${fileError.message}`);
-        return res.status(500).json({ error: 'Failed to write data - backend and local file save both failed', details: fileError.message });
-      }
+      console.error(`C++ data marshal unavailable for write to ${fileName}: ${backendError.message}`);
+      return res.status(503).json({
+        error: 'Data marshal server unavailable',
+        details: backendError.message,
+        fileName: fileName
+      });
     }
   } catch (error) {
     console.error('Error writing to server:', error.message);
