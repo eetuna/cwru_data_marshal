@@ -1,4 +1,3 @@
-
 FROM gcc:latest
 
 # Create app directory
@@ -14,4 +13,5 @@ RUN g++ client-controller.cpp -o client-controller -pthread
 #CMD ["./client"]
 
 COPY entrypoint-controller.sh ./
+RUN chmod +x entrypoint-controller.sh
 CMD ["./entrypoint-controller.sh"]

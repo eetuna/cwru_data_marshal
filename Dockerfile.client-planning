@@ -1,4 +1,3 @@
-
 FROM gcc:latest
 
 # Create app directory
@@ -14,4 +13,5 @@ RUN g++ client-planning.cpp -o client-planning -pthread
 #CMD ["./client"]
 
 COPY entrypoint-planning.sh ./
+RUN chmod +x entrypoint-planning.sh
 CMD ["./entrypoint-planning.sh"]

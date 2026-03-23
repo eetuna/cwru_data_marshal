@@ -6,14 +6,15 @@ services:
       context: .
       dockerfile: Dockerfile.server
     volumes:
-      - D:\rza3\cwru_data_marshal/log_files/:/log_files/
-      - D:\rza3\cwru_data_marshal/files/:/files/
+      - ~/cwru_front_end/log_files/:/log_files/
+      - ~/cwru_front_end/files/:/files/
     container_name: cpp_server
     ports:
       - "8080:8080"
     networks:
       cppnet:
         ipv4_address: 172.28.1.10
+
   client-catheter-tracking:
     build:
       context: .
@@ -21,6 +22,9 @@ services:
     container_name: cpp_client-catheter-tracking
     depends_on:
       - server
+    environment:
+      - ROBOT_MARSHAL_HOST=server
+      - ROBOT_MARSHAL_PORT=8081
     networks:
       cppnet:
         ipv4_address: 172.28.1.11
@@ -32,6 +36,9 @@ services:
     container_name: cpp_client-front-end
     depends_on:
       - server   
+    environment:
+      - ROBOT_MARSHAL_HOST=server
+      - ROBOT_MARSHAL_PORT=8081
     networks:
       cppnet:
         ipv4_address: 172.28.1.12
@@ -43,9 +50,13 @@ services:
     container_name: cpp_client-surface-tracking
     depends_on:
       - server
+    environment:
+      - ROBOT_MARSHAL_HOST=server
+      - ROBOT_MARSHAL_PORT=8081
     networks:
       cppnet:
         ipv4_address: 172.28.1.13
+
   client-planning:
     build:
       context: .
@@ -53,9 +64,13 @@ services:
     container_name: cpp_client-planning
     depends_on:
       - server
+    environment:
+      - ROBOT_MARSHAL_HOST=server
+      - ROBOT_MARSHAL_PORT=8081
     networks:
       cppnet:
         ipv4_address: 172.28.1.14
+
   client-controller:
     build:
       context: .
@@ -63,9 +78,13 @@ services:
     container_name: cpp_client-controller
     depends_on:
       - server
+    environment:
+      - ROBOT_MARSHAL_HOST=server
+      - ROBOT_MARSHAL_PORT=8081
     networks:
       cppnet:
         ipv4_address: 172.28.1.15
+
   client-webgl:
     build:
       context: .
@@ -76,9 +95,13 @@ services:
     ports:
       - "3000:3000"
       - "3001:3001"
+    environment:
+      - ROBOT_MARSHAL_HOST=server
+      - ROBOT_MARSHAL_PORT=8081
     networks:
       cppnet:
         ipv4_address: 172.28.1.16
+
 networks:
   cppnet:
     driver: bridge

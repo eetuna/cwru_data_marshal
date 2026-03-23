@@ -13,4 +13,5 @@ RUN g++ client-surface-tracking.cpp -o client-surface-tracking -pthread
 #CMD ["./client"]
 
 COPY entrypoint-surface-tracking.sh ./
+RUN chmod +x entrypoint-surface-tracking.sh
 CMD ["./entrypoint-surface-tracking.sh"]

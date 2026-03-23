@@ -13,4 +13,5 @@ RUN g++ client-front-end.cpp -o client-front-end -pthread
 #CMD ["./client"]
 
 COPY entrypoint-front-end.sh ./
+RUN chmod +x entrypoint-front-end.sh
 CMD ["./entrypoint-front-end.sh"]

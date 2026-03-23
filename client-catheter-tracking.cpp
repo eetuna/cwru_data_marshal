@@ -55,9 +55,14 @@ int main() {
 
     if (!res_localization_data || res_localization_data->status != 200) {
         std::cerr << "Failed to read from server file: " << read_file << "\n";
-        std::cerr << "GET request response status: " << res_localization_data->status << "\n";
-        std::cerr << "GET request response body: " << res_localization_data->body << "\n";
-        return 1;
+        if (res_localization_data) {
+            std::cerr << "GET request response status: " << res_localization_data->status << "\n";
+            std::cerr << "GET request response body: " << res_localization_data->body << "\n";
+        } else {
+            std::cerr << "No response (connection failed)\n";
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        continue;
     }
 
     json input_data_localization_data = json::parse(res_localization_data->body);
@@ -72,9 +77,14 @@ int main() {
 
     if (!res_catheter_base_configuration || res_catheter_base_configuration->status != 200) {
         std::cerr << "Failed to read from server file: " << read_file_catheter_base_configuration << "\n";
-        std::cerr << "GET request response status: " << res_catheter_base_configuration->status << "\n";
-        std::cerr << "GET request response body: " << res_catheter_base_configuration->body << "\n";
-        return 1;
+        if (res_catheter_base_configuration) {
+            std::cerr << "GET request response status: " << res_catheter_base_configuration->status << "\n";
+            std::cerr << "GET request response body: " << res_catheter_base_configuration->body << "\n";
+        } else {
+            std::cerr << "No response (connection failed)\n";
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        continue;
     }
 
     json input_data_catheter_base_configuration = json::parse(res_catheter_base_configuration->body);
@@ -89,9 +99,14 @@ int main() {
 
     if (!res_catheter_forward_kinematics || res_catheter_forward_kinematics->status != 200) {
         std::cerr << "Failed to read from server file: " << read_file_catheter_forward_kinematics << "\n";
-        std::cerr << "GET request response status: " << res_catheter_forward_kinematics->status << "\n";
-        std::cerr << "GET request response body: " << res_catheter_forward_kinematics->body << "\n";
-        return 1;
+        if (res_catheter_forward_kinematics) {
+            std::cerr << "GET request response status: " << res_catheter_forward_kinematics->status << "\n";
+            std::cerr << "GET request response body: " << res_catheter_forward_kinematics->body << "\n";
+        } else {
+            std::cerr << "No response (connection failed)\n";
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        continue;
     }
 
     json input_data_catheter_forward_kinematics = json::parse(res_catheter_forward_kinematics->body);

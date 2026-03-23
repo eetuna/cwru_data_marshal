@@ -13,4 +13,5 @@ RUN g++ client-catheter-tracking.cpp -o client-catheter-tracking -pthread
 #CMD ["./client"]
 
 COPY entrypoint-catheter-tracking.sh ./
+RUN chmod +x entrypoint-catheter-tracking.sh
 CMD ["./entrypoint-catheter-tracking.sh"]
