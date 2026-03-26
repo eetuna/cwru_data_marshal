@@ -221,6 +221,9 @@ services:
       - ROBOT_MARSHAL_PORT=8081
       - MRI_MARSHAL_HOST=mri-marshal
       - MRI_MARSHAL_PORT=8080
+      - HDF5_USE_FILE_LOCKING=FALSE
+    volumes:
+      - ${SESSION_DATA_DIR:-./session-data}:/session-data:ro
     depends_on:
       robot-marshal:
         condition: service_healthy
@@ -232,9 +235,9 @@ services:
     restart: unless-stopped
     networks:
       - cwru-net
-
   # Run all robot clients with op count summary (webgl-client runs as a separate container)
   robot-clients:
+
     image: cwru/robot-clients:latest
     container_name: cwru-robot-clients
     command:
