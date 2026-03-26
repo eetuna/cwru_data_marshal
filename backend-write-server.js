@@ -9,7 +9,7 @@ const PORT = 3001;
 // Data marshal server address - use service name for Docker inter-container communication
 // Inside Docker, services communicate using their service name from docker-compose.yml
 const DATA_MARSHAL_SERVER = process.env.NODE_ENV === 'production'
-  ? 'http://server:8080'       // Docker service name
+  ? `http://${process.env.ROBOT_MARSHAL_HOST || 'robot-marshal'}:${process.env.ROBOT_MARSHAL_PORT || '8081'}`
   : 'http://localhost:8080';   // Local development
 
 // Load routing configuration (shared with all C++ clients)

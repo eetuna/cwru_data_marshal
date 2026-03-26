@@ -2,22 +2,81 @@ const express = require('express');
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
+const { execFile } = require('child_process');
 
 const app = express();
 const PORT = 3000;
 
 const CLIENT_ID = 'client-webgl';
 
-// Data marshal server address - use service name for Docker inter-container communication
-// Inside Docker, services communicate using their service name from docker-compose.yml
+// Robot data marshal server address
 const DATA_MARSHAL_SERVER = process.env.NODE_ENV === 'production'
-  ? 'http://server:8080'       // Docker service name
-  : 'http://localhost:8080';   // Local development
+  ? `http://${process.env.ROBOT_MARSHAL_HOST || 'robot-marshal'}:${process.env.ROBOT_MARSHAL_PORT || '8081'}`
+  : 'http://localhost:8080';
 
-// Streaming server address (will later be changed to point to the MRI data marshal)
-const STREAMING_SERVER = process.env.NODE_ENV === 'production'
-  ? 'http://streaming-server:8081'  // Docker service name
-  : 'http://127.0.0.1:8081';        // Local development
+// MRI Marshal address (serves frame metadata; HDF5 files read from shared /session-data volume)
+const MRI_MARSHAL_SERVER = process.env.NODE_ENV === 'production'
+  ? `http://${process.env.MRI_MARSHAL_HOST || 'mri-marshal'}:${process.env.MRI_MARSHAL_PORT || '8080'}`
+  : 'http://127.0.0.1:8080';
+
+// Path to the Python HDF5 reader script (co-located with server.js)
+const HDF5_READER = path.join(__dirname, 'read_hdf5.py');
+
+// ============================================================================
+// HDF5 reader using Python h5py (mirrors viz_client_main.cpp logic)
+//
+// viz_client flow:
+//   1. GET /v1/mrd/latest  -> { path, frame_index, dims }
+//   2. Open HDF5 file at path in SWMR read mode
+//   3. Read /images/data dataset  shape [frames, channels, z, y, x] float32
+//   4. Extract middle slice (2D) or full volume (3D) for the given frame
+//
+// We replicate that here by spawning read_hdf5.py with h5py.
+// ============================================================================
+
+/**
+ * Fetch latest frame metadata from MRI Marshal.
+ */
+async function fetchMriLatest() {
+  const response = await axios.get(`${MRI_MARSHAL_SERVER}/v1/mrd/latest`, { timeout: 2000 });
+  const data = response.data;
+  const meta = data.data || data;
+  return {
+    path: meta.path,
+    frame_index: meta.frame_index,
+    dims: meta.dims || {},
+    timestamp: meta.ts || meta.timestamp || Date.now(),
+  };
+}
+
+/**
+ * Read frame data from HDF5 by spawning the Python reader.
+ * mode: "2d" (middle slice) or "3d" (full volume)
+ * Returns parsed JSON: { width, height, [depth], values: number[] }
+ */
+function readHdf5Frame(filePath, frameIndex, mode) {
+  return new Promise((resolve, reject) => {
+    execFile('python3', [HDF5_READER, filePath, String(frameIndex), mode],
+      { maxBuffer: 50 * 1024 * 1024, env: { ...process.env, HDF5_USE_FILE_LOCKING: 'FALSE' } },
+      (error, stdout, stderr) => {
+        if (error) {
+          return reject(new Error(`h5py reader failed: ${error.message} ${stderr}`));
+        }
+        try {
+          const result = JSON.parse(stdout);
+          if (result.error) return reject(new Error(result.error));
+          resolve(result);
+        } catch (e) {
+          reject(new Error(`Failed to parse h5py output: ${e.message}`));
+        }
+      }
+    );
+  });
+}
+
+// ============================================================================
+// Express app
+// ============================================================================
 
 // CORS middleware - enable cross-origin requests
 app.use((req, res, next) => {
@@ -25,7 +84,6 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-  // Handle preflight requests
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
@@ -79,39 +137,47 @@ app.get('/api/read/:clientId/:fileKey', async (req, res) => {
       return res.status(404).json({ error: `File mapping not found for fileKey: ${fileKey}` });
     }
 
-    // For streaming 2D images (read_from / fileKey 0), try streaming-server first
-    if (fileName === clientRoutes.read_from) {
+    // ------------------------------------------------------------------
+    // 2D streaming images: MRI Marshal metadata + h5py middle-slice read
+    // ------------------------------------------------------------------
+    if (fileName === 'file_streaming_2D_images.json') {
       try {
-        const response = await axios.get(`${STREAMING_SERVER}/read/${fileName}`);
-        console.log(`Proxied ${fileName} from streaming-server`);
-        return res.json(response.data);
-      } catch (streamError) {
-        console.error(`Streaming server unavailable for ${fileName}: ${streamError.message}`);
-        return res.status(503).json({
-          error: 'Streaming server unavailable',
-          details: streamError.message,
-          fileName: fileName
-        });
+        const meta = await fetchMriLatest();
+        if (!meta.path) {
+          return res.status(503).json({ error: 'No MRI data available yet' });
+        }
+        const sliceData = await readHdf5Frame(meta.path, meta.frame_index, '2d');
+        sliceData.timestamp = meta.timestamp;
+        console.log(`[2D] frame ${meta.frame_index} -> ${sliceData.width}x${sliceData.height} from ${path.basename(meta.path)}`);
+        return res.json(sliceData);
+      } catch (err) {
+        console.error(`[2D] MRI read error: ${err.message}`);
+        return res.status(503).json({ error: 'MRI image read failed', details: err.message, fileName });
       }
     }
 
-    // For 3D images (read_from2 / fileKey 1), try streaming-server first
-    if (fileName === clientRoutes.read_from2) {
+    // ------------------------------------------------------------------
+    // 3D volume images: MRI Marshal metadata + h5py full-volume read
+    // ------------------------------------------------------------------
+    if (fileName === 'file_3D_images.json') {
       try {
-        const response = await axios.get(`${STREAMING_SERVER}/read/${fileName}`);
-        console.log(`Proxied ${fileName} from streaming-server`);
-        return res.json(response.data);
-      } catch (streamError) {
-        console.error(`Streaming server unavailable for ${fileName}: ${streamError.message}`);
-        return res.status(503).json({
-          error: 'Streaming server unavailable',
-          details: streamError.message,
-          fileName: fileName
-        });
+        const meta = await fetchMriLatest();
+        if (!meta.path) {
+          return res.status(503).json({ error: 'No MRI data available yet' });
+        }
+        const volumeData = await readHdf5Frame(meta.path, meta.frame_index, '3d');
+        volumeData.timestamp = meta.timestamp;
+        console.log(`[3D] frame ${meta.frame_index} -> ${volumeData.width}x${volumeData.height}x${volumeData.depth} from ${path.basename(meta.path)}`);
+        return res.json(volumeData);
+      } catch (err) {
+        console.error(`[3D] MRI read error: ${err.message}`);
+        return res.status(503).json({ error: 'MRI volume read failed', details: err.message, fileName });
       }
     }
 
-    // For all other reads, go directly to the C++ data marshal
+    // ------------------------------------------------------------------
+    // All other reads: Robot data marshal
+    // ------------------------------------------------------------------
     try {
       const response = await axios.get(`${DATA_MARSHAL_SERVER}/read/${fileName}`);
       console.log(`Fetched ${fileName} from C++ data marshal`);
@@ -182,6 +248,7 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`WebGL Frontend Server running at http://localhost:${PORT}`);
-  console.log(`Connected to Data Marshal Server at ${DATA_MARSHAL_SERVER}`);
-  console.log(`Streaming Server at ${STREAMING_SERVER}`);
+  console.log(`Connected to Robot Data Marshal at ${DATA_MARSHAL_SERVER}`);
+  console.log(`Connected to MRI Data Marshal at ${MRI_MARSHAL_SERVER}`);
+  console.log(`2D/3D images: MRI Marshal metadata + h5py HDF5 reader`);
 });
