@@ -78,6 +78,7 @@ async function main() {
   let currentImageData = null;
   let lastTimestamp = -1;
   let lastVolumeTimestamp = -1;
+  let lastTipTimestamp = -1;
 
   // Create 2D image renderer
   const image2DRenderer = new Image2DRenderer(gl);
@@ -298,6 +299,35 @@ async function main() {
     return false;
   }
 
+  // Fetch tip position/orientation from server (read_from3 = fileKey 2)
+  async function updateTipPoseFromServer() {
+    try {
+      const response = await fetch(`${readServerUrl}/api/read/${clientId}/2`);
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+      const data = await response.json();
+      const ts = data.sent_at || data.received_at || data.timestamp || 0;
+
+      if (ts && ts !== lastTipTimestamp) {
+        lastTipTimestamp = ts;
+
+        if (data.values && Array.isArray(data.values)) {
+          const v = data.values;
+          const posStr = v.length >= 3
+            ? `Pos (${v[0].toFixed(2)}, ${v[1].toFixed(2)}, ${v[2].toFixed(2)})`
+            : `Values: [${v.join(", ")}]`;
+          const oriStr = v.length >= 6
+            ? ` | Ori (${v[3].toFixed(2)}, ${v[4].toFixed(2)}, ${v[5].toFixed(2)})`
+            : "";
+          const extra = v.length >= 7 ? ` | \u03BA=${v[6].toFixed(2)}` : "";
+          updateStatus("tipPose", posStr + oriStr + extra);
+        }
+      }
+    } catch (error) {
+      // Silently retry - tip data may not be available yet
+    }
+  }
+
   async function updateVolumeFromServer() {
     try {
       const response = await fetch(`${readServerUrl}/api/read/${clientId}/1`);
@@ -428,6 +458,7 @@ async function main() {
 
     updateTextureFromServer().catch(() => {});
     updateVolumeFromServer().catch(() => {});
+    updateTipPoseFromServer().catch(() => {});
 
     gl.clearColor(0.0, 0.0, 0.0, 1.0);
     gl.clearDepth(1.0);
