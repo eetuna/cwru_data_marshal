@@ -148,7 +148,7 @@ int main() {
         std::cout << "Read values: " << values.dump(2) << "\n";
 
         //double result = 1.0;
-        std::vector<double> result = {2.5, 3.3, 3.6, 55.0,40.0,35.0};
+        std::vector<double> result = {2.5, 3.3, 3.6, 2.0,3.0,5.0, 1.0, 4.0, 2.0, 3.0, 4.0,5.0}; // Example result vector (replace with actual computation)
         /*for (size_t i = 0; i < values.size(); ++i) {
             result += values[i].get<double>();
             result += i;
