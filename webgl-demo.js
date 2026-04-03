@@ -79,6 +79,7 @@ async function main() {
   let lastTimestamp = -1;
   let lastVolumeTimestamp = -1;
   let lastTipTimestamp = -1;
+  let lastFKTimestamp = -1;
 
   // Create 2D image renderer
   const image2DRenderer = new Image2DRenderer(gl);
@@ -328,6 +329,30 @@ async function main() {
     }
   }
 
+
+
+  // Fetch forward kinematics from server (read_from4 = fileKey 3)
+  async function updateForwardKinematicsFromServer() {
+    try {
+      const response = await fetch(`${readServerUrl}/api/read/${clientId}/3`);
+
+      const data = await response.json();
+      const ts = data.sent_at || data.received_at || data.timestamp || 0;
+
+      if (ts && ts !== lastFKTimestamp) {
+        lastFKTimestamp = ts;
+
+        if (data.values && Array.isArray(data.values)) {
+          const v = data.values;
+          const valuesStr = v.map(val => val.toFixed(2)).join(", ");
+          updateStatus("fwdKinematics", `[${valuesStr}]`);
+        }
+      }
+    } catch (error) {
+      // Silently retry - forward kinematics data may not be available yet
+    }
+  }
+
   async function updateVolumeFromServer() {
     try {
       const response = await fetch(`${readServerUrl}/api/read/${clientId}/1`);
@@ -459,6 +484,7 @@ async function main() {
     updateTextureFromServer().catch(() => {});
     updateVolumeFromServer().catch(() => {});
     updateTipPoseFromServer().catch(() => {});
+    updateForwardKinematicsFromServer().catch(() => {});
 
     gl.clearColor(0.0, 0.0, 0.0, 1.0);
     gl.clearDepth(1.0);
