@@ -1,0 +1,68 @@
+# CMake build directories
+build*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Visual Studio build results and temp files
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+*.log
+*.tlog
+*.ipch
+*.aps
+*.ncb
+*.opendb
+*.sdf
+*.cachefile
+*.VC.db
+*.VC.VC.opendb
+*.pdb
+*.ilk
+*.idb
+*.user
+*.suo
+*.userosscache
+*.rsuser
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+.vs/
+*.vcxproj.user
+*.vcxproj.filters
+
+# Test results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+
+# MATLAB MEX and autosave files
+*.mexw64
+*.mexa64
+*.asv
+
+# Python
+*.pyd
+*.so
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Other editor/IDE files
+*.swp
+*~
+*.tmp
+
+# Ignore parameter and data files if generated
+catheterdata/*.tmp
+catheterdata/*.bak
+
+# Ignore local history
+.localhistory/
+
+# Python Tools for Visual Studio (PTVS)
+__pycache__/
+*.pyc
+
