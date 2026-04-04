@@ -37,6 +37,12 @@
         flex: 1;
       }
 
+      #canvasFK {
+        border: 2px solid #00ccff;
+        background-color: black;
+        cursor: crosshair;
+      }
+
       #canvas2d {
         border: 2px solid #00ff00;
         background-color: black;
@@ -82,6 +88,10 @@
         <h2>3D Volume</h2>
         <canvas id="glcanvas" width="1280" height="960"></canvas>
       </div>
+      <div class="canvas-section">
+        <h2>Forward Kinematics Control Points</h2>
+        <canvas id="canvasFK" width="640" height="480"></canvas>
+      </div>
     </div>
     <div id="info">
       <p><strong>Canvas Status:</strong> <span id="status">Initializing...</span></p>
@@ -89,6 +99,7 @@
       <p><strong>3D Volume (Right):</strong> <span id="status3d">Loading...</span></p>
       <p><strong>Tip Position / Orientation:</strong> <span id="tipPose" style="color: #ffcc00;">Waiting...</span></p>
       <p><strong>Forward Kinematics:</strong> <span id="fwdKinematics" style="color: #00ccff;">Waiting...</span></p>
+      <p><strong>FK Control Points:</strong> <span id="fkCtrlPts" style="color: #00ccff;">Waiting...</span></p>
       <p><strong>Debug Info:</strong> <span id="debug"></span></p>
       <p><strong>Selected Point:</strong> <span id="selectedPoint">None</span></p>
       <p><strong>Point Value:</strong> <span id="pointValue">-</span></p>

@@ -14,13 +14,31 @@ main();
 async function main() {
   const canvas3D = document.querySelector("#glcanvas");
   const canvas2D = document.querySelector("#canvas2d");
+  const canvasFK = document.querySelector("#canvasFK");
   const gl = canvas3D.getContext("webgl");
   const gl2d = canvas2D.getContext("2d");
+  const glFK = canvasFK.getContext("webgl");
 
   if (gl === null) {
     alert("Unable to initialize WebGL. Your browser or machine may not support it.");
     return;
   }
+
+  if (glFK === null) {
+    alert("Unable to initialize WebGL for FK canvas.");
+    return;
+  }
+
+  // FK canvas mouse rotation state (independent from 3D volume)
+  let fkMouseRotationX = -0.5;
+  let fkMouseRotationY = 0.3;
+  let fkMouseRotationZ = 0.0;
+  let fkIsMouseDown = false;
+  let fkLastMouseX = 0;
+  let fkLastMouseY = 0;
+
+  // Forward kinematics control points: array of {x, y, z}
+  let fkControlPoints = [];
 
   const updateStatus = (id, msg) => {
     const el = document.getElementById(id);
@@ -331,6 +349,23 @@ async function main() {
 
 
 
+  // Parse flat forward kinematics values into control points
+  // Input: [v1,v2,v3, v4,v5,v6, v7,v8,v9, ...]
+  // Output: [{x:v1,y:v2,z:v3}, {x:v4,y:v5,z:v6}, {x:v7,y:v8,z:v9}, ...]
+  // Handles arbitrary number of control points (length / 3)
+  function parseFKControlPoints(values) {
+    const points = [];
+    const numPoints = Math.floor(values.length / 3);
+    for (let i = 0; i < numPoints; i++) {
+      points.push({
+        x: values[i * 3],
+        y: values[i * 3 + 1],
+        z: values[i * 3 + 2]
+      });
+    }
+    return points;
+  }
+
   // Fetch forward kinematics from server (read_from4 = fileKey 3)
   async function updateForwardKinematicsFromServer() {
     try {
@@ -346,6 +381,14 @@ async function main() {
           const v = data.values;
           const valuesStr = v.map(val => val.toFixed(2)).join(", ");
           updateStatus("fwdKinematics", `[${valuesStr}]`);
+
+          // Parse values into control points (every 3 values = one x,y,z point)
+          fkControlPoints = parseFKControlPoints(v);
+          const numPts = fkControlPoints.length;
+          const ptsStr = fkControlPoints.map((p, i) =>
+            `P${i+1}(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)})`
+          ).join(" | ");
+          updateStatus("fkCtrlPts", `${numPts} points: ${ptsStr}`);
         }
       }
     } catch (error) {
@@ -428,6 +471,237 @@ async function main() {
     gl.enable(gl.CULL_FACE);
   }
 
+  // =========================================================================
+  // Forward Kinematics 3D Control Points Renderer
+  // =========================================================================
+
+  // FK canvas shader: simple colored vertices (no textures)
+  const fkVsSource = `
+    attribute vec3 aPosition;
+    attribute vec3 aColor;
+    uniform mat4 uProjectionMatrix;
+    uniform mat4 uModelViewMatrix;
+    uniform float uPointSize;
+    varying lowp vec3 vColor;
+    void main(void) {
+      gl_Position = uProjectionMatrix * uModelViewMatrix * vec4(aPosition, 1.0);
+      gl_PointSize = uPointSize;
+      vColor = aColor;
+    }
+  `;
+
+  const fkFsSource = `
+    precision mediump float;
+    varying lowp vec3 vColor;
+    void main(void) {
+      gl_FragColor = vec4(vColor, 1.0);
+    }
+  `;
+
+  const fkShaderProgram = initShaderProgram(glFK, fkVsSource, fkFsSource);
+  const fkProgramInfo = {
+    program: fkShaderProgram,
+    attribLocations: {
+      position: glFK.getAttribLocation(fkShaderProgram, "aPosition"),
+      color: glFK.getAttribLocation(fkShaderProgram, "aColor"),
+    },
+    uniformLocations: {
+      projectionMatrix: glFK.getUniformLocation(fkShaderProgram, "uProjectionMatrix"),
+      modelViewMatrix: glFK.getUniformLocation(fkShaderProgram, "uModelViewMatrix"),
+      pointSize: glFK.getUniformLocation(fkShaderProgram, "uPointSize"),
+
+    },
+  };
+
+  // Generate a distinct color for each control point index using HSL
+  function getPointColor(index, total) {
+    const hue = (index / Math.max(total, 1)) * 360;
+    const s = 0.9, l = 0.6;
+    // HSL to RGB conversion
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
+    const m = l - c / 2;
+    let r, g, b;
+    if (hue < 60) { r = c; g = x; b = 0; }
+    else if (hue < 120) { r = x; g = c; b = 0; }
+    else if (hue < 180) { r = 0; g = c; b = x; }
+    else if (hue < 240) { r = 0; g = x; b = c; }
+    else if (hue < 300) { r = x; g = 0; b = c; }
+    else { r = c; g = 0; b = x; }
+    return [r + m, g + m, b + m];
+  }
+
+  // Render forward kinematics control points and connecting lines
+  function renderFKControlPoints(gl, programInfo, controlPoints) {
+    gl.clearColor(0.05, 0.05, 0.1, 1.0);
+    gl.clearDepth(1.0);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    if (!controlPoints || controlPoints.length === 0) return;
+
+    gl.useProgram(programInfo.program);
+
+    // Set up projection matrix
+    const fieldOfView = (45 * Math.PI) / 180;
+    const aspect = gl.canvas.clientWidth / gl.canvas.clientHeight;
+    const projectionMatrix = glMatrix.mat4.create();
+    glMatrix.mat4.perspective(projectionMatrix, fieldOfView, aspect, 0.1, 100.0);
+
+    // Set up model-view matrix with FK-specific mouse rotation
+    const modelViewMatrix = glMatrix.mat4.create();
+    glMatrix.mat4.translate(modelViewMatrix, modelViewMatrix, [0.0, 0.0, -15.0]);
+    glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, fkMouseRotationX, [1, 0, 0]);
+    glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, fkMouseRotationY, [0, 1, 0]);
+    glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, fkMouseRotationZ, [0, 0, 1]);
+
+    // Center the points around origin by computing centroid
+    let cx = 0, cy = 0, cz = 0;
+    for (const p of controlPoints) { cx += p.x; cy += p.y; cz += p.z; }
+    cx /= controlPoints.length;
+    cy /= controlPoints.length;
+    cz /= controlPoints.length;
+
+    // Compute scale so points fit in view
+    let maxDist = 0.001;
+    for (const p of controlPoints) {
+      const dx = p.x - cx, dy = p.y - cy, dz = p.z - cz;
+      const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      if (dist > maxDist) maxDist = dist;
+    }
+    const scale = 4.0 / maxDist; // Fit within ~4 units
+
+    gl.uniformMatrix4fv(programInfo.uniformLocations.projectionMatrix, false, projectionMatrix);
+    gl.uniformMatrix4fv(programInfo.uniformLocations.modelViewMatrix, false, modelViewMatrix);
+
+    const numPts = controlPoints.length;
+
+    // Build position and color arrays for points
+    const positions = [];
+    const colors = [];
+    for (let i = 0; i < numPts; i++) {
+      const p = controlPoints[i];
+      positions.push((p.x - cx) * scale, (p.y - cy) * scale, (p.z - cz) * scale);
+      const col = getPointColor(i, numPts);
+      colors.push(col[0], col[1], col[2]);
+    }
+
+    // Create and bind position buffer
+    const posBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+    gl.vertexAttribPointer(programInfo.attribLocations.position, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(programInfo.attribLocations.position);
+
+    // Create and bind color buffer
+    const colBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, colBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+    gl.vertexAttribPointer(programInfo.attribLocations.color, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(programInfo.attribLocations.color);
+
+    // Draw lines connecting consecutive control points (white)
+    if (numPts >= 2) {
+      const linePositions = [];
+      const lineColors = [];
+      for (let i = 0; i < numPts - 1; i++) {
+        const p1 = controlPoints[i];
+        const p2 = controlPoints[i + 1];
+        linePositions.push(
+          (p1.x - cx) * scale, (p1.y - cy) * scale, (p1.z - cz) * scale,
+          (p2.x - cx) * scale, (p2.y - cy) * scale, (p2.z - cz) * scale
+        );
+        lineColors.push(0.5, 0.5, 0.5, 0.5, 0.5, 0.5); // Gray lines
+      }
+
+      const linePosBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, linePosBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(linePositions), gl.STATIC_DRAW);
+      gl.vertexAttribPointer(programInfo.attribLocations.position, 3, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(programInfo.attribLocations.position);
+
+      const lineColBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, lineColBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lineColors), gl.STATIC_DRAW);
+      gl.vertexAttribPointer(programInfo.attribLocations.color, 3, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(programInfo.attribLocations.color);
+
+      gl.uniform1f(programInfo.uniformLocations.pointSize, 1.0);
+      gl.lineWidth(2.0);
+      gl.drawArrays(gl.LINES, 0, (numPts - 1) * 2);
+    }
+
+    // Rebind point buffers and draw points on top
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+    gl.vertexAttribPointer(programInfo.attribLocations.position, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(programInfo.attribLocations.position);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, colBuffer);
+    gl.vertexAttribPointer(programInfo.attribLocations.color, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(programInfo.attribLocations.color);
+
+    gl.uniform1f(programInfo.uniformLocations.pointSize, 12.0);
+    gl.drawArrays(gl.POINTS, 0, numPts);
+
+    // Draw small axes at the origin for reference
+    const axisLen = 1.5;
+    const axisPositions = [
+      0, 0, 0,  axisLen, 0, 0,  // X axis
+      0, 0, 0,  0, axisLen, 0,  // Y axis
+      0, 0, 0,  0, 0, axisLen,  // Z axis
+    ];
+    const axisColors = [
+      1, 0, 0,  1, 0, 0,  // Red = X
+      0, 1, 0,  0, 1, 0,  // Green = Y
+      0, 0, 1,  0, 0, 1,  // Blue = Z
+    ];
+
+    const axisPosBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, axisPosBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(axisPositions), gl.STATIC_DRAW);
+    gl.vertexAttribPointer(programInfo.attribLocations.position, 3, gl.FLOAT, false, 0, 0);
+
+    const axisColBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, axisColBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(axisColors), gl.STATIC_DRAW);
+    gl.vertexAttribPointer(programInfo.attribLocations.color, 3, gl.FLOAT, false, 0, 0);
+
+    gl.uniform1f(programInfo.uniformLocations.pointSize, 1.0);
+    gl.drawArrays(gl.LINES, 0, 6);
+  }
+
+  // Mouse controls for FK canvas (independent rotation)
+  canvasFK.addEventListener('mousedown', (e) => {
+    fkIsMouseDown = true;
+    fkLastMouseX = e.clientX;
+    fkLastMouseY = e.clientY;
+    e.preventDefault();
+  });
+
+  canvasFK.addEventListener('mousemove', (e) => {
+    if (fkIsMouseDown) {
+      const deltaX = e.clientX - fkLastMouseX;
+      const deltaY = e.clientY - fkLastMouseY;
+      const sensitivity = 0.01;
+      fkMouseRotationY += deltaX * sensitivity;
+      fkMouseRotationX += deltaY * sensitivity;
+      if (e.shiftKey) {
+        fkMouseRotationZ += deltaX * sensitivity;
+      }
+      fkLastMouseX = e.clientX;
+      fkLastMouseY = e.clientY;
+    }
+  });
+
+  canvasFK.addEventListener('mouseup', () => {
+    fkIsMouseDown = false;
+  });
+
+  canvasFK.addEventListener('mouseleave', () => {
+    fkIsMouseDown = false;
+  });
+
   // Mouse controls for 3D volume
   canvas3D.addEventListener('mousedown', (e) => {
     isMouseDown = true;
@@ -493,6 +767,9 @@ async function main() {
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
     renderVolumeCube(gl, programInfo, volumeSlices);
+
+    // Render FK control points on the separate canvas
+    renderFKControlPoints(glFK, fkProgramInfo, fkControlPoints);
 
     requestAnimationFrame(render);
   }
