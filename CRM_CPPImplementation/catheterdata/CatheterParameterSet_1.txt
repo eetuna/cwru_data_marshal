@@ -1,9 +1,14 @@
-# Catheter Parameter Set 1
-# MRI-guided catheter - shorter/thinner variant
-TotalLength: 150.0
-InsertDiameter: 2.0
-EI: 2.0
-GJ: 0.8
-ActuationGain: 0.015
-NumActuationSets: 2
-NumCoilsPerSet: 3
+# Prototype ?.?
+CatheterConfig F A F
+NumLocalizationMarkers 5
+oRlist 1.5875 1.5875
+iRlist 0.9906 0.9906 
+YoungModlist 5.3948 5.3948 
+ShearModlist 2.3881 2.3881 
+CoilAlignmentAngles 0.0 0.0
+CoilTurnAreaMat 1.3851  0.0 0.0 0.0 1.44 0.0 0.0 0.0 1.60 
+SegmentLengths 19.85 18.3 59.80
+ActMass 5.7736e-5
+MarkerLoc 2.18 18.79 50.06 101.52 104.02
+rho 2.8814e-7 2.8814e-7 2.8814e-7 
+ustarlist 0.0000148626102272827 0.000094448815853795 0 0.0007399849479553773 -0.0002292201697658481 0
