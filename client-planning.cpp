@@ -4,7 +4,6 @@
 #include <string>
 #include <map>
 #include <cstdlib>
-
 #include "httplib.h"
 #include "json.hpp"
 
@@ -24,9 +23,6 @@ int main() {
 
     std::cout << "Connecting to robot marshal at " << marshal_host << ":" << marshal_port << std::endl;
     httplib::Client cli(marshal_host, marshal_port);
-
-    // Monotonically increasing counter, written to file_desired_planned_motion at 20 Hz
-    double counter = 0.0;
 
     while(true){
         std::string client_id = "client-planning";
@@ -186,32 +182,24 @@ int main() {
             return 1;
         }
 
-        // Step 3: Write counter + user input pixel coordinates to desired_planned_motion
+        // Step 3: Output default actuation currents and inserted length for CRM FK
         const auto& values = input_data_catheter_base_configuration["values"];
         std::cout << "Read values: " << values.dump(2) << "\n";
 
-        // Increment the counter each iteration
-        counter += 0.05;
+        // Default actuation currents (0.1 A for all 6 coils) and inserted length (100 mm)
+        double i1 = 0.1;
+        double i2 = 0.1;
+        double i3 = 0.1;
+        double i4 = 0.1;
+        double i5 = 0.1;
+        double i6 = 0.1;
+        double insertedLength = 100.0;
 
-        // Read pixel coordinates from user input, but ONLY if written by client-webgl
-        double pixelX = 0.0, pixelY = 0.0;
-        bool hasPixelInput = false;
-        if (input_data_user_input.contains("client_id") &&
-            input_data_user_input["client_id"].get<std::string>() == "client-webgl") {
-            const auto& user_values = input_data_user_input["values"];
-            if (user_values.size() >= 2) {
-                pixelX = user_values[0].get<double>();
-                pixelY = user_values[1].get<double>();
-                hasPixelInput = true;
-            }
-        }
-        std::cout << "User input pixel: (" << pixelX << ", " << pixelY << ") from_webgl=" << hasPixelInput << "\n";
-
-        // Output: [counter] if no pixel input, [counter, pixelX, pixelY] if pixel was clicked
-        std::vector<double> result = hasPixelInput
-            ? std::vector<double>{counter, pixelX, pixelY}
-            : std::vector<double>{counter};
-        std::cout << "Writing: counter=" << counter << " pixel=(" << pixelX << ", " << pixelY << ")\n";
+        // Output format: [i1, i2, i3, i4, i5, i6, insertedLength]
+        std::vector<double> result = {i1, i2, i3, i4, i5, i6, insertedLength};
+        std::cout << "Writing: currents=[" << i1 << ", " << i2 << ", " << i3 << ", "
+                  << i4 << ", " << i5 << ", " << i6 << "] "
+                  << "insertedLength=" << insertedLength << " mm\n";
 
         // Step 4: Build output JSON
         json out_data = {

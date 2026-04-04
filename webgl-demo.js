@@ -382,16 +382,21 @@ async function main() {
 
         if (data.values && Array.isArray(data.values)) {
           const v = data.values;
-          const valuesStr = v.map(val => val.toFixed(2)).join(", ");
-          updateStatus("fwdKinematics", `[${valuesStr}]`);
 
-          // Parse values into control points (every 3 values = one x,y,z point)
+          // Parse values into marker positions (every 3 values = one x,y,z point)
           fkControlPoints = parseFKControlPoints(v);
           const numPts = fkControlPoints.length;
-          const ptsStr = fkControlPoints.map((p, i) =>
+
+          // Status: show value count and first few marker positions
+          const valuesStr = v.slice(0, 12).map(val => val.toFixed(2)).join(", ")
+                          + (v.length > 12 ? ` ... (${v.length} values total)` : "");
+          updateStatus("fwdKinematics", `[${valuesStr}]`);
+
+          const displayCount = Math.min(numPts, 5);
+          const ptsStr = fkControlPoints.slice(0, displayCount).map((p, i) =>
             `P${i+1}(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)})`
-          ).join(" | ");
-          updateStatus("fkCtrlPts", `${numPts} points: ${ptsStr}`);
+          ).join(" | ") + (numPts > displayCount ? ` ... (${numPts} pts total)` : "");
+          updateStatus("fkCtrlPts", `${numPts} pts: ${ptsStr}`);
         }
       }
     } catch (error) {
@@ -647,14 +652,21 @@ async function main() {
     gl.vertexAttribPointer(programInfo.attribLocations.color, 3, gl.FLOAT, false, 0, 0);
     gl.enableVertexAttribArray(programInfo.attribLocations.color);
 
-    // Draw Catmull-Rom spline through all control points
+    // Draw catheter curve through all marker positions.
+    // If there are many markers (CRM FK output), render them directly as LINE_STRIP
+    // so the dense CRM-computed shape is shown exactly.
+    // If there are only a few markers (legacy sparse control points), apply
+    // Catmull-Rom spline interpolation to produce a smooth curve.
+    const MAX_SPARSE_POINTS = 10;  // threshold: above this, use direct LINE_STRIP rendering
     if (numPts >= 2) {
-      const splinePoints = generateSplinePoints(controlPoints, 20);
+      const useCatmullRom = numPts <= MAX_SPARSE_POINTS;
+      const linePoints = useCatmullRom ? generateSplinePoints(controlPoints, 20) : controlPoints;
+
       const splinePositions = [];
       const splineColors = [];
-      for (const sp of splinePoints) {
+      for (const sp of linePoints) {
         splinePositions.push((sp.x - cx) * scale, (sp.y - cy) * scale, (sp.z - cz) * scale);
-        splineColors.push(0.8, 0.8, 0.8); // Light gray spline
+        splineColors.push(0.8, 0.8, 0.8); // Light gray catheter curve
       }
 
       const splinePosBuffer = gl.createBuffer();
@@ -671,18 +683,16 @@ async function main() {
 
       gl.uniform1f(programInfo.uniformLocations.pointSize, 1.0);
       gl.lineWidth(2.0);
-      gl.drawArrays(gl.LINE_STRIP, 0, splinePoints.length);
+      gl.drawArrays(gl.LINE_STRIP, 0, linePoints.length);
     }
 
-    // Rebind point buffers and draw points on top
+    // Draw marker points on top of the curve — all points, no subsampling.
     gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
     gl.vertexAttribPointer(programInfo.attribLocations.position, 3, gl.FLOAT, false, 0, 0);
     gl.enableVertexAttribArray(programInfo.attribLocations.position);
-
     gl.bindBuffer(gl.ARRAY_BUFFER, colBuffer);
     gl.vertexAttribPointer(programInfo.attribLocations.color, 3, gl.FLOAT, false, 0, 0);
     gl.enableVertexAttribArray(programInfo.attribLocations.color);
-
     gl.uniform1f(programInfo.uniformLocations.pointSize, 12.0);
     gl.drawArrays(gl.POINTS, 0, numPts);
 

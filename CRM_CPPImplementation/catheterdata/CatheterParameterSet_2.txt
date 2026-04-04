@@ -1,0 +1,9 @@
+# Catheter Parameter Set 2
+# MRI-guided catheter with electromagnetic actuation (2 coil sets x 3 coils)
+TotalLength: 200.0
+InsertDiameter: 2.5
+EI: 2.5
+GJ: 1.0
+ActuationGain: 0.02
+NumActuationSets: 2
+NumCoilsPerSet: 3

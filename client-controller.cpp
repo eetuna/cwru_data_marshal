@@ -1,15 +1,18 @@
 #include <iostream>
 #include <fstream>
 #include <chrono>
+#include <thread>
 #include <string>
 #include <map>
 #include <cstdlib>
 #include <cmath>
 
+#include "CRM.hpp"
 #include "httplib.h"
 #include "json.hpp"
 
 using json = nlohmann::json;
+using namespace CRMCatheterModel;
 
 int64_t current_time_ns() {
     auto now = std::chrono::system_clock::now();
@@ -26,13 +29,38 @@ int main() {
     std::cout << "Connecting to robot marshal at " << marshal_host << ":" << marshal_port << std::endl;
     httplib::Client cli(marshal_host, marshal_port);
 
-    // Persistent pixel state: once set by a click, P0 stays at that location
-    bool pixelEverSet = false;
-    double last_pixel_x = 0.0;
-    double last_pixel_y = 0.0;
-    double last_pixel_z = 0.0;
+    // -------------------------------------------------------------------------
+    // One-time CRM setup (before the main control loop)
+    // -------------------------------------------------------------------------
+    std::cout << "Loading CRM catheter model parameters...\n";
+    if (!Load_CRMCatheterModelParams("catheterdata/CatheterParameterSet_2.txt")) {
+        std::cerr << "Warning: using built-in default catheter parameters.\n";
+    }
+    if (!Load_CatheterConfiguration("catheterdata/CatheterSpatialConfiguration_1.txt")) {
+        std::cerr << "Warning: using default identity base pose.\n";
+    }
 
-    while(true){
+    // Initialise CRMForwardKinematicsData struct
+    CRMForwardKinematicsData FKParams;
+    FKParams.integrationStepSize = 2.0;   // mm between reported markers
+    FKParams.contactMode         = FREE_TIP;
+
+    // Pre-allocate marker storage for the default inserted length (100 mm)
+    int initialMarkers = static_cast<int>(100.0 / FKParams.integrationStepSize) + 1;
+    FKParams.ReportedMarkerPos.resize(initialMarkers, 3);
+    FKParams.ReportedMarkerPos.setZero();
+
+    // Initial guess for BVP shooting variables (zero = straight catheter)
+    FKParams.initialGuess.resize(NUM_ACT_SET * 3);
+    FKParams.initialGuess.setZero();
+
+    double PotentialEnergy = 0.0;
+    bool   localmin        = false;
+
+    // -------------------------------------------------------------------------
+    // Main control loop
+    // -------------------------------------------------------------------------
+    while (true) {
         std::string client_id = "client-controller";
 
         // Step 1: Load routing config
@@ -52,21 +80,21 @@ int main() {
             continue;
         }
 
-        std::string read_file_desired_planned_motion = routes_config[client_id]["read_from"];
+        std::string read_file_desired_planned_motion      = routes_config[client_id]["read_from"];
         std::string read_file_catheter_base_configuration = routes_config[client_id]["read_from2"];
-        std::string read_file_tip_position_orientation = routes_config[client_id]["read_from3"];
-        std::string read_file_biological_signals = routes_config[client_id]["read_from4"];
-        std::string write_file = routes_config[client_id]["write_to"];
+        std::string read_file_tip_position_orientation    = routes_config[client_id]["read_from3"];
+        std::string read_file_biological_signals          = routes_config[client_id]["read_from4"];
+        std::string write_file                            = routes_config[client_id]["write_to"];
 
-        // Step 2: Read from server file via GET
+        // Step 2: Read desired planned motion (provides FK inputs)
         std::string read_endpoint_desired_planned_motion = "/read/" + read_file_desired_planned_motion;
         auto res_desired_planned_motion = cli.Get(read_endpoint_desired_planned_motion.c_str());
 
         if (!res_desired_planned_motion || res_desired_planned_motion->status != 200) {
             std::cerr << "Failed to read from server file: " << read_file_desired_planned_motion << "\n";
             if (res_desired_planned_motion) {
-                std::cerr << "GET request response status: " << res_desired_planned_motion->status << "\n";
-                std::cerr << "GET request response body: " << res_desired_planned_motion->body << "\n";
+                std::cerr << "GET status: " << res_desired_planned_motion->status << "\n";
+                std::cerr << "GET body:   " << res_desired_planned_motion->body   << "\n";
             } else {
                 std::cerr << "No response (connection failed)\n";
             }
@@ -75,148 +103,169 @@ int main() {
         }
 
         json input_data_desired_planned_motion = json::parse(res_desired_planned_motion->body);
-        if (!input_data_desired_planned_motion.contains("values") || !input_data_desired_planned_motion["values"].is_array()) {
+        if (!input_data_desired_planned_motion.contains("values") ||
+            !input_data_desired_planned_motion["values"].is_array()) {
             std::cerr << "Invalid data in server file\n";
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
 
-        // Step 2a: Read from server file via GET
+        // Step 2a: Read catheter base configuration
         std::string read_endpoint_catheter_base_configuration = "/read/" + read_file_catheter_base_configuration;
         auto res_catheter_base_configuration = cli.Get(read_endpoint_catheter_base_configuration.c_str());
-
         if (!res_catheter_base_configuration || res_catheter_base_configuration->status != 200) {
             std::cerr << "Failed to read from server file: " << read_file_catheter_base_configuration << "\n";
             if (res_catheter_base_configuration) {
-                std::cerr << "GET request response status: " << res_catheter_base_configuration->status << "\n";
-                std::cerr << "GET request response body: " << res_catheter_base_configuration->body << "\n";
+                std::cerr << "GET status: " << res_catheter_base_configuration->status << "\n";
+                std::cerr << "GET body:   " << res_catheter_base_configuration->body   << "\n";
             } else {
                 std::cerr << "No response (connection failed)\n";
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
-
         json input_data_catheter_base_configuration = json::parse(res_catheter_base_configuration->body);
-        if (!input_data_catheter_base_configuration.contains("values") || !input_data_catheter_base_configuration["values"].is_array()) {
+        if (!input_data_catheter_base_configuration.contains("values") ||
+            !input_data_catheter_base_configuration["values"].is_array()) {
             std::cerr << "Invalid data in server file\n";
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
 
-        // Step 2b: Read from server file via GET
+        // Step 2b: Read tip position/orientation
         std::string read_endpoint_tip_position_orientation = "/read/" + read_file_tip_position_orientation;
         auto res_tip_position_orientation = cli.Get(read_endpoint_tip_position_orientation.c_str());
-
         if (!res_tip_position_orientation || res_tip_position_orientation->status != 200) {
             std::cerr << "Failed to read from server file: " << read_file_tip_position_orientation << "\n";
             if (res_tip_position_orientation) {
-                std::cerr << "GET request response status: " << res_tip_position_orientation->status << "\n";
-                std::cerr << "GET request response body: " << res_tip_position_orientation->body << "\n";
+                std::cerr << "GET status: " << res_tip_position_orientation->status << "\n";
+                std::cerr << "GET body:   " << res_tip_position_orientation->body   << "\n";
             } else {
                 std::cerr << "No response (connection failed)\n";
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
-
         json input_data_tip_position_orientation = json::parse(res_tip_position_orientation->body);
-        if (!input_data_tip_position_orientation.contains("values") || !input_data_tip_position_orientation["values"].is_array()) {
+        if (!input_data_tip_position_orientation.contains("values") ||
+            !input_data_tip_position_orientation["values"].is_array()) {
             std::cerr << "Invalid data in server file\n";
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
 
-        // Step 2c: Read from server file via GET
+        // Step 2c: Read biological signals
         std::string read_endpoint_biological_signals = "/read/" + read_file_biological_signals;
         auto res_biological_signals = cli.Get(read_endpoint_biological_signals.c_str());
-
         if (!res_biological_signals || res_biological_signals->status != 200) {
             std::cerr << "Failed to read from server file: " << read_file_biological_signals << "\n";
             if (res_biological_signals) {
-                std::cerr << "GET request response status: " << res_biological_signals->status << "\n";
-                std::cerr << "GET request response body: " << res_biological_signals->body << "\n";
+                std::cerr << "GET status: " << res_biological_signals->status << "\n";
+                std::cerr << "GET body:   " << res_biological_signals->body   << "\n";
             } else {
                 std::cerr << "No response (connection failed)\n";
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
-
         json input_data_biological_signals = json::parse(res_biological_signals->body);
-        if (!input_data_biological_signals.contains("values") || !input_data_biological_signals["values"].is_array()) {
+        if (!input_data_biological_signals.contains("values") ||
+            !input_data_biological_signals["values"].is_array()) {
             std::cerr << "Invalid data in server file\n";
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
 
-        // Step 3: Build forward kinematics control points
-        // Read the desired planned motion value (monotonically increasing counter from client-planning)
+        // Step 3: Extract actuation currents and inserted length
+        //
+        // Expected format: [i1, i2, i3, i4, i5, i6, insertedLength]
+        //   i1..i6         : coil actuation currents (A)
+        //   insertedLength : catheter inserted length (mm)
+        //
         const auto& values = input_data_desired_planned_motion["values"];
-        std::cout << "Read desired_planned_motion values: " << values.dump(2) << "\n";
+        std::cout << "Read desired_planned_motion: " << values.dump() << "\n";
 
-        // Extract values from desired_planned_motion: [counter, pixelX, pixelY]
-        double planned_motion_value = 0.0;
-        double pixel_x = 0.0;
-        double pixel_y = 0.0;
-        if (values.size() > 0) {
-            planned_motion_value = values[0].get<double>();
-        }
-        if (values.size() > 2) {
-            pixel_x = values[1].get<double>();
-            pixel_y = values[2].get<double>();
-        }
-        double sine_factor = std::sin(M_PI * planned_motion_value);
-        std::cout << "sin(pi * " << planned_motion_value << ") = " << sine_factor << "\n";
+        double i1 = 0.1, i2 = 0.1, i3 = 0.1, i4 = 0.1, i5 = 0.1, i6 = 0.1;
+        double insertedLength = 100.0;
 
-        // If new pixel coordinates were provided, save them persistently
-        if (values.size() > 2) {
-            last_pixel_x = pixel_x;
-            last_pixel_y = pixel_y;
-            last_pixel_z = (pixel_x + pixel_y) / 2.0;
-            pixelEverSet = true;
-            std::cout << "P0 updated from pixel input: (" << last_pixel_x << ", " << last_pixel_y << ", " << last_pixel_z << ")\n";
+        if (values.size() >= 7) {
+            i1             = values[0].get<double>();
+            i2             = values[1].get<double>();
+            i3             = values[2].get<double>();
+            i4             = values[3].get<double>();
+            i5             = values[4].get<double>();
+            i6             = values[5].get<double>();
+            insertedLength = values[6].get<double>();
+        } else {
+            std::cerr << "Warning: expected 7 values [i1..i6, insertedLength], got "
+                      << values.size() << " — using defaults.\n";
         }
 
-        // P0: use last saved pixel location if ever set, otherwise default (2.5, 3.3, 3.6)
-        double p0_x = pixelEverSet ? last_pixel_x : 2.5;
-        double p0_y = pixelEverSet ? last_pixel_y : 3.3;
-        double p0_z = pixelEverSet ? last_pixel_z : 3.6;
+        // Step 4: Build control_inputs vector for CRM_ForwardKinematics
+        VectorXd control_inputs(NUM_ACT_SET * 3 + 1);
+        control_inputs[0] = i1;
+        control_inputs[1] = i2;
+        control_inputs[2] = i3;
+        control_inputs[3] = i4;
+        control_inputs[4] = i5;
+        control_inputs[5] = i6;
+        control_inputs[6] = insertedLength;
 
-        // Base control points (4 points, each with x,y,z)
-        // P0 from persistent pixel input (or default), P1-P3 are fixed
-        std::vector<double> result = {p0_x, p0_y, p0_z, 2.0, 3.0, 5.0, 1.0, 4.0, 2.0, 3.0, 4.0, 5.0};
+        // Step 5: Compute CRM Forward Kinematics
+        VectorXd FKsolution = CRM_ForwardKinematics(
+            control_inputs, FKParams, PotentialEnergy, localmin);
 
-        // Multiply the last control point coordinates by sin(planned_motion_value)
-        // Last control point is the last 3 values in the vector
-        size_t n = result.size();
-        if (n >= 3) {
-            result[n - 3] *= sine_factor;  // last point x
-            result[n - 2] *= sine_factor;  // last point y
-            result[n - 1] *= sine_factor;  // last point z
+        // Step 6: Assemble output — flat array of 3-D positions
+        //   Layout: [p0_x, p0_y, p0_z,  m1_x, m1_y, m1_z, ...,  tip_x, tip_y, tip_z]
+        //   p0      = catheter base (from CathConfig)
+        //   m1..mN  = intermediate CRM markers (ReportedMarkerPos rows)
+        //   tip     = last marker == FKsolution[0..2]
+        std::vector<double> result;
+
+        // Base position
+        result.push_back(CathConfig.p0[0]);
+        result.push_back(CathConfig.p0[1]);
+        result.push_back(CathConfig.p0[2]);
+
+        // All CRM marker positions (skip row 0 if it duplicates the base)
+        const int numMarkers = static_cast<int>(FKParams.ReportedMarkerPos.rows());
+        const int startIdx =
+            (numMarkers > 0 &&
+             FKParams.ReportedMarkerPos(0, 0) == CathConfig.p0[0] &&
+             FKParams.ReportedMarkerPos(0, 1) == CathConfig.p0[1] &&
+             FKParams.ReportedMarkerPos(0, 2) == CathConfig.p0[2]) ? 1 : 0;
+
+        for (int j = startIdx; j < numMarkers; ++j) {
+            result.push_back(FKParams.ReportedMarkerPos(j, 0));
+            result.push_back(FKParams.ReportedMarkerPos(j, 1));
+            result.push_back(FKParams.ReportedMarkerPos(j, 2));
         }
-        std::cout << "Last ctrl pt after sine modulation: ("
-                  << result[n-3] << ", " << result[n-2] << ", " << result[n-1] << ")\n";
 
-        // Step 4: Build output JSON
+        std::cout << "FK computed: " << numMarkers << " markers, "
+                  << "tip=(" << FKsolution[0] << ", "
+                              << FKsolution[1] << ", "
+                              << FKsolution[2] << "), "
+                  << "PE=" << PotentialEnergy << " N.mm\n";
+
+        // Step 7: Build output JSON and POST to server
         json out_data = {
             {"client_id", client_id},
-            {"sent_at", current_time_ns()},
-            //{"tags", {"computed", "example"}},
-            {"values", result}
+            {"sent_at",   current_time_ns()},
+            {"values",    result}
         };
 
-        // Step 5: Send POST to server to write result
         std::string write_endpoint = "/write/" + write_file;
         auto post_res = cli.Post(write_endpoint.c_str(), out_data.dump(), "application/json");
 
         if (post_res && post_res->status == 200) {
-            std::cout << "Result sent successfully. Server response:\n" << post_res->body << "\n";
+            std::cout << "FK result sent (" << result.size() / 3 << " points).\n";
         } else {
-            std::cerr << "Failed to POST result to server.\n";
+            std::cerr << "Failed to POST FK result to server.\n";
         }
-        // Wait 5 milliseconds before the next request
+
+        // 5 ms period (200 Hz) — matches original controller update rate
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+
     return 0;
 }

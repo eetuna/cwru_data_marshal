@@ -1,16 +1,37 @@
 FROM gcc:latest
 
+# Install Eigen3 for CRM Cosserat Rod Model code
+RUN apt-get update && apt-get install -y libeigen3-dev && rm -rf /var/lib/apt/lists/*
+
+# Create eigen5 symlink: CRM source headers use the include path
+# `#include <eigen5/Eigen/Dense>` (version-scoped path from the CRM API design).
+# Symlinking eigen3 → eigen5 makes this resolve without modifying CRM headers.
+RUN ln -s /usr/include/eigen3 /usr/include/eigen5
+
 # Create app directory
 WORKDIR /app
 
-# Copy all necessary files
+# Copy support headers and routing config
 COPY client-controller.cpp file_routes.json httplib.h json.hpp ./
 
-# Build client
-RUN g++ client-controller.cpp -o client-controller -pthread
+# Copy CRM source tree (vendored — no internet needed at build time)
+COPY CRM_CPPImplementation/src/ ./CRM_CPPImplementation/src/
 
-# Set default command (optional)
-#CMD ["./client"]
+# Copy catheter parameter / configuration data files
+COPY CRM_CPPImplementation/catheterdata/ ./catheterdata/
+
+# Build client-controller together with all CRM source files
+RUN g++ -O2 \
+    client-controller.cpp \
+    CRM_CPPImplementation/src/CRM_ForwardKinematics.cpp \
+    CRM_CPPImplementation/src/CRM_BVPSolver.cpp \
+    CRM_CPPImplementation/src/CRM_IVPSolver.cpp \
+    CRM_CPPImplementation/src/CRM_IVPJacobian.cpp \
+    CRM_CPPImplementation/src/CRM_CatheterClass.cpp \
+    CRM_CPPImplementation/src/CRM_SupportFunctions.cpp \
+    -I CRM_CPPImplementation/src \
+    -o client-controller \
+    -pthread
 
 COPY entrypoint-controller.sh ./
 RUN chmod +x entrypoint-controller.sh
