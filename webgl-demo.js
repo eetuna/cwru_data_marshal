@@ -531,6 +531,42 @@ async function main() {
     return [r + m, g + m, b + m];
   }
 
+  // Catmull-Rom spline interpolation between ALL control points
+  // For each segment Pi -> Pi+1, we use points Pi-1, Pi, Pi+1, Pi+2
+  // At the boundaries, we clamp: P-1 = P0 and PN+1 = PN
+  // This ensures the spline passes through every control point
+  function catmullRomPoint(p0, p1, p2, p3, t) {
+    const t2 = t * t;
+    const t3 = t2 * t;
+    return {
+      x: 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2*p0.x - 5*p1.x + 4*p2.x - p3.x) * t2 + (-p0.x + 3*p1.x - 3*p2.x + p3.x) * t3),
+      y: 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2*p0.y - 5*p1.y + 4*p2.y - p3.y) * t2 + (-p0.y + 3*p1.y - 3*p2.y + p3.y) * t3),
+      z: 0.5 * ((2 * p1.z) + (-p0.z + p2.z) * t + (2*p0.z - 5*p1.z + 4*p2.z - p3.z) * t2 + (-p0.z + 3*p1.z - 3*p2.z + p3.z) * t3),
+    };
+  }
+
+  // Generate interpolated spline points through all control points
+  // segments: number of interpolated points per segment between consecutive control points
+  function generateSplinePoints(controlPoints, segments = 20) {
+    if (controlPoints.length < 2) return [...controlPoints];
+    const spline = [];
+    const n = controlPoints.length;
+    for (let i = 0; i < n - 1; i++) {
+      // Clamp indices at boundaries so spline passes through P0 and P(n-1)
+      const p0 = controlPoints[Math.max(i - 1, 0)];
+      const p1 = controlPoints[i];
+      const p2 = controlPoints[i + 1];
+      const p3 = controlPoints[Math.min(i + 2, n - 1)];
+      for (let s = 0; s < segments; s++) {
+        const t = s / segments;
+        spline.push(catmullRomPoint(p0, p1, p2, p3, t));
+      }
+    }
+    // Add the last control point
+    spline.push(controlPoints[n - 1]);
+    return spline;
+  }
+
   // Render forward kinematics control points and connecting lines
   function renderFKControlPoints(gl, programInfo, controlPoints) {
     gl.clearColor(0.05, 0.05, 0.1, 1.0);
@@ -601,35 +637,31 @@ async function main() {
     gl.vertexAttribPointer(programInfo.attribLocations.color, 3, gl.FLOAT, false, 0, 0);
     gl.enableVertexAttribArray(programInfo.attribLocations.color);
 
-    // Draw lines connecting consecutive control points (white)
+    // Draw Catmull-Rom spline through all control points
     if (numPts >= 2) {
-      const linePositions = [];
-      const lineColors = [];
-      for (let i = 0; i < numPts - 1; i++) {
-        const p1 = controlPoints[i];
-        const p2 = controlPoints[i + 1];
-        linePositions.push(
-          (p1.x - cx) * scale, (p1.y - cy) * scale, (p1.z - cz) * scale,
-          (p2.x - cx) * scale, (p2.y - cy) * scale, (p2.z - cz) * scale
-        );
-        lineColors.push(0.5, 0.5, 0.5, 0.5, 0.5, 0.5); // Gray lines
+      const splinePoints = generateSplinePoints(controlPoints, 20);
+      const splinePositions = [];
+      const splineColors = [];
+      for (const sp of splinePoints) {
+        splinePositions.push((sp.x - cx) * scale, (sp.y - cy) * scale, (sp.z - cz) * scale);
+        splineColors.push(0.8, 0.8, 0.8); // Light gray spline
       }
 
-      const linePosBuffer = gl.createBuffer();
-      gl.bindBuffer(gl.ARRAY_BUFFER, linePosBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(linePositions), gl.STATIC_DRAW);
+      const splinePosBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, splinePosBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(splinePositions), gl.STATIC_DRAW);
       gl.vertexAttribPointer(programInfo.attribLocations.position, 3, gl.FLOAT, false, 0, 0);
       gl.enableVertexAttribArray(programInfo.attribLocations.position);
 
-      const lineColBuffer = gl.createBuffer();
-      gl.bindBuffer(gl.ARRAY_BUFFER, lineColBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lineColors), gl.STATIC_DRAW);
+      const splineColBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, splineColBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(splineColors), gl.STATIC_DRAW);
       gl.vertexAttribPointer(programInfo.attribLocations.color, 3, gl.FLOAT, false, 0, 0);
       gl.enableVertexAttribArray(programInfo.attribLocations.color);
 
       gl.uniform1f(programInfo.uniformLocations.pointSize, 1.0);
       gl.lineWidth(2.0);
-      gl.drawArrays(gl.LINES, 0, (numPts - 1) * 2);
+      gl.drawArrays(gl.LINE_STRIP, 0, splinePoints.length);
     }
 
     // Rebind point buffers and draw points on top
