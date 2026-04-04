@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  CRMPythonBindings.props
+  Auto-detects Python and nanobind paths for the CRMPythonBindings VS project.
+
+  Detection order:
+    PythonDir  : PYTHONDIR env var -> HKLM registry -> HKCU registry -> default path
+    NanobindDir: NANOBINDDIR env var -> per-user site-packages -> system site-packages
+
+  To override on a specific machine, set the PYTHONDIR or NANOBINDDIR
+  environment variables before opening Visual Studio.
+
+  Update PythonVersion below if using a Python version other than 3.13.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+
+    <!-- Python version number (no dots) and dotted form -->
+    <PythonVersion>313</PythonVersion>
+    <PythonVersionDotted>3.13</PythonVersionDotted>
+
+    <!-- Python directory detection -->
+    <PythonDir Condition="'$(PythonDir)'=='' And '$(PYTHONDIR)'!=''">$(PYTHONDIR)</PythonDir>
+    <PythonDir Condition="'$(PythonDir)'==''">$(Registry:HKEY_LOCAL_MACHINE\SOFTWARE\Python\PythonCore\$(PythonVersionDotted)\InstallPath@)</PythonDir>
+    <PythonDir Condition="'$(PythonDir)'==''">$(Registry:HKEY_CURRENT_USER\SOFTWARE\Python\PythonCore\$(PythonVersionDotted)\InstallPath@)</PythonDir>
+    <PythonDir Condition="'$(PythonDir)'==''">C:\Program Files\Python$(PythonVersion)</PythonDir>
+
+    <!-- nanobind directory detection -->
+    <!-- per-user pip install (most common on Windows) -->
+    <NanobindDir Condition="'$(NanobindDir)'=='' And '$(NANOBINDDIR)'!=''">$(NANOBINDDIR)</NanobindDir>
+    <NanobindDir Condition="'$(NanobindDir)'=='' And Exists('$(APPDATA)\Python\Python$(PythonVersion)\site-packages\nanobind')">$(APPDATA)\Python\Python$(PythonVersion)\site-packages\nanobind</NanobindDir>
+    <!-- system-wide pip install -->
+    <NanobindDir Condition="'$(NanobindDir)'==''">$(PythonDir)\Lib\site-packages\nanobind</NanobindDir>
+
+    <!-- Derived paths -->
+    <PythonIncludeDir>$(PythonDir)\Include</PythonIncludeDir>
+    <PythonLibDir>$(PythonDir)\libs</PythonLibDir>
+    <PythonLib>python$(PythonVersion).lib</PythonLib>
+    <NanobindIncludeDir>$(NanobindDir)\include</NanobindIncludeDir>
+    <NanobindSrcDir>$(NanobindDir)\src</NanobindSrcDir>
+    <NanobindRobinMapIncludeDir>$(NanobindDir)\ext\robin_map\include</NanobindRobinMapIncludeDir>
+
+  </PropertyGroup>
+</Project>

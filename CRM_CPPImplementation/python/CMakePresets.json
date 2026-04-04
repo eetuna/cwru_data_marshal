@@ -1,0 +1,69 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": { "major": 3, "minor": 18, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "windows-vs2026",
+            "displayName": "Windows x64 Release (VS 2026)",
+            "generator": "Visual Studio 18 2026",
+            "architecture": "x64",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}"
+            }
+        },
+        {
+            "name": "windows-vs2022",
+            "displayName": "Windows x64 Release (VS 2022)",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}"
+            }
+        },
+        {
+            "name": "linux-release",
+            "displayName": "Linux x64 Release",
+            "generator": "Unix Makefiles",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "windows-vs2026",
+            "displayName": "Windows x64 Release (VS 2026)",
+            "configurePreset": "windows-vs2026",
+            "configuration": "Release"
+        },
+        {
+            "name": "windows-vs2022",
+            "displayName": "Windows x64 Release (VS 2022)",
+            "configurePreset": "windows-vs2022",
+            "configuration": "Release"
+        },
+        {
+            "name": "linux-release",
+            "displayName": "Linux x64 Release",
+            "configurePreset": "linux-release"
+        }
+    ],
+    "installPresets": [
+        {
+            "name": "windows-vs2026",
+            "configurePreset": "windows-vs2026"
+        },
+        {
+            "name": "windows-vs2022",
+            "configurePreset": "windows-vs2022"
+        },
+        {
+            "name": "linux-release",
+            "configurePreset": "linux-release"
+        }
+    ]
+}
