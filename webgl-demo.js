@@ -39,6 +39,8 @@ async function main() {
 
   // Forward kinematics control points: array of {x, y, z}
   let fkControlPoints = [];
+  let fkFixedCentroid = null;  // Set once from first frame
+  let fkFixedScale = null;     // Set once from first frame
 
   const updateStatus = (id, msg) => {
     const el = document.getElementById(id);
@@ -592,21 +594,28 @@ async function main() {
     glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, fkMouseRotationY, [0, 1, 0]);
     glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, fkMouseRotationZ, [0, 0, 1]);
 
-    // Center the points around origin by computing centroid
-    let cx = 0, cy = 0, cz = 0;
-    for (const p of controlPoints) { cx += p.x; cy += p.y; cz += p.z; }
-    cx /= controlPoints.length;
-    cy /= controlPoints.length;
-    cz /= controlPoints.length;
+    // Compute centroid and scale from the FIRST frame only, then reuse
+    // This prevents moving control points from shifting the entire view
+    if (!fkFixedCentroid) {
+      let cx = 0, cy = 0, cz = 0;
+      for (const p of controlPoints) { cx += p.x; cy += p.y; cz += p.z; }
+      cx /= controlPoints.length;
+      cy /= controlPoints.length;
+      cz /= controlPoints.length;
+      fkFixedCentroid = { x: cx, y: cy, z: cz };
 
-    // Compute scale so points fit in view
-    let maxDist = 0.001;
-    for (const p of controlPoints) {
-      const dx = p.x - cx, dy = p.y - cy, dz = p.z - cz;
-      const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-      if (dist > maxDist) maxDist = dist;
+      let maxDist = 0.001;
+      for (const p of controlPoints) {
+        const dx = p.x - cx, dy = p.y - cy, dz = p.z - cz;
+        const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        if (dist > maxDist) maxDist = dist;
+      }
+      fkFixedScale = 4.0 / maxDist;
     }
-    const scale = 4.0 / maxDist; // Fit within ~4 units
+    const cx = fkFixedCentroid.x;
+    const cy = fkFixedCentroid.y;
+    const cz = fkFixedCentroid.z;
+    const scale = fkFixedScale;
 
     gl.uniformMatrix4fv(programInfo.uniformLocations.projectionMatrix, false, projectionMatrix);
     gl.uniformMatrix4fv(programInfo.uniformLocations.modelViewMatrix, false, modelViewMatrix);
@@ -782,15 +791,34 @@ async function main() {
 
   let then = 0;
 
+  // Throttle flags: prevent new fetch if previous is still in-flight
+  let fetchingTexture = false;
+  let fetchingVolume = false;
+  let fetchingTipPose = false;
+  let fetchingFK = false;
+
   function render(now) {
     now *= 0.001;
     deltaTime = now - then;
     then = now;
 
-    updateTextureFromServer().catch(() => {});
-    updateVolumeFromServer().catch(() => {});
-    updateTipPoseFromServer().catch(() => {});
-    updateForwardKinematicsFromServer().catch(() => {});
+    // Each fetch runs independently; a slow fetch won't block the others
+    if (!fetchingTexture) {
+      fetchingTexture = true;
+      updateTextureFromServer().catch(() => {}).finally(() => { fetchingTexture = false; });
+    }
+    if (!fetchingVolume) {
+      fetchingVolume = true;
+      updateVolumeFromServer().catch(() => {}).finally(() => { fetchingVolume = false; });
+    }
+    if (!fetchingTipPose) {
+      fetchingTipPose = true;
+      updateTipPoseFromServer().catch(() => {}).finally(() => { fetchingTipPose = false; });
+    }
+    if (!fetchingFK) {
+      fetchingFK = true;
+      updateForwardKinematicsFromServer().catch(() => {}).finally(() => { fetchingFK = false; });
+    }
 
     gl.clearColor(0.0, 0.0, 0.0, 1.0);
     gl.clearDepth(1.0);

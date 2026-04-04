@@ -4,6 +4,7 @@
 #include <string>
 #include <map>
 #include <cstdlib>
+#include <cmath>
 
 #include "httplib.h"
 #include "json.hpp"
@@ -143,16 +144,32 @@ int main() {
             continue;
         }
 
-        // Step 3: Compute result = multiply values + index sum
+        // Step 3: Build forward kinematics control points
+        // Read the desired planned motion value (monotonically increasing counter from client-planning)
         const auto& values = input_data_desired_planned_motion["values"];
-        std::cout << "Read values: " << values.dump(2) << "\n";
+        std::cout << "Read desired_planned_motion values: " << values.dump(2) << "\n";
 
-        //double result = 1.0;
-        std::vector<double> result = {2.5, 3.3, 3.6, 2.0,3.0,5.0, 1.0, 4.0, 2.0, 3.0, 4.0,5.0}; // Example result vector (replace with actual computation)
-        /*for (size_t i = 0; i < values.size(); ++i) {
-            result += values[i].get<double>();
-            result += i;
-        }*/
+        // Extract the first value from desired_planned_motion to use as sine input
+        double planned_motion_value = 0.0;
+        if (values.size() > 0) {
+            planned_motion_value = values[0].get<double>();
+        }
+        double sine_factor = std::sin(M_PI * planned_motion_value);
+        std::cout << "sin(" <<  planned_motion_value << ") = " << sine_factor << "\n";
+
+        // Base control points (4 points, each with x,y,z)
+        std::vector<double> result = {2.5, 3.3, 3.6, 2.0, 3.0, 5.0, 1.0, 4.0, 2.0, 3.0, 4.0, 5.0};
+
+        // Multiply the last control point coordinates by sin(planned_motion_value)
+        // Last control point is the last 3 values in the vector
+        size_t n = result.size();
+        if (n >= 3) {
+            result[n - 3] *= sine_factor;  // last point x
+            result[n - 2] *= sine_factor;  // last point y
+            result[n - 1] *= sine_factor;  // last point z
+        }
+        std::cout << "Last ctrl pt after sine modulation: ("
+                  << result[n-3] << ", " << result[n-2] << ", " << result[n-1] << ")\n";
 
         // Step 4: Build output JSON
         json out_data = {

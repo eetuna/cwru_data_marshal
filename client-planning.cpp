@@ -25,6 +25,9 @@ int main() {
     std::cout << "Connecting to robot marshal at " << marshal_host << ":" << marshal_port << std::endl;
     httplib::Client cli(marshal_host, marshal_port);
 
+    // Monotonically increasing counter, written to file_desired_planned_motion at 20 Hz
+    double counter = 0.0;
+
     while(true){
         std::string client_id = "client-planning";
 
@@ -183,21 +186,20 @@ int main() {
             return 1;
         }
 
-        // Step 3: Compute result = multiply values + index sum
+        // Step 3: Write a monotonically increasing counter value
         const auto& values = input_data_catheter_base_configuration["values"];
         std::cout << "Read values: " << values.dump(2) << "\n";
-        std::vector<double> result = {100.0,2000.0,500.0,400.0,1000.0,1500.0,10.0};
-        //double result = 1.0;
-        /*for (size_t i = 0; i < values.size(); ++i) {
-            result += values[i].get<double>();
-            result += i;
-        }*/
+
+        // Increment the counter each iteration
+        counter += 0.05;
+        std::vector<double> result = {counter};
+        std::cout << "Writing counter value: " << counter << "\n";
 
         // Step 4: Build output JSON
         json out_data = {
             {"client_id", client_id},
             {"sent_at", current_time_ns()},
-            {"values", {result}}
+            {"values", result}
         };
 
         // Step 5: Send POST to server to write result
@@ -210,8 +212,8 @@ int main() {
             std::cerr << "Failed to POST result to server.\n";
         }
 
-        // Wait 5 milliseconds before the next request
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        // Wait 50 milliseconds before the next request (20 Hz)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     return 0;
 }
