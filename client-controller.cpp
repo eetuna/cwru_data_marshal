@@ -26,6 +26,12 @@ int main() {
     std::cout << "Connecting to robot marshal at " << marshal_host << ":" << marshal_port << std::endl;
     httplib::Client cli(marshal_host, marshal_port);
 
+    // Persistent pixel state: once set by a click, P0 stays at that location
+    bool pixelEverSet = false;
+    double last_pixel_x = 0.0;
+    double last_pixel_y = 0.0;
+    double last_pixel_z = 0.0;
+
     while(true){
         std::string client_id = "client-controller";
 
@@ -149,16 +155,37 @@ int main() {
         const auto& values = input_data_desired_planned_motion["values"];
         std::cout << "Read desired_planned_motion values: " << values.dump(2) << "\n";
 
-        // Extract the first value from desired_planned_motion to use as sine input
+        // Extract values from desired_planned_motion: [counter, pixelX, pixelY]
         double planned_motion_value = 0.0;
+        double pixel_x = 0.0;
+        double pixel_y = 0.0;
         if (values.size() > 0) {
             planned_motion_value = values[0].get<double>();
         }
+        if (values.size() > 2) {
+            pixel_x = values[1].get<double>();
+            pixel_y = values[2].get<double>();
+        }
         double sine_factor = std::sin(M_PI * planned_motion_value);
-        std::cout << "sin(" <<  planned_motion_value << ") = " << sine_factor << "\n";
+        std::cout << "sin(pi * " << planned_motion_value << ") = " << sine_factor << "\n";
+
+        // If new pixel coordinates were provided, save them persistently
+        if (values.size() > 2) {
+            last_pixel_x = pixel_x;
+            last_pixel_y = pixel_y;
+            last_pixel_z = (pixel_x + pixel_y) / 2.0;
+            pixelEverSet = true;
+            std::cout << "P0 updated from pixel input: (" << last_pixel_x << ", " << last_pixel_y << ", " << last_pixel_z << ")\n";
+        }
+
+        // P0: use last saved pixel location if ever set, otherwise default (2.5, 3.3, 3.6)
+        double p0_x = pixelEverSet ? last_pixel_x : 2.5;
+        double p0_y = pixelEverSet ? last_pixel_y : 3.3;
+        double p0_z = pixelEverSet ? last_pixel_z : 3.6;
 
         // Base control points (4 points, each with x,y,z)
-        std::vector<double> result = {2.5, 3.3, 3.6, 2.0, 3.0, 5.0, 1.0, 4.0, 2.0, 3.0, 4.0, 5.0};
+        // P0 from persistent pixel input (or default), P1-P3 are fixed
+        std::vector<double> result = {p0_x, p0_y, p0_z, 2.0, 3.0, 5.0, 1.0, 4.0, 2.0, 3.0, 4.0, 5.0};
 
         // Multiply the last control point coordinates by sin(planned_motion_value)
         // Last control point is the last 3 values in the vector

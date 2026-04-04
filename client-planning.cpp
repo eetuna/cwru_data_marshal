@@ -186,14 +186,32 @@ int main() {
             return 1;
         }
 
-        // Step 3: Write a monotonically increasing counter value
+        // Step 3: Write counter + user input pixel coordinates to desired_planned_motion
         const auto& values = input_data_catheter_base_configuration["values"];
         std::cout << "Read values: " << values.dump(2) << "\n";
 
         // Increment the counter each iteration
         counter += 0.05;
-        std::vector<double> result = {counter};
-        std::cout << "Writing counter value: " << counter << "\n";
+
+        // Read pixel coordinates from user input, but ONLY if written by client-webgl
+        double pixelX = 0.0, pixelY = 0.0;
+        bool hasPixelInput = false;
+        if (input_data_user_input.contains("client_id") &&
+            input_data_user_input["client_id"].get<std::string>() == "client-webgl") {
+            const auto& user_values = input_data_user_input["values"];
+            if (user_values.size() >= 2) {
+                pixelX = user_values[0].get<double>();
+                pixelY = user_values[1].get<double>();
+                hasPixelInput = true;
+            }
+        }
+        std::cout << "User input pixel: (" << pixelX << ", " << pixelY << ") from_webgl=" << hasPixelInput << "\n";
+
+        // Output: [counter] if no pixel input, [counter, pixelX, pixelY] if pixel was clicked
+        std::vector<double> result = hasPixelInput
+            ? std::vector<double>{counter, pixelX, pixelY}
+            : std::vector<double>{counter};
+        std::cout << "Writing: counter=" << counter << " pixel=(" << pixelX << ", " << pixelY << ")\n";
 
         // Step 4: Build output JSON
         json out_data = {

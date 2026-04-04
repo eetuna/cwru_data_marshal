@@ -36,6 +36,7 @@ async function main() {
   let fkIsMouseDown = false;
   let fkLastMouseX = 0;
   let fkLastMouseY = 0;
+  let fkZoom = -25.0;  // Camera distance (scroll to zoom)
 
   // Forward kinematics control points: array of {x, y, z}
   let fkControlPoints = [];
@@ -589,7 +590,7 @@ async function main() {
 
     // Set up model-view matrix with FK-specific mouse rotation
     const modelViewMatrix = glMatrix.mat4.create();
-    glMatrix.mat4.translate(modelViewMatrix, modelViewMatrix, [0.0, 0.0, -15.0]);
+    glMatrix.mat4.translate(modelViewMatrix, modelViewMatrix, [0.0, 0.0, fkZoom]);
     glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, fkMouseRotationX, [1, 0, 0]);
     glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, fkMouseRotationY, [0, 1, 0]);
     glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, fkMouseRotationZ, [0, 0, 1]);
@@ -610,7 +611,7 @@ async function main() {
         const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
         if (dist > maxDist) maxDist = dist;
       }
-      fkFixedScale = 4.0 / maxDist;
+      fkFixedScale = 6.0 / maxDist;
     }
     const cx = fkFixedCentroid.x;
     const cy = fkFixedCentroid.y;
@@ -742,6 +743,12 @@ async function main() {
   canvasFK.addEventListener('mouseleave', () => {
     fkIsMouseDown = false;
   });
+
+  canvasFK.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    fkZoom += e.deltaY * 0.05;  // Scroll up = zoom in, scroll down = zoom out
+    fkZoom = Math.min(-2.0, Math.max(-100.0, fkZoom));  // Clamp range
+  }, { passive: false });
 
   // Mouse controls for 3D volume
   canvas3D.addEventListener('mousedown', (e) => {
