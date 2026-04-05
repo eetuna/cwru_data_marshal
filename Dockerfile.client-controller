@@ -16,6 +16,7 @@ COPY client-controller.cpp file_routes.json httplib.h json.hpp ./
 
 # Copy CRM source tree (vendored — no internet needed at build time)
 COPY CRM_CPPImplementation/src/ ./CRM_CPPImplementation/src/
+COPY CRM_CPPImplementation/numerical/ ./CRM_CPPImplementation/numerical/
 
 # Copy catheter parameter / configuration data files
 COPY CRM_CPPImplementation/catheterdata/ ./catheterdata/
@@ -29,7 +30,9 @@ RUN g++ -O2 \
     CRM_CPPImplementation/src/CRM_IVPJacobian.cpp \
     CRM_CPPImplementation/src/CRM_CatheterClass.cpp \
     CRM_CPPImplementation/src/CRM_SupportFunctions.cpp \
+    CRM_CPPImplementation/numerical/minpack.cpp \
     -I CRM_CPPImplementation/src \
+    -I CRM_CPPImplementation/numerical \
     -o client-controller \
     -pthread
 

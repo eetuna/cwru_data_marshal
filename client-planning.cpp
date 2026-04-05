@@ -1,9 +1,11 @@
 #include <iostream>
 #include <fstream>
 #include <chrono>
+#include <thread>
 #include <string>
 #include <map>
 #include <cstdlib>
+#include <cmath>
 #include "httplib.h"
 #include "json.hpp"
 
@@ -23,6 +25,8 @@ int main() {
 
     std::cout << "Connecting to robot marshal at " << marshal_host << ":" << marshal_port << std::endl;
     httplib::Client cli(marshal_host, marshal_port);
+
+    double counter = 0.0;
 
     while(true){
         std::string client_id = "client-planning";
@@ -186,20 +190,32 @@ int main() {
         const auto& values = input_data_catheter_base_configuration["values"];
         std::cout << "Read values: " << values.dump(2) << "\n";
 
-        // Default actuation currents (0.1 A for all 6 coils) and inserted length (100 mm)
-        double i1 = 0.1;
-        double i2 = 0.1;
-        double i3 = 0.1;
-        double i4 = 0.1;
-        double i5 = 0.1;
-        double i6 = 0.1;
+        // Default actuation currents (A) and inserted length (mm)
+        double i1 = 0.1, i2 = 0.1, i3 = 0.1, i4 = 0.1, i5 = 0.1, i6 = 0.1;
         double insertedLength = 100.0;
 
-        // Output format: [i1, i2, i3, i4, i5, i6, insertedLength]
-        std::vector<double> result = {i1, i2, i3, i4, i5, i6, insertedLength};
-        std::cout << "Writing: currents=[" << i1 << ", " << i2 << ", " << i3 << ", "
-                  << i4 << ", " << i5 << ", " << i6 << "] "
-                  << "insertedLength=" << insertedLength << " mm\n";
+        // Read user input if available from client-webgl
+        // Future: pixel coordinates could adjust insertion length or target
+        if (input_data_user_input.contains("client_id") &&
+            input_data_user_input["client_id"].get<std::string>() == "client-webgl") {
+            const auto& user_values = input_data_user_input["values"];
+            if (user_values.size() >= 2) {
+                double pixelX = user_values[0].get<double>();
+                double pixelY = user_values[1].get<double>();
+                std::cout << "User input pixel: (" << pixelX << ", " << pixelY << ")\n";
+            }
+        }
+
+        // Increment counter for optional modulation
+        counter += 0.05;
+
+        // Optionally modulate one current to show dynamic behavior
+        double i1_modulated = i1 + 0.05 * std::sin(counter);
+
+        // Output: [i1, i2, i3, i4, i5, i6, insertedLength]
+        std::vector<double> result = {i1_modulated, i2, i3, i4, i5, i6, insertedLength};
+        std::cout << "Writing planned motion: [" << i1_modulated << ", " << i2 << ", " << i3
+                  << ", " << i4 << ", " << i5 << ", " << i6 << ", " << insertedLength << "]\n";
 
         // Step 4: Build output JSON
         json out_data = {

@@ -33,29 +33,33 @@ int main() {
     // One-time CRM setup (before the main control loop)
     // -------------------------------------------------------------------------
     std::cout << "Loading CRM catheter model parameters...\n";
-    if (!Load_CRMCatheterModelParams("catheterdata/CatheterParameterSet_2.txt")) {
-        std::cerr << "Warning: using built-in default catheter parameters.\n";
-    }
-    if (!Load_CatheterConfiguration("catheterdata/CatheterSpatialConfiguration_1.txt")) {
-        std::cerr << "Warning: using default identity base pose.\n";
-    }
 
-    // Initialise CRMForwardKinematicsData struct
+    // Load parameters — these return objects, not bools. They throw on error.
+    CRMCatheterModelParams CathParams = Load_CRMCatheterModelParams("catheterdata/CatheterParameterSet_2.txt");
+    CatheterConfiguration CathConfig = Load_CatheterConfiguration("catheterdata/CatheterSpatialConfiguration_1.txt");
+
+    // Allocate storage for marker positions and coil data (C-style arrays, NOT Eigen)
+    double (*ReportedMarkerPos)[3] = new double[CathParams.no_locmarkers][3];
+    double (*ReportedCoilPos)[3] = new double[CathParams.no_act_set][3];
+    double (*ReportedCoilOrient)[9] = new double[CathParams.no_act_set][9];
+
+    // Set up CRMForwardKinematicsData struct — must set ALL fields
     CRMForwardKinematicsData FKParams;
-    FKParams.integrationStepSize = 2.0;   // mm between reported markers
-    FKParams.contactMode         = FREE_TIP;
-
-    // Pre-allocate marker storage for the default inserted length (100 mm)
-    int initialMarkers = static_cast<int>(100.0 / FKParams.integrationStepSize) + 1;
-    FKParams.ReportedMarkerPos.resize(initialMarkers, 3);
-    FKParams.ReportedMarkerPos.setZero();
-
-    // Initial guess for BVP shooting variables (zero = straight catheter)
-    FKParams.initialGuess.resize(NUM_ACT_SET * 3);
-    FKParams.initialGuess.setZero();
+    FKParams.CathConfig = &CathConfig;
+    FKParams.CathParams = &CathParams;
+    FKParams.ContactMode = ContactModeType::FREE_TIP;
+    FKParams.FinalValueOnly = false;  // we want marker locations
+    FKParams.ReportedMarkerPos = ReportedMarkerPos;
+    FKParams.ReportedCoilPos = ReportedCoilPos;
+    FKParams.ReportedCoilOrient = ReportedCoilOrient;
+    FKParams.IntegrationStepSize = 0.2;  // mm
+    for (int i = 0; i < 3; i++) FKParams.TipConstraintPoint[i] = 0.0;
+    for (int i = 0; i < 3; i++) FKParams.TipForce[i] = 0.0;
+    for (int i = 0; i < 3; i++) FKParams.deltau0_initialguess[i] = 0.0;
+    for (int i = 0; i < 3; i++) FKParams.ftip_initialguess[i] = 0.0;
 
     double PotentialEnergy = 0.0;
-    bool   localmin        = false;
+    int    localmin        = 0;  // MUST be int, not bool
 
     // -------------------------------------------------------------------------
     // Main control loop
@@ -227,18 +231,18 @@ int main() {
         result.push_back(CathConfig.p0[1]);
         result.push_back(CathConfig.p0[2]);
 
-        // All CRM marker positions (skip row 0 if it duplicates the base)
-        const int numMarkers = static_cast<int>(FKParams.ReportedMarkerPos.rows());
+        // All CRM marker positions — use C-array indexing, NOT Eigen
+        const int numMarkers = CathParams.no_locmarkers;
         const int startIdx =
             (numMarkers > 0 &&
-             FKParams.ReportedMarkerPos(0, 0) == CathConfig.p0[0] &&
-             FKParams.ReportedMarkerPos(0, 1) == CathConfig.p0[1] &&
-             FKParams.ReportedMarkerPos(0, 2) == CathConfig.p0[2]) ? 1 : 0;
+             ReportedMarkerPos[0][0] == CathConfig.p0[0] &&
+             ReportedMarkerPos[0][1] == CathConfig.p0[1] &&
+             ReportedMarkerPos[0][2] == CathConfig.p0[2]) ? 1 : 0;
 
         for (int j = startIdx; j < numMarkers; ++j) {
-            result.push_back(FKParams.ReportedMarkerPos(j, 0));
-            result.push_back(FKParams.ReportedMarkerPos(j, 1));
-            result.push_back(FKParams.ReportedMarkerPos(j, 2));
+            result.push_back(ReportedMarkerPos[j][0]);
+            result.push_back(ReportedMarkerPos[j][1]);
+            result.push_back(ReportedMarkerPos[j][2]);
         }
 
         std::cout << "FK computed: " << numMarkers << " markers, "
@@ -266,6 +270,11 @@ int main() {
         // 5 ms period (200 Hz) — matches original controller update rate
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+
+    // Cleanup allocated arrays
+    delete[] ReportedMarkerPos;
+    delete[] ReportedCoilPos;
+    delete[] ReportedCoilOrient;
 
     return 0;
 }
