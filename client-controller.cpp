@@ -220,30 +220,29 @@ int main() {
             control_inputs, FKParams, PotentialEnergy, localmin);
 
         // Step 6: Assemble output — flat array of 3-D positions
-        //   Layout: [p0_x, p0_y, p0_z,  m1_x, m1_y, m1_z, ...,  tip_x, tip_y, tip_z]
+        //   Layout: [p0, markerN, markerN-1, ..., marker1, tip]
         //   p0      = catheter base (from CathConfig)
-        //   m1..mN  = intermediate CRM markers (ReportedMarkerPos rows)
-        //   tip     = last marker == FKsolution[0..2]
+        //   markers = CRM markers in reverse order (base-to-tip along catheter)
+        //   tip     = FK solution tip position
         std::vector<double> result;
+        const int numMarkers = CathParams.no_locmarkers;
 
-        // Base position
+        // Base position p0
         result.push_back(CathConfig.p0[0]);
         result.push_back(CathConfig.p0[1]);
         result.push_back(CathConfig.p0[2]);
 
-        // All CRM marker positions — use C-array indexing, NOT Eigen
-        const int numMarkers = CathParams.no_locmarkers;
-        const int startIdx =
-            (numMarkers > 0 &&
-             ReportedMarkerPos[0][0] == CathConfig.p0[0] &&
-             ReportedMarkerPos[0][1] == CathConfig.p0[1] &&
-             ReportedMarkerPos[0][2] == CathConfig.p0[2]) ? 1 : 0;
-
-        for (int j = startIdx; j < numMarkers; ++j) {
+        // CRM marker positions in REVERSE order (from base toward tip)
+        for (int j = numMarkers - 1; j >= 0; --j) {
             result.push_back(ReportedMarkerPos[j][0]);
             result.push_back(ReportedMarkerPos[j][1]);
             result.push_back(ReportedMarkerPos[j][2]);
         }
+
+        // Tip position from FK solution
+        result.push_back(FKsolution[0]);
+        result.push_back(FKsolution[1]);
+        result.push_back(FKsolution[2]);
 
         std::cout << "FK computed: " << numMarkers << " markers, "
                   << "tip=(" << FKsolution[0] << ", "

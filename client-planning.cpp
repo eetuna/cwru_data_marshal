@@ -191,8 +191,8 @@ int main() {
         std::cout << "Read values: " << values.dump(2) << "\n";
 
         // Default actuation currents (A) and inserted length (mm)
-        double i1 = 0.1, i2 = 0.1, i3 = 0.1, i4 = 0.1, i5 = 0.1, i6 = 0.1;
-        double insertedLength = 100.0;
+        double i1 = 0.0, i2 = 0.0, i3 = 0.0, i4 = 0.0, i5 = 0.0, i6 = 0.0;
+        double insertedLength = 105.0;
 
         // Read user input if available from client-webgl
         // Future: pixel coordinates could adjust insertion length or target
@@ -209,12 +209,9 @@ int main() {
         // Increment counter for optional modulation
         counter += 0.05;
 
-        // Optionally modulate one current to show dynamic behavior
-        double i1_modulated = i1 + 0.05 * std::sin(counter);
-
         // Output: [i1, i2, i3, i4, i5, i6, insertedLength]
-        std::vector<double> result = {i1_modulated, i2, i3, i4, i5, i6, insertedLength};
-        std::cout << "Writing planned motion: [" << i1_modulated << ", " << i2 << ", " << i3
+        std::vector<double> result = {i1, i2, i3, i4, i5, i6, insertedLength};
+        std::cout << "Writing planned motion: [" << i1 << ", " << i2 << ", " << i3
                   << ", " << i4 << ", " << i5 << ", " << i6 << ", " << insertedLength << "]\n";
 
         // Step 4: Build output JSON
