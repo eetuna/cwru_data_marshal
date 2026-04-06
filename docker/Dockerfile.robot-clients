@@ -7,7 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     ca-certificates \
+    libeigen3-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# CRM headers use #include <eigen5/Eigen/Dense> — symlink eigen3 to eigen5
+RUN ln -s /usr/include/eigen3 /usr/include/eigen5
 
 # Copy source files from build context (robot worktree)
 COPY client-catheter-tracking.cpp /opt/robot/
@@ -17,6 +21,9 @@ COPY client-planning.cpp /opt/robot/
 COPY client-surface-tracking.cpp /opt/robot/
 COPY httplib.h json.hpp circularBuffer.hpp /opt/robot/
 COPY file_routes.json file*.json /opt/robot/
+COPY CRM_CPPImplementation/src/ /opt/robot/CRM_CPPImplementation/src/
+COPY CRM_CPPImplementation/numerical/ /opt/robot/CRM_CPPImplementation/numerical/
+COPY CRM_CPPImplementation/catheterdata/ /opt/robot/catheterdata/
 
 WORKDIR /opt/robot
 
@@ -30,7 +37,17 @@ RUN sed -i 's/std::cout << "Read localization values: " << values.dump(2) << "\\
 
 # Build all clients
 RUN g++ -std=c++17 client-catheter-tracking.cpp -o catheter-tracking -lpthread && \
-    g++ -std=c++17 client-controller.cpp -o controller -lpthread && \
+    g++ -std=c++17 -O2 client-controller.cpp \
+    CRM_CPPImplementation/src/CRM_ForwardKinematics.cpp \
+    CRM_CPPImplementation/src/CRM_BVPSolver.cpp \
+    CRM_CPPImplementation/src/CRM_IVPSolver.cpp \
+    CRM_CPPImplementation/src/CRM_IVPJacobian.cpp \
+    CRM_CPPImplementation/src/CRM_CatheterClass.cpp \
+    CRM_CPPImplementation/src/CRM_SupportFunctions.cpp \
+    CRM_CPPImplementation/numerical/minpack.cpp \
+    -I CRM_CPPImplementation/src \
+    -I CRM_CPPImplementation/numerical \
+    -o controller -lpthread && \
     g++ -std=c++17 client-front-end.cpp -o front-end -lpthread && \
     g++ -std=c++17 client-planning.cpp -o planning -lpthread && \
     g++ -std=c++17 client-surface-tracking.cpp -o surface-tracking -lpthread
