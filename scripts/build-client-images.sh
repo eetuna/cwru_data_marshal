@@ -19,7 +19,7 @@ git worktree prune
 #MRI_BRANCH="mri-data-marhsal"
 #MRI_BRANCH="fix/swmr-realtime-optimization"
 #MRI_BRANCH="fix/async-json-writer"
-MRI_BRANCH="feature/bio-memory-cache"
+MRI_BRANCH="mri-data-marshal"
 ROBOT_BRANCH="robot_data_marshal_with_catheter_system_components"
 UPSTREAM_REPO="https://github.com/cwru-mercis/cwru_data_marshal.git"
 
@@ -101,6 +101,7 @@ echo ""
 echo "[2/3] Building Robot Marshal and Clients..."
 echo "  - cwru/robot-marshal"
 echo "  - cwru/robot-clients"
+echo "  - cwru/webgl-client"
 echo ""
 
 cd "$ROBOT_WORKTREE"
@@ -112,6 +113,10 @@ docker build -f "$PROJECT_ROOT/docker/Dockerfile.robot" -t cwru/robot-marshal:la
 # Build Robot Clients
 echo "Building cwru/robot-clients..."
 docker build -f "$PROJECT_ROOT/docker/Dockerfile.robot-clients" -t cwru/robot-clients:latest .
+
+# Build WebGL Client (front-end UI)
+echo "Building cwru/webgl-client..."
+docker build -f "$PROJECT_ROOT/docker/Dockerfile.webgl-client" -t cwru/webgl-client:latest .
 
 echo ""
 echo "[3/3] Verifying images..."
@@ -125,6 +130,7 @@ REQUIRED_IMAGES=(
     "cwru/mock-recon"
     "cwru/viz-client"
     "cwru/robot-clients"
+    "cwru/webgl-client"
 )
 
 ALL_GOOD=true
@@ -141,7 +147,7 @@ done
 echo ""
 if [ "$ALL_GOOD" = true ]; then
     echo "============================================"
-    echo "  Build complete! All 9 images ready."
+    echo "  Build complete! All 10 images ready."
     echo "============================================"
     echo ""
     echo "Next steps:"

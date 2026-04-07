@@ -36,7 +36,7 @@ docker compose --env-file .env.demo -f "$COMPOSE_FILE" up -d
 echo ""
 echo "Checking robot client status..."
 sleep 2
-for client in catheter-tracking controller planning front-end surface-tracking; do
+for client in catheter-tracking controller planning front-end surface-tracking webgl-client; do
     if docker ps --format '{{.Names}}' | grep -q "cwru-$client"; then
         echo "  ✓ $client is running"
     else
