@@ -72,6 +72,82 @@
         margin-bottom: 10px;
         border-radius: 4px;
       }
+
+      .sliders-container {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px;
+        background-color: #2a2a2a;
+        border: 1px solid #444;
+        border-radius: 6px;
+        min-width: 280px;
+      }
+
+      .sliders-container h3 {
+        margin: 0 0 4px 0;
+        font-size: 14px;
+        color: #00ccff;
+      }
+
+      .slider-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .slider-row label {
+        width: 24px;
+        font-size: 13px;
+        font-weight: bold;
+        color: #ffcc00;
+      }
+
+      .slider-row input[type="range"] {
+        flex: 1;
+        accent-color: #00ccff;
+      }
+
+      .slider-row .slider-value {
+        width: 50px;
+        text-align: right;
+        font-size: 13px;
+        font-family: monospace;
+        color: #ccc;
+      }
+
+      .mode-slider-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 10px;
+        background-color: #2a2a2a;
+        border: 1px solid #444;
+        border-radius: 6px;
+        min-width: 120px;
+      }
+
+      .mode-slider-container h3 {
+        margin: 0 0 8px 0;
+        font-size: 14px;
+        color: #00ccff;
+      }
+
+      .mode-slider-container input[type="range"] {
+        writing-mode: vertical-lr;
+        direction: rtl;
+        height: 200px;
+        accent-color: #ff9900;
+      }
+
+      .mode-label {
+        margin-top: 8px;
+        font-size: 14px;
+        font-weight: bold;
+        font-family: monospace;
+        text-align: center;
+      }
     </style>
     <script src="gl-matrix-min.js"></script>
     <script src="webgl-demo.js" type="module"></script>
@@ -89,8 +165,50 @@
         <canvas id="glcanvas" width="1280" height="960"></canvas>
       </div>
       <div class="canvas-section">
-        <h2>Forward Kinematics Control Points</h2>
-        <canvas id="canvasFK" width="960" height="720"></canvas>
+        <div style="display: flex; gap: 10px;">
+          <div>
+            <h2>Forward Kinematics Control Points</h2>
+            <canvas id="canvasFK" width="960" height="720"></canvas>
+          </div>
+          <div class="mode-slider-container">
+            <h3>Mode</h3>
+            <input type="range" id="sliderMode" min="-1" max="1" step="1" value="0">
+            <span class="mode-label" id="valMode" style="color: #ff6b6b;">OFF</span>
+          </div>
+        </div>
+        <div class="sliders-container">
+          <h3>Actuation Currents</h3>
+          <div class="slider-row">
+            <label>I1</label>
+            <input type="range" id="sliderI1" min="-2" max="2" step="0.01" value="0">
+            <span class="slider-value" id="valI1">0.00</span>
+          </div>
+          <div class="slider-row">
+            <label>I2</label>
+            <input type="range" id="sliderI2" min="-2" max="2" step="0.01" value="0">
+            <span class="slider-value" id="valI2">0.00</span>
+          </div>
+          <div class="slider-row">
+            <label>I3</label>
+            <input type="range" id="sliderI3" min="-2" max="2" step="0.01" value="0">
+            <span class="slider-value" id="valI3">0.00</span>
+          </div>
+          <div class="slider-row">
+            <label>I4</label>
+            <input type="range" id="sliderI4" min="-2" max="2" step="0.01" value="0">
+            <span class="slider-value" id="valI4">0.00</span>
+          </div>
+          <div class="slider-row">
+            <label>I5</label>
+            <input type="range" id="sliderI5" min="-2" max="2" step="0.01" value="0">
+            <span class="slider-value" id="valI5">0.00</span>
+          </div>
+          <div class="slider-row">
+            <label>I6</label>
+            <input type="range" id="sliderI6" min="-2" max="2" step="0.01" value="0">
+            <span class="slider-value" id="valI6">0.00</span>
+          </div>
+        </div>
       </div>
     </div>
     <div id="info">

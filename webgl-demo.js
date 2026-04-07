@@ -267,7 +267,7 @@ async function main() {
         values: [pixelX, pixelY, 0]  // z=0 for 2D image plane
       };
       
-      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/0`, {
+      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/1`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -759,6 +759,98 @@ async function main() {
     fkZoom += e.deltaY * 0.05;  // Scroll up = zoom in, scroll down = zoom out
     fkZoom = Math.min(-2.0, Math.max(-100.0, fkZoom));  // Clamp range
   }, { passive: false });
+
+  // Actuation current sliders (I1–I6): update displayed value on change
+  for (let i = 1; i <= 6; i++) {
+    const slider = document.getElementById(`sliderI${i}`);
+    const valSpan = document.getElementById(`valI${i}`);
+    if (slider && valSpan) {
+      slider.addEventListener('input', () => {
+        valSpan.textContent = parseFloat(slider.value).toFixed(2);
+      });
+    }
+  }
+
+  // Read current slider values for I1–I6
+  function getCurrentSliderValues() {
+    const vals = [];
+    for (let i = 1; i <= 6; i++) {
+      const slider = document.getElementById(`sliderI${i}`);
+      vals.push(slider ? parseFloat(slider.value) : 0.0);
+    }
+    return vals;
+  }
+
+  // POST mode value to server (always includes mode; includes currents when manual)
+  async function postModeToServer(modeValue) {
+    try {
+      const values = [modeValue];
+      if (modeValue === -1) {
+        values.push(...getCurrentSliderValues());
+      }
+      const payload = {
+        client_id: clientId,
+        sent_at: Date.now(),
+        values: values
+      };
+      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/0`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    } catch (error) {
+      console.error('Error posting mode value:', error);
+    }
+  }
+
+  // Mode slider: -1 = Manual Control, 0 = OFF, 1 = Planning Control
+  const modeSlider = document.getElementById('sliderMode');
+  const modeLabel = document.getElementById('valMode');
+  
+  function updateModeLabel(val) {
+    if (!modeLabel) return;
+    if (val === -1) {
+      modeLabel.textContent = 'Manual Control';
+      modeLabel.style.color = '#ff9900';
+    } else if (val === 1) {
+      modeLabel.textContent = 'Planning Control';
+      modeLabel.style.color = '#51cf66';
+    } else {
+      modeLabel.textContent = 'OFF';
+      modeLabel.style.color = '#ff6b6b';
+    }
+  }
+
+  if (modeSlider && modeLabel) {
+    modeSlider.value = '0';
+    updateModeLabel(0);
+    postModeToServer(0);
+    // Write immediately when mode slider changes
+    modeSlider.addEventListener('input', () => {
+      const val = parseInt(modeSlider.value);
+      updateModeLabel(val);
+      postModeToServer(val);
+    });
+
+    // Write immediately when any current slider changes while in Manual mode
+    for (let i = 1; i <= 6; i++) {
+      const slider = document.getElementById(`sliderI${i}`);
+      if (slider) {
+        slider.addEventListener('input', () => {
+          if (parseInt(modeSlider.value) === -1) {
+            postModeToServer(-1);
+          }
+        });
+      }
+    }
+
+    // 20Hz: always post mode; includes currents when mode is Manual (-1)
+    setInterval(() => {
+      const val = parseInt(modeSlider.value);
+      postModeToServer(val);
+    }, 50);
+  }
 
   // Mouse controls for 3D volume
   canvas3D.addEventListener('mousedown', (e) => {

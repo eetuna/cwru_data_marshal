@@ -136,6 +136,18 @@ int main() {
             continue;
         }
 
+        // Update P0 from catheter_base_configuration pixel selection (written by webgl front-end)
+        {
+            const auto& cbc_values = input_data_catheter_base_configuration["values"];
+            if (cbc_values.size() >= 3) {
+                CathConfig.p0[0] = cbc_values[0].get<double>();
+                CathConfig.p0[1] = cbc_values[1].get<double>();
+                CathConfig.p0[2] = cbc_values[2].get<double>();
+                std::cout << "Updated P0 from catheter_base_configuration: ("
+                          << CathConfig.p0[0] << ", " << CathConfig.p0[1] << ", " << CathConfig.p0[2] << ")\n";
+            }
+        }
+
         // Step 2b: Read tip position/orientation
         std::string read_endpoint_tip_position_orientation = "/read/" + read_file_tip_position_orientation;
         auto res_tip_position_orientation = cli.Get(read_endpoint_tip_position_orientation.c_str());

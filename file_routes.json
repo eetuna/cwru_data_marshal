@@ -10,7 +10,7 @@
       "read_from2": "file_3D_images.json",
       "read_from3": "file_tip_position_orientation.json",
       "write_to": "file_front_end_user_input.json",
-      "write_to2": "file_catheter_base_configuration.json"
+      "write_to2": "file_catheter_base_configuration_front_end.json"
     },
     "client-surface-tracking": {
       "read_from": "file_biological_signals.json",

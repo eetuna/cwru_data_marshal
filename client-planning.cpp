@@ -6,6 +6,7 @@
 #include <map>
 #include <cstdlib>
 #include <cmath>
+#include <vector>
 #include "httplib.h"
 #include "json.hpp"
 
@@ -27,7 +28,13 @@ int main() {
     httplib::Client cli(marshal_host, marshal_port);
 
     double counter = 0.0;
-
+    std::vector<double> up;
+    for (int i = 0; i <= 400; ++i) 
+        up.push_back(-2.0 + 0.01 * i);
+    std::vector<double> pla = up; 
+    for (int i = 399; i >= 0; --i) 
+        pla.push_back(up[i]);
+    int pla_idx=0;
     while(true){
         std::string client_id = "client-planning";
 
@@ -190,22 +197,40 @@ int main() {
         const auto& values = input_data_catheter_base_configuration["values"];
         std::cout << "Read values: " << values.dump(2) << "\n";
 
-        // Default actuation currents (A) and inserted length (mm)
+                // Default actuation currents (A) and inserted length (mm)
         double i1 = 0.0, i2 = 0.0, i3 = 0.0, i4 = 0.0, i5 = 0.0, i6 = 0.0;
         double insertedLength = 105.0;
-
-        // Read user input if available from client-webgl
-        // Future: pixel coordinates could adjust insertion length or target
-        if (input_data_user_input.contains("client_id") &&
-            input_data_user_input["client_id"].get<std::string>() == "client-webgl") {
-            const auto& user_values = input_data_user_input["values"];
-            if (user_values.size() >= 2) {
-                double pixelX = user_values[0].get<double>();
-                double pixelY = user_values[1].get<double>();
-                std::cout << "User input pixel: (" << pixelX << ", " << pixelY << ")\n";
+        
+        // Read front-end user input mode/currents: values = [mode, i1, i2, i3, i4, i5, i6]
+        // mode: -1 = Manual (apply provided i1..i6), 0 = OFF (zero currents), 1 = Planning (leave planner currents)
+        if (input_data_user_input.contains("values") && input_data_user_input["values"].is_array()) {
+            const auto &uv = input_data_user_input["values"];
+            if (uv.size() >= 1) {
+                int mode = 0; // default to Planning
+                try { mode = uv[0].get<int>(); } catch(...) { mode = 0; }
+        
+                if (mode == -1 && uv.size() >= 7) {
+                    // Manual: apply user-provided currents
+                    i1 = uv[1].get<double>(); i2 = uv[2].get<double>(); i3 = uv[3].get<double>();
+                    i4 = uv[4].get<double>(); i5 = uv[5].get<double>(); i6 = uv[6].get<double>();
+                    std::cout << "Manual mode: using user currents [" << i1 << "," << i2 << "," << i3
+                              << "," << i4 << "," << i5 << "," << i6 << "]\n";
+                } else if (mode == 0) {
+                    // OFF: zero currents
+                    i1 = i2 = i3 = i4 = i5 = i6 = 0.0;
+                    std::cout << "Mode OFF: zeroing currents\n";
+                } else {
+                    // Planning: keep planner currents (defaults or computed later)
+                    std::cout << "Planning mode: using planner currents\n";
+                    i1 = pla[pla_idx % pla.size()]; // Example: cycle through predefined planner currents
+                    pla_idx++;
+                    i2 = i3 = i4 = i5 = i6 = 0.0;
+                }
             }
         }
-
+        
+        // Pixel selection data is now in file_catheter_base_configuration (read by controller)
+        
         // Increment counter for optional modulation
         counter += 0.05;
 
