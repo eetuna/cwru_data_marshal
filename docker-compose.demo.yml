@@ -44,8 +44,18 @@ services:
       - sh
       - -c
       - |
+        SESSION=/session-data/run_$$(date +%Y%m%d_%H%M%S)/robot
+        mkdir -p $$SESSION
+        if ! cp /files/*.json $$SESSION/ 2>/dev/null; then
+          echo "[Robot Marshal] WARNING: no seed JSON files found in /files/, session directory may be empty"
+        fi
+        rm -rf /files
+        ln -s $$SESSION /files
         echo "[Robot Marshal] Starting on http://0.0.0.0:8081"
-        exec ./server --http 0.0.0.0:8081 >/dev/null 2>&1
+        echo "[Robot Marshal] Session data: $$SESSION"
+        exec ./server --http 0.0.0.0:8081
+    volumes:
+      - ${SESSION_DATA_DIR:-./session-data}:/session-data
     ports:
       - "8081:8081"
     healthcheck:

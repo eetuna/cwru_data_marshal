@@ -30,8 +30,8 @@ RUN python3 -c "import json, os; \
     files = json.load(open('files.json')); \
     [open(f'/files/{f}', 'w').write(json.dumps(seed)) for f in files]"
 
-# Data volume mount point
-VOLUME ["/data/robot_data"]
+# Session data volume mount point (bind-mounted by docker-compose to SESSION_DATA_DIR)
+VOLUME ["/session-data"]
 
 # Expose HTTP port
 EXPOSE 8081
