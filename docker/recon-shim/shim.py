@@ -60,51 +60,38 @@ log = logging.getLogger("shim")
 
 
 def parse_acquisitions(raw: bytes):
-    """Return a list of (header_bytes, trajectory_bytes, data_bytes) tuples.
+    """Return a list of ismrmrd.Acquisition objects.
 
-    Marshal's body layout, per acquisition record:
-        AcquisitionHeader (340 bytes)
-            ... includes trajectory_dimensions (uint16 at offset 36)
-            ... and number_of_samples (uint16 at offset 34)
-            ... and active_channels (uint16 at offset 38)
-        trajectory (trajectory_dimensions * number_of_samples * 4 bytes, float)
-        data (number_of_samples * active_channels * 8 bytes, complex<float>)
+    Uses ismrmrd.Acquisition.deserialize_from, which knows the real field
+    offsets (e.g. trajectory_dimensions at 176, not 36). We feed it a read()
+    callable that pulls from an in-memory buffer.
     """
+    import io
+
+    stream = io.BytesIO(raw)
+
+    def reader(nbytes: int) -> bytes:
+        return stream.read(nbytes)
+
     acqs = []
-    off = 0
-    while off + ACQUISITION_HEADER_SIZE <= len(raw):
-        hdr = raw[off : off + ACQUISITION_HEADER_SIZE]
-        number_of_samples = struct.unpack_from("<H", hdr, 34)[0]
-        trajectory_dimensions = struct.unpack_from("<H", hdr, 36)[0]
-        active_channels = struct.unpack_from("<H", hdr, 38)[0]
-
-        traj_bytes = trajectory_dimensions * number_of_samples * 4
-        data_bytes = number_of_samples * active_channels * 8
-
-        total = ACQUISITION_HEADER_SIZE + traj_bytes + data_bytes
-        if off + total > len(raw):
-            log.warning(
-                "truncated acquisition at offset %d (need %d, have %d)",
-                off,
-                total,
-                len(raw) - off,
-            )
+    while stream.tell() < len(raw):
+        try:
+            acq = ismrmrd.Acquisition.deserialize_from(reader)
+        except Exception as e:
+            log.warning("stopped parsing at byte %d: %s", stream.tell(), e)
             break
-
-        traj = raw[off + ACQUISITION_HEADER_SIZE : off + ACQUISITION_HEADER_SIZE + traj_bytes]
-        data = raw[
-            off + ACQUISITION_HEADER_SIZE + traj_bytes : off + total
-        ]
-
-        acqs.append((hdr, traj, data, number_of_samples, active_channels))
-        off += total
+        acqs.append(acq)
     return acqs
 
 
-def fabricate_xml_header(number_of_samples: int, active_channels: int) -> str:
-    """Minimal ISMRMRD XML header. simplefft only needs encoding matrix."""
-    # Square image: matrix size = number_of_samples on both axes.
-    nx = ny = number_of_samples
+def fabricate_xml_header(number_of_samples: int, active_channels: int, num_lines: int) -> str:
+    """Minimal ISMRMRD XML header. simplefft needs the encoded matrix size
+    and reconSpace matrix (recon crops oversampled readout 2x to that).
+    """
+    nx = number_of_samples
+    ny = num_lines
+    rx = nx // 2 if nx % 2 == 0 else nx  # simple 2x readout deoversampling
+    ry = ny
     return f"""<?xml version="1.0"?>
 <ismrmrdHeader xmlns="http://www.ismrm.org/ISMRMRD" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xs="http://www.w3.org/2001/XMLSchema">
   <acquisitionSystemInformation>
@@ -123,7 +110,7 @@ def fabricate_xml_header(number_of_samples: int, active_channels: int) -> str:
       <fieldOfView_mm><x>256</x><y>256</y><z>5</z></fieldOfView_mm>
     </encodedSpace>
     <reconSpace>
-      <matrixSize><x>{nx}</x><y>{ny}</y><z>1</z></matrixSize>
+      <matrixSize><x>{rx}</x><y>{ry}</y><z>1</z></matrixSize>
       <fieldOfView_mm><x>256</x><y>256</y><z>5</z></fieldOfView_mm>
     </reconSpace>
     <encodingLimits>
@@ -138,9 +125,13 @@ def fabricate_xml_header(number_of_samples: int, active_channels: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def send_all(sock: socket.socket, data: bytes) -> None:
-    view = memoryview(data)
-    while view:
+def send_all(sock: socket.socket, data) -> None:
+    # Accept bytes, bytearray, memoryview, or numpy arrays. Coerce to bytes
+    # so we always have something memoryview can slice cleanly.
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        data = bytes(data)
+    view = memoryview(data).cast("B")  # flatten to 1D byte view
+    while len(view):
         n = sock.send(view)
         view = view[n:]
 
@@ -169,11 +160,15 @@ def send_metadata_xml(sock: socket.socket, xml: str) -> None:
     send_all(sock, payload)
 
 
-def send_acquisition_record(sock: socket.socket, hdr: bytes, traj: bytes, data: bytes) -> None:
+def send_acquisition_record(sock: socket.socket, acq) -> None:
+    """Send one acquisition using ismrmrd's own serializer.
+
+    Writes the 2-byte message id, then delegates to acq.serialize_into which
+    emits header (340B) + trajectory + samples in the exact format the server
+    expects.
+    """
     send_all(sock, struct.pack("<H", MRD_MESSAGE_ISMRMRD_ACQUISITION))
-    send_all(sock, hdr)
-    send_all(sock, traj)
-    send_all(sock, data)
+    acq.serialize_into(lambda chunk: send_all(sock, chunk))
 
 
 def send_close(sock: socket.socket) -> None:
@@ -249,19 +244,29 @@ def run_reconstruction(
             return
         log.info("[%s] %d acquisitions", job_id, len(acqs))
 
-        first_ns = acqs[0][3]
-        first_chan = acqs[0][4]
-        xml = fabricate_xml_header(first_ns, first_chan)
+        first_ns = int(acqs[0].number_of_samples)
+        first_chan = int(acqs[0].active_channels) or 1
+        # Count distinct phase encode lines (kspace_encoding_step_1).
+        ny = max(int(a.idx.kspace_encode_step_1) for a in acqs) + 1
+        xml = fabricate_xml_header(first_ns, first_chan, ny)
 
         log.info("[%s] connecting to %s:%d", job_id, RECON_HOST, RECON_PORT)
         sock = socket.create_connection((RECON_HOST, RECON_PORT), timeout=30)
         try:
             send_config_text(sock, RECON_CONFIG)
             send_metadata_xml(sock, xml)
-            for hdr, traj, data, _ns, _ch in acqs:
-                send_acquisition_record(sock, hdr, traj, data)
+            sent = 0
+            for acq in acqs:
+                send_acquisition_record(sock, acq)
+                sent += 1
             send_close(sock)
-            log.info("[%s] sent, reading images back", job_id)
+            # Half-close the write side so the server sees EOF on any further
+            # reads after CLOSE rather than misinterpreting following bytes.
+            try:
+                sock.shutdown(socket.SHUT_WR)
+            except Exception:
+                pass
+            log.info("[%s] sent %d acquisitions + CLOSE, reading images back", job_id, sent)
 
             images = []
             while True:
