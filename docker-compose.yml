@@ -13,10 +13,21 @@ x-dev-volumes: &dev-volumes
 x-build-command: &build-command "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build"
 
 services:
+  # Reconstruction simulator: python-ismrmrd-server + HTTP->TCP shim.
+  # Exposes HTTP /reconstruct on 9003; marshal is wired to it via --recon-endpoint.
+  recon-sim:
+    build:
+      context: .
+      dockerfile: docker/recon-shim/Dockerfile
+    ports:
+      - "9003:9003"
+
   # MRI Data Marshal (Hardened Hub)
-  marshal:
+  # Hostname is "mri-marshal" to match marshal's hardcoded callback URL
+  # (src/marshal_http.hpp: http://mri-marshal:8080/v1/mrd/callback).
+  mri-marshal:
     build: *build-dev
-    command: bash -lc "${BUILD_CMD} && ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data /data --sink mrd"
+    command: bash -lc "${BUILD_CMD} && ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data /data --sink mrd --recon-endpoint http://recon-sim:9003"
     environment:
       BUILD_CMD: *build-command
     ports:
@@ -24,6 +35,8 @@ services:
       - "8090:8090"
     volumes: *dev-volumes
     working_dir: /workspaces/cwru_data_marshal
+    depends_on:
+      - recon-sim
 
   # Robot Data Marshal (Specialized RAM Hub)
   robot-marshal:
@@ -40,11 +53,11 @@ services:
     command: bash -lc "python3 -u clients/bridge/coordinator.py"
     environment:
       # Pass internal container addresses to the bridge
-      MRI_WS_URI: "ws://marshal:8090/ws"
-      MRI_HTTP_BASE: "http://marshal:8080"
+      MRI_WS_URI: "ws://mri-marshal:8090/ws"
+      MRI_HTTP_BASE: "http://mri-marshal:8080"
       ROBOT_HTTP_BASE: "http://robot-marshal:8081"
     depends_on:
-      - marshal
+      - mri-marshal
       - robot-marshal
     volumes: *dev-volumes
     working_dir: /workspaces/cwru_data_marshal
@@ -52,21 +65,21 @@ services:
   # Example Visualizer
   viz:
     build: *build-dev
-    command: bash -lc "${BUILD_CMD} && ./build/viz_client --ws ws://marshal:8090/ws --data /data"
+    command: bash -lc "${BUILD_CMD} && ./build/viz_client --ws ws://mri-marshal:8090/ws --data /data"
     environment:
       BUILD_CMD: *build-command
     depends_on:
-      - marshal
+      - mri-marshal
     volumes: *dev-volumes
     working_dir: /workspaces/cwru_data_marshal
 
   # Synthetic Data Generator
   image_streamer:
     build: *build-dev
-    command: bash -lc "${BUILD_CMD} && ./build/image_streamer --http http://marshal:8080 --stream compose_demo --frames 0 --dt-ms 500"
+    command: bash -lc "${BUILD_CMD} && ./build/image_streamer --http http://mri-marshal:8080 --stream compose_demo --frames 0 --dt-ms 500"
     environment:
       BUILD_CMD: *build-command
     depends_on:
-      - marshal
+      - mri-marshal
     volumes: *dev-volumes
     working_dir: /workspaces/cwru_data_marshal
