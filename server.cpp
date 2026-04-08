@@ -6,6 +6,7 @@
 #include <chrono>
 #include <string>
 #include <queue>
+#include <atomic>
 #include "httplib.h"
 #include "json.hpp"
 #include "circularBuffer.hpp"
@@ -42,6 +43,61 @@ int cache_capacity = 1000;
 
 //output file stream
 std::ofstream myfile;
+
+// ---------------------------------------------------------------------------
+// GET-request logging: writes one JSONL entry per GET response to a dedicated
+// log file on a background thread so the HTTP handler is never blocked by I/O.
+// ---------------------------------------------------------------------------
+struct GetLogEntry {
+    std::string remote_addr; // IP of the requesting client
+    std::string endpoint;    // e.g. "/read/file_tip_position_orientation.json"
+    std::string body;        // response body sent back to the client
+    int64_t     received_at; // ms timestamp captured right before sending the response
+};
+
+std::queue<GetLogEntry>    get_log_queue;
+std::mutex                 get_log_mutex;
+std::condition_variable    get_log_condition;
+std::atomic<bool>          stop_get_logger{false};
+
+void get_log_worker(const std::string& log_path) {
+    std::ofstream log_file(log_path, std::ios::app);
+    if (!log_file.is_open()) {
+        std::cerr << "[GetLogger] Failed to open GET log file: " << log_path << "\n";
+    }
+
+    while (true) {
+        std::unique_lock<std::mutex> lock(get_log_mutex);
+        get_log_condition.wait(lock, [&]() {
+            return !get_log_queue.empty() || stop_get_logger.load();
+        });
+
+        while (!get_log_queue.empty()) {
+            GetLogEntry entry = std::move(get_log_queue.front());
+            get_log_queue.pop();
+            lock.unlock();
+
+            if (log_file.is_open()) {
+                json log_json = {
+                    {"remote_addr", entry.remote_addr},
+                    {"endpoint",    entry.endpoint},
+                    {"body",        entry.body},
+                    {"received_at", entry.received_at}
+                };
+                log_file << log_json.dump() << "\n";
+                if (log_file.fail()) {
+                    std::cerr << "[GetLogger] Warning: failed to write GET log entry\n";
+                    log_file.clear();
+                }
+            }
+
+            lock.lock();
+        }
+
+        if (stop_get_logger.load()) break;
+    }
+}
+// ---------------------------------------------------------------------------
 
 // Access mutex for a file, assuming it exists in file_mutexes
 std::shared_mutex& get_mutex_for_file(const std::string& filename) {
@@ -368,7 +424,14 @@ int main(int argc, char* argv[]) {
             }
             json entry_json = json::parse(entry_str);
             std::cerr << "Sending GET response for " << filename << ": " << entry_json.dump() << "\n";
-            res.set_content(entry_json.dump(), "application/json");
+            std::string response_body = entry_json.dump();
+            int64_t ts = current_time_ms();
+            {
+                std::lock_guard<std::mutex> lk(get_log_mutex);
+                get_log_queue.push({req.remote_addr, "/read/" + filename, response_body, ts});
+            }
+            get_log_condition.notify_one();
+            res.set_content(response_body, "application/json");
         }
         else{
             json j;
@@ -389,7 +452,14 @@ int main(int argc, char* argv[]) {
             j["count"] = j["entries"].size();
             
             std::cerr << "Sending GET response for k>1 " << filename << "\n";
-            res.set_content(j.dump(), "application/json");
+            std::string response_body = j.dump();
+            int64_t ts = current_time_ms();
+            {
+                std::lock_guard<std::mutex> lk(get_log_mutex);
+                get_log_queue.push({req.remote_addr, "/read/" + filename, response_body, ts});
+            }
+            get_log_condition.notify_one();
+            res.set_content(response_body, "application/json");
         }
     });
     
@@ -398,11 +468,17 @@ int main(int argc, char* argv[]) {
     std::cout << "Server running at http://" << bind_host << ":" << bind_port << "\n";
     // Start the background worker
     std::thread worker_thread(background_worker, storage_dir);
+    // Start the GET-request log background thread
+    std::thread get_log_thread(get_log_worker, "/log_files/get_requests.json");
     server.listen(bind_host, bind_port);
     // Stop the worker gracefully on shutdown
     stop_worker = true;
     write_condition.notify_all();
     worker_thread.join();
+    // Stop the GET log worker gracefully on shutdown
+    stop_get_logger.store(true);
+    get_log_condition.notify_all();
+    get_log_thread.join();
     // Close error log file
     myfile.close();
 }
