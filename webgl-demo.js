@@ -269,6 +269,28 @@ initCurrentSliders();
     }
   }
 
+  // POST rendered 2D image data to C++ server (write_to3 = fileKey 2)
+  async function postRendered2DImageToServer(imageData) {
+    try {
+      const payload = {
+        client_id: clientId,
+        sent_at: Date.now(),
+        width: imageData.width,
+        height: imageData.height,
+        values: 1
+      };
+      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/2`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      console.log(`✓ Rendered 2D image posted to server (${imageData.width}x${imageData.height})`);
+    } catch (error) {
+      console.error('Error posting rendered 2D image:', error);
+    }
+  }
+
   // POST pixel coordinates to C++ server at tip_position_orientation endpoint
   async function postPixelCoordinatesToServer(pixelX, pixelY) {
     try {
@@ -312,6 +334,7 @@ initCurrentSliders();
         if (data.values && Array.isArray(data.values)) {
           currentImageData = data;
           render2DImage(gl2d, data);
+          postRendered2DImageToServer(data);
           
           // Extract metadata and update renderer
           const metadata = {
