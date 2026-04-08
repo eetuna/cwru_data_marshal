@@ -171,8 +171,8 @@ int main() {
             std::cerr << "Failed to POST result to server.\n";
         }
 
-        // Wait 5 milliseconds before the next request
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        // Wait 40 milliseconds before the next request
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
     }
     return 0;
 }

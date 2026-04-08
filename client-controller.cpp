@@ -279,7 +279,8 @@ int main() {
         }
 
         // 5 ms period (200 Hz) — matches original controller update rate
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        //40
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
     }
 
     // Cleanup allocated arrays

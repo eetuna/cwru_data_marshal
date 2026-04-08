@@ -257,7 +257,8 @@ int main() {
         }
 
         // Wait 50 milliseconds before the next request (20 Hz)
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        //40
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
     }
     return 0;
 }

@@ -860,7 +860,7 @@ initCurrentSliders();
     setInterval(() => {
       const val = parseInt(modeSlider.value);
       postModeToServer(val);
-    }, 50);
+    }, 40); //50->40 
   }
 
   // Mouse controls for 3D volume
