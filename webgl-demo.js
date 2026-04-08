@@ -8,7 +8,18 @@ let mouseRotationZ = 0.0;
 let isMouseDown = false;
 let lastMouseX = 0;
 let lastMouseY = 0;
-
+function initCurrentSliders() {
+  for (let i = 1; i <= 6; i++) {
+    const slider = document.getElementById(`sliderI${i}`);
+    const valSpan = document.getElementById(`valI${i}`);
+    if (!slider || !valSpan) continue;
+    slider.value = '0';
+    valSpan.textContent = '0.00';
+    slider.addEventListener('input', () => {
+      valSpan.textContent = parseFloat(slider.value).toFixed(2);
+    });
+  }
+}
 main();
 
 async function main() {
@@ -104,7 +115,7 @@ async function main() {
 
   // Create 2D image renderer
   const image2DRenderer = new Image2DRenderer(gl);
-
+initCurrentSliders();
   // Create volume slices from 3D data
   function createVolumeSlices(volumeData, maxSlices = 16) {
     const { width, height, depth, values, step } = volumeData;

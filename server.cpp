@@ -53,9 +53,9 @@ std::shared_mutex& get_mutex_for_file(const std::string& filename) {
     return it->second;
 }
 
-int64_t current_time_ns() {
+int64_t current_time_ms() {
     auto now = std::chrono::system_clock::now();
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 }
 void background_worker(const std::string& storage_dir) {
     while (true) {
@@ -272,7 +272,7 @@ int main(int argc, char* argv[]) {
                 return;
             }
     
-            input_json["received_at"] = current_time_ns();
+            input_json["received_at"] = current_time_ms();
             std::string json_output = input_json.dump(4);
     
             // Update the cache for the specific file

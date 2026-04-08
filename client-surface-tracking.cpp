@@ -10,9 +10,9 @@
 
 using json = nlohmann::json;
 
-int64_t current_time_ns() {
+int64_t current_time_ms() {
     auto now = std::chrono::system_clock::now();
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 }
 
 int main() {
@@ -105,7 +105,7 @@ int main() {
         // Step 4: Build output JSON
         json out_data = {
             {"client_id", client_id},
-            {"sent_at", current_time_ns()},
+            {"sent_at", current_time_ms()},
             //{"tags", {"computed", "example"}},
             {"values", result}
         };
