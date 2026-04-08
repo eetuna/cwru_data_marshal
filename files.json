@@ -8,5 +8,6 @@
     "file_streaming_2D_images.json",
     "file_surface_model_parameters.json",
     "file_tip_position_orientation.json",
+    "file_rendered_2D_image.json",
     "file_user_input.json"
 ]

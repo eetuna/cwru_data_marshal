@@ -150,6 +150,7 @@ app.get('/api/read/:clientId/:fileKey', async (req, res) => {
         }
         const sliceData = await readHdf5Frame(meta.path, meta.frame_index, '2d');
         sliceData.timestamp = meta.timestamp;
+        sliceData.frame_index = meta.frame_index;
         console.log(`[2D] frame ${meta.frame_index} -> ${sliceData.width}x${sliceData.height} from ${path.basename(meta.path)}`);
         return res.json(sliceData);
       } catch (err) {

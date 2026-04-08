@@ -68,7 +68,9 @@ app.post('/api/write/:clientId/:fileKey', async (req, res) => {
       fileName = clientRoutes.write_to;
     } else if (fileKey === '1') {
       fileName = clientRoutes.write_to2;
-    } else {
+    } else if (fileKey === '2') {
+      fileName = clientRoutes.write_to3
+    }  else {
       console.warn(`[Backend Write Server] Invalid fileKey: ${fileKey}`);
       return res.status(400).json({ error: `Invalid fileKey: ${fileKey}` });
     }
