@@ -61,6 +61,7 @@ std::condition_variable    get_log_condition;
 std::atomic<bool>          stop_get_logger{false};
 
 void get_log_worker(const std::string& log_path) {
+    std::filesystem::create_directories(std::filesystem::path(log_path).parent_path());
     std::ofstream log_file(log_path, std::ios::app);
     if (!log_file.is_open()) {
         std::cerr << "[GetLogger] Failed to open GET log file: " << log_path << "\n";
