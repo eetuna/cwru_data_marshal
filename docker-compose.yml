@@ -27,9 +27,7 @@ services:
   # (src/marshal_http.hpp: http://mri-marshal:8080/v1/mrd/callback).
   mri-marshal:
     build: *build-dev
-    command: bash -lc "${BUILD_CMD} && ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data /data --sink mrd --recon-endpoint http://recon-sim:9003"
-    environment:
-      BUILD_CMD: *build-command
+    command: bash -lc "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build && ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data /data --sink mrd --recon-endpoint http://recon-sim:9003"
     ports:
       - "8080:8080"
       - "8090:8090"

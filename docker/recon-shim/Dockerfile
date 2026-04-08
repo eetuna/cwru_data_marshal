@@ -4,20 +4,22 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# System deps needed by ismrmrd / h5py wheels and a few helpers.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libhdf5-103-1 \
-        libxml2 \
-        curl \
+# curl for the healthcheck; h5py/ismrmrd wheels bundle their own native libs.
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Python deps for both python-ismrmrd-server and the shim.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir \
         ismrmrd \
         numpy \
         h5py \
         pydicom \
-        requests
+        matplotlib \
+        requests \
+        "git+https://github.com/ismrmrd/ismrmrd-python-tools.git"
 
 # Vendored python-ismrmrd-server
 COPY third_party/python-ismrmrd-server /opt/python-ismrmrd-server
