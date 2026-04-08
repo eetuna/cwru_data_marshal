@@ -277,7 +277,7 @@ initCurrentSliders();
         sent_at: Date.now(),
         width: imageData.width,
         height: imageData.height,
-        frame_idx: imageData.frame_index,
+        frame_index: imageData.frame_index,
         values: [1]
       };
       const response = await fetch(`${writeServerUrl}/api/write/${clientId}/2`, {
