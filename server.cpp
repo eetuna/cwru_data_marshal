@@ -9,6 +9,7 @@
 #include "httplib.h"
 #include "json.hpp"
 #include "circularBuffer.hpp"
+#include <atomic>
 // Map filename -> cache (content as std::string)
 //std::unordered_map<std::string, std::string> file_caches;
 std::unordered_map<std::string, CircularBuffer<std::string>> file_caches;
@@ -27,7 +28,10 @@ std::condition_variable_any write_condition;
 std::mutex write_condition_mutex;
 
 // Flag to stop the background worker
-bool stop_worker = false;
+std::atomic<bool> stop_worker{false};
+
+// Counter of items currently sitting in all write queues
+std::atomic<unsigned int> pending_writes{0};
 
 using json = nlohmann::json;
 //std::mutex file_mutex;
@@ -43,6 +47,9 @@ int cache_capacity = 1000;
 //output file stream
 std::ofstream myfile;
 
+// Mutex to protect the log file stream
+std::mutex log_mutex;
+
 // Access mutex for a file, assuming it exists in file_mutexes
 std::shared_mutex& get_mutex_for_file(const std::string& filename) {
     std::shared_lock<std::shared_mutex> lock(map_mutex);
@@ -57,22 +64,16 @@ int64_t current_time_ms() {
     auto now = std::chrono::system_clock::now();
     return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 }
-void background_worker(const std::string& storage_dir) {
+void background_worker() {
     while (true) {
         std::string filename;
-        std::string data_to_write;
         std::string entry_str;
 
         // Wait for a write operation to be added to the queue
         {
             std::unique_lock<std::mutex> lock(write_condition_mutex);
             write_condition.wait(lock, [&]() {
-                for (const auto& [file, queue] : write_queues) {
-                    if (!queue.empty()) {
-                        return true;
-                    }
-                }
-                return stop_worker; // Exit if the worker is stopped
+                return pending_writes.load(std::memory_order_relaxed) > 0 || stop_worker.load(std::memory_order_relaxed);
             });
 
             if (stop_worker) {
@@ -81,15 +82,20 @@ void background_worker(const std::string& storage_dir) {
 
             // Find the first non-empty queue
             for (auto& [file, queue] : write_queues) {
-                std::lock_guard<std::mutex> queue_lock(write_queue_mutexes[file]);
+                std::lock_guard<std::mutex> queue_lock(write_queue_mutexes.at(file));
                 if (!queue.empty()) {
                     filename = file;
                     
                     queue.pop(entry_str); 
-                    //queue.pop();
+                    pending_writes.fetch_sub(1);
                     break;
                 }
             }
+        }
+
+        // Guard: if no queue had an item (should not happen, but be defensive)
+        if (filename.empty()) {
+            continue;
         }
 
         // Write the data to the file
@@ -188,7 +194,7 @@ bool load_config(const std::string& config_path) {
 
         // Store the content in the cache
         {
-            std::unique_lock<std::shared_mutex> cache_lock(cache_mutexes[filename]);
+            std::unique_lock<std::shared_mutex> cache_lock(cache_mutexes.at(filename));
             //file_caches[filename] = content;
            // file_caches[filename].push(content);
            auto it = file_caches.find(filename);
@@ -277,7 +283,13 @@ int main(int argc, char* argv[]) {
     
             // Update the cache for the specific file
             {
-                std::unique_lock<std::shared_mutex> cache_lock(cache_mutexes[filename]);
+                auto cm_it = cache_mutexes.find(filename);
+                if (cm_it == cache_mutexes.end()) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"File not found"})", "application/json");
+                    return;
+                }
+                std::unique_lock<std::shared_mutex> cache_lock(cm_it->second);
                 //file_caches[filename] = json_output;
                 //file_caches[filename].push(json_output);
                 auto it = file_caches.find(filename);
@@ -293,7 +305,13 @@ int main(int argc, char* argv[]) {
     
             // Add the write operation to the queue
             {
-                std::lock_guard<std::mutex> queue_lock(write_queue_mutexes[filename]);
+                auto wm_it = write_queue_mutexes.find(filename);
+                if (wm_it == write_queue_mutexes.end()) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"File not found"})", "application/json");
+                    return;
+                }
+                std::lock_guard<std::mutex> queue_lock(wm_it->second);
                 //write_queues[filename].push(json_output);
                 auto it = write_queues.find(filename);
                 if (it == write_queues.end()) {
@@ -304,10 +322,12 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Queuing entry for " << filename << ": " << json_output << "\n";
                 //myfile << "Writing this to a file.\n";
                 if(it->second.is_full()){
+                    std::lock_guard<std::mutex> log_lock(log_mutex);
                     myfile << "Warning: Write queue for " << filename << " is full. Overwriting oldest entries.\n";
                 }
                 //myfile << "Testing.\n";
                 it->second.push(json_output);
+                pending_writes.fetch_add(1);
             }
             write_condition.notify_all(); // Notify the background worker
             std::cerr << "POST request received for file: " << filename << "\n";
@@ -397,10 +417,10 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Server running at http://" << bind_host << ":" << bind_port << "\n";
     // Start the background worker
-    std::thread worker_thread(background_worker, storage_dir);
+    std::thread worker_thread(background_worker);
     server.listen(bind_host, bind_port);
     // Stop the worker gracefully on shutdown
-    stop_worker = true;
+    stop_worker.store(true, std::memory_order_relaxed);
     write_condition.notify_all();
     worker_thread.join();
     // Close error log file
