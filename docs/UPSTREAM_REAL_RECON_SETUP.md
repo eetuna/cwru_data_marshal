@@ -17,6 +17,44 @@ must be checked out together:
   `kspace_streamer` that emits a real Shepp-Logan phantom, and the
   `DELETE /v1/mrd/latest` endpoint.
 
+## What is the shim?
+
+`python-ismrmrd-server` is the real reconstruction engine, but it
+speaks a raw ISMRMRD TCP protocol (message IDs, binary framing, one
+persistent socket per job). `mri-marshal` speaks HTTP: it posts
+k-space to `POST /reconstruct` and expects reconstructed images to
+come back as an async `POST /v1/mrd/callback`. The two don't share
+a wire format.
+
+The **shim** is a small Python HTTP server
+(`docker/recon-shim/shim.py` on the MRI branch) that bridges the two:
+
+1. Listens on HTTP port 9002 for `POST /reconstruct` from marshal.
+2. Parses the raw k-space body into individual ISMRMRD acquisitions.
+3. Fabricates a minimal ISMRMRD XML dataset header (`python-ismrmrd-server`
+   requires one before any acquisitions).
+4. Opens a TCP connection to `python-ismrmrd-server` on port 9004
+   (same container, different port), sends `CONFIG_TEXT("simplefft")`
+   → `METADATA_XML_TEXT` → `ISMRMRD_ACQUISITION × N` → `CLOSE`.
+5. Reads the `ISMRMRD_IMAGE` messages the server sends back, strips
+   the attribute envelope, and combines multi-slice outputs into a
+   single 3D `ImageHeader` + pixel blob (so marshal stores them as
+   one multi-slice frame instead of N separate 2D frames).
+6. POSTs the combined image to marshal's callback URL, preserving
+   `X-MRD-Stream`, `X-MRD-Session`, and `X-MRD-Job-Id` headers.
+7. Returns `HTTP 202 Accepted` to marshal immediately; the TCP
+   roundtrip and callback POST happen in a background thread.
+
+Both `python-ismrmrd-server` and the shim run inside the same
+`cwru/mock-recon` container, started together by
+`docker/recon-shim/entrypoint.sh`. From marshal's perspective, there
+is one HTTP service at `http://mock-recon:9002`; the TCP handoff is
+invisible.
+
+The shim exists because marshal's HTTP contract was designed without
+touching it, and `python-ismrmrd-server` is vendored unmodified. The
+shim is the only piece of code that understands both sides.
+
 ## 1. Clone and check out the umbrella branch
 
 ```bash
