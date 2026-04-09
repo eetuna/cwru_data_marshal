@@ -1,10 +1,11 @@
 /*
  * clients/kspace_streamer/phantom.hpp
  *
- * Shepp-Logan phantom generator + naive 2D DFT for the C++ k-space streamer.
- * Header-only, no external deps beyond <complex>, <cmath>, <vector>. Naive
- * O(n^4) DFT is fine for demo sizes (e.g. 128x128). If we ever need larger
- * matrices or higher frame rates, swap this for FFTW / kissfft.
+ * Shepp-Logan phantom generator + real 2D FFT (kissfft-backed) for the C++
+ * k-space streamer. Matches the Python numpy.fft-backed path in the
+ * Python scanner client - image_to_kspace does fftshift(fft2(ifftshift(img))) /
+ * sqrt(nx*ny), same formula ismrmrdtools.transform.transform_image_to_kspace
+ * uses.
  *
  * The ellipse parameters are the standard Shepp-Logan head phantom (Shepp &
  * Logan, 1974) - the same constants every implementation uses, including
@@ -17,6 +18,8 @@
 #include <complex>
 #include <cstddef>
 #include <vector>
+
+#include "kiss_fftnd.h"
 
 namespace kspace_sim {
 
@@ -68,34 +71,50 @@ inline void build_shepp_logan(std::size_t nx, std::size_t ny,
     }
 }
 
-// Naive centered 2D DFT. Image is row-major (ny x nx), real double.
-// Output k-space is row-major (ny x nx), complex<float>, DC at (nx/2, ny/2).
-// Normalization is 1/sqrt(nx*ny).
+// Centered 2D FFT using kissfft. Matches Python numpy.fft path used by the
+// ismrmrdtools generator:
+//     k = fftshift(fft2(ifftshift(img))) / sqrt(nx*ny)
+// Image is row-major (ny x nx), real double. Output k-space is row-major
+// (ny x nx), complex<float>, DC term at (nx/2, ny/2).
 inline void image_to_kspace(const std::vector<double>& img,
                             std::size_t nx, std::size_t ny,
                             std::vector<std::complex<float>>& out) {
-    out.assign(nx * ny, {0.0f, 0.0f});
-    const double norm = 1.0 / std::sqrt(static_cast<double>(nx * ny));
-    for (std::size_t ky = 0; ky < ny; ++ky) {
-        const double fy = static_cast<double>(ky) - static_cast<double>(ny) / 2.0;
-        for (std::size_t kx = 0; kx < nx; ++kx) {
-            const double fx = static_cast<double>(kx) - static_cast<double>(nx) / 2.0;
-            std::complex<double> acc{0.0, 0.0};
-            for (std::size_t y = 0; y < ny; ++y) {
-                const double ys = static_cast<double>(y) - static_cast<double>(ny) / 2.0;
-                for (std::size_t x = 0; x < nx; ++x) {
-                    const double xs = static_cast<double>(x) - static_cast<double>(nx) / 2.0;
-                    const double phase =
-                        -2.0 * M_PI * (fx * xs / static_cast<double>(nx) +
-                                       fy * ys / static_cast<double>(ny));
-                    acc += img[y * nx + x] *
-                           std::complex<double>(std::cos(phase), std::sin(phase));
-                }
-            }
-            acc *= norm;
-            out[ky * nx + kx] = std::complex<float>(
-                static_cast<float>(acc.real()),
-                static_cast<float>(acc.imag()));
+    const std::size_t n = nx * ny;
+    out.assign(n, {0.0f, 0.0f});
+
+    // Build the ifftshifted complex input: origin moves to (0, 0).
+    std::vector<kiss_fft_cpx> in(n);
+    const std::size_t hx = nx / 2;
+    const std::size_t hy = ny / 2;
+    for (std::size_t y = 0; y < ny; ++y) {
+        const std::size_t ys = (y + hy) % ny;
+        for (std::size_t x = 0; x < nx; ++x) {
+            const std::size_t xs = (x + hx) % nx;
+            const double v = img[ys * nx + xs];
+            kiss_fft_cpx& c = in[y * nx + x];
+            c.r = static_cast<kiss_fft_scalar>(v);
+            c.i = 0;
+        }
+    }
+
+    // 2D forward FFT. dims: [ny, nx] (kissfft takes major-to-minor order).
+    int dims[2] = {static_cast<int>(ny), static_cast<int>(nx)};
+    kiss_fftnd_cfg cfg = kiss_fftnd_alloc(dims, 2, /*is_inverse=*/0, nullptr, nullptr);
+
+    std::vector<kiss_fft_cpx> freq(n);
+    kiss_fftnd(cfg, in.data(), freq.data());
+    kiss_fft_free(cfg);
+
+    // Apply fftshift on output and normalize by 1/sqrt(n).
+    const double norm = 1.0 / std::sqrt(static_cast<double>(n));
+    for (std::size_t y = 0; y < ny; ++y) {
+        const std::size_t ys = (y + hy) % ny;
+        for (std::size_t x = 0; x < nx; ++x) {
+            const std::size_t xs = (x + hx) % nx;
+            const kiss_fft_cpx& c = freq[y * nx + x];
+            out[ys * nx + xs] = std::complex<float>(
+                static_cast<float>(c.r * norm),
+                static_cast<float>(c.i * norm));
         }
     }
 }

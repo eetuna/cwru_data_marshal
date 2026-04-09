@@ -101,7 +101,15 @@ endif()
 add_executable(image_streamer clients/image_streamer/image_streamer_main.cpp)
 target_link_libraries(image_streamer PRIVATE Boost::system Threads::Threads ${ismrmrd_target})
 
-add_executable(kspace_streamer clients/kspace_streamer/kspace_streamer_main.cpp)
+# kspace_streamer bundles kissfft (BSD-licensed, vendored under
+# third_party/kissfft) for fast 2D FFT in its Shepp-Logan path. This does
+# NOT affect marshal or any other target - only kspace_streamer links it.
+add_executable(kspace_streamer
+    clients/kspace_streamer/kspace_streamer_main.cpp
+    third_party/kissfft/kiss_fft.c
+    third_party/kissfft/kiss_fftnd.c
+)
+target_include_directories(kspace_streamer PRIVATE third_party/kissfft)
 target_link_libraries(kspace_streamer PRIVATE Boost::system Threads::Threads ${ismrmrd_target})
 
 add_executable(mk_mrd src/mk_mrd.cpp)
