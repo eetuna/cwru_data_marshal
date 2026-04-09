@@ -114,7 +114,9 @@ python3 clients/mocks/scanner_kspace_client.py \
     --marshal http://localhost:8080 \
     --stream e2e_test \
     --matrix 128 \
-    --coils 1 2>&1
+    --slices 3 \
+    --coils 1 \
+    --frames 1 2>&1
 
 # --- wait for recon callback to store the image ----------------------------
 echo

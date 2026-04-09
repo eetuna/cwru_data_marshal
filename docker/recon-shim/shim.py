@@ -292,25 +292,36 @@ def run_reconstruction(
         if not images:
             log.error("[%s] no images returned", job_id)
             return
-        log.info("[%s] got %d images, forwarding to callback", job_id, len(images))
+        log.info("[%s] got %d images, combining into one 3D frame", job_id, len(images))
 
-        for idx, (hdr, pixels) in enumerate(images):
-            body = hdr + pixels
-            try:
-                r = requests.post(
-                    callback_url,
-                    data=body,
-                    headers={
-                        "Content-Type": "application/octet-stream",
-                        "X-MRD-Stream": stream,
-                        "X-MRD-Session": session,
-                        "X-MRD-Job-Id": job_id,
-                    },
-                    timeout=30,
-                )
-                log.info("[%s] image %d -> marshal: %d", job_id, idx, r.status_code)
-            except Exception as e:
-                log.error("[%s] callback POST failed: %s", job_id, e)
+        # Combine all returned 2D images into a single 3D ImageHeader+pixels
+        # so marshal stores it as one multi-slice frame. Rewrite matrix_size[2]
+        # in the first header to the slice count, concatenate pixel payloads.
+        first_hdr = bytearray(images[0][0])
+        struct.pack_into("<H", first_hdr, 20, len(images))  # matrix_size[2]
+        combined_pixels = b"".join(px for _, px in images)
+        body = bytes(first_hdr) + combined_pixels
+
+        try:
+            r = requests.post(
+                callback_url,
+                data=body,
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "X-MRD-Stream": stream,
+                    "X-MRD-Session": session,
+                    "X-MRD-Job-Id": job_id,
+                },
+                timeout=30,
+            )
+            log.info(
+                "[%s] %d-slice volume -> marshal: %d",
+                job_id,
+                len(images),
+                r.status_code,
+            )
+        except Exception as e:
+            log.error("[%s] callback POST failed: %s", job_id, e)
     except Exception as e:
         log.exception("[%s] reconstruction failed: %s", job_id, e)
 
