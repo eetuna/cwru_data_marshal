@@ -29,6 +29,20 @@ services:
       cppnet:
         ipv4_address: 172.28.1.11
 
+  client-force-sensor:
+    build:
+      context: .
+      dockerfile: Dockerfile.client-force-sensor
+    container_name: cpp_client-force-sensor
+    depends_on:
+      - server
+    environment:
+      - ROBOT_MARSHAL_HOST=server
+      - ROBOT_MARSHAL_PORT=8081
+    networks:
+      cppnet:
+        ipv4_address: 172.28.1.17
+
   client-front-end:
     build:
       context: .

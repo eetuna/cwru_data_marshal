@@ -39,6 +39,21 @@ services:
       robotnet:
         ipv4_address: 172.28.1.11
 
+  client-force-sensor:
+    build:
+      context: .
+      dockerfile: Dockerfile.client-force-sensor
+    container_name: client-force-sensor
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      - ROBOT_MARSHAL_HOST=172.28.1.10
+      - ROBOT_MARSHAL_PORT=8081
+    networks:
+      robotnet:
+        ipv4_address: 172.28.1.17
+
   client-front-end:
     build:
       context: .
