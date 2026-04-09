@@ -19,7 +19,7 @@ git worktree prune
 #MRI_BRANCH="mri-data-marhsal"
 #MRI_BRANCH="fix/swmr-realtime-optimization"
 #MRI_BRANCH="fix/async-json-writer"
-MRI_BRANCH="feature/bio-memory-cache"
+MRI_BRANCH="feature/kspace-streamer-real-recon"
 ROBOT_BRANCH="robot_data_marshal_with_catheter_system_components"
 UPSTREAM_REPO="https://github.com/cwru-mercis/cwru_data_marshal.git"
 

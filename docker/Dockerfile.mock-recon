@@ -1,19 +1,47 @@
+# cwru/mock-recon:latest
+#
+# Despite the legacy name, this image no longer runs the old Flask mock.
+# It now runs the real reconstruction simulator: python-ismrmrd-server
+# (vendored in the MRI branch at third_party/python-ismrmrd-server) plus
+# a small HTTP->TCP shim that bridges marshal's HTTP /reconstruct contract
+# to the ISMRMRD TCP protocol.
+#
+# Listens on port 9002 (same as the old mock) so docker-compose.demo.yml
+# and docs/MANUAL_TERMINAL_SETUP.md work unchanged.
+
 FROM python:3.11-slim
 
-# Install curl for healthcheck and flask for the service
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir flask requests
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# Copy mock reconstruction service
-COPY tests/mock_recon_service.py /app/mock_recon_service.py
+# curl for healthcheck, git so we can pip install ismrmrd-python-tools
+# from GitHub (not on PyPI).
+RUN apt-get update && apt-get install -y --no-install-recommends curl git \
+    && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# Python deps for python-ismrmrd-server and the shim. h5py / ismrmrd wheels
+# ship their own native libs so no libhdf5 package is required.
+RUN pip install --no-cache-dir \
+        ismrmrd \
+        numpy \
+        h5py \
+        pydicom \
+        matplotlib \
+        requests \
+        "git+https://github.com/ismrmrd/ismrmrd-python-tools.git"
 
-# Disable Python output buffering so logs appear immediately
-ENV PYTHONUNBUFFERED=1
+# Vendored python-ismrmrd-server from the MRI branch worktree.
+COPY third_party/python-ismrmrd-server /opt/python-ismrmrd-server
+
+# The HTTP->TCP shim and its entrypoint script.
+COPY docker/recon-shim/shim.py /opt/recon-shim/shim.py
+COPY docker/recon-shim/entrypoint.sh /opt/recon-shim/entrypoint.sh
+RUN chmod +x /opt/recon-shim/entrypoint.sh
 
 EXPOSE 9002
 
-# Default: run mock reconstruction service on port 9002
-CMD ["python3", "-u", "mock_recon_service.py", "9002"]
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
+    CMD curl -sf http://127.0.0.1:9002/health || exit 1
+
+ENTRYPOINT ["/opt/recon-shim/entrypoint.sh"]
