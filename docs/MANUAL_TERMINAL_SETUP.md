@@ -257,6 +257,30 @@ K-Space Streamer                  MRI Marshal                    Recon Service
 
 **Note:** To test the full reconstruction flow, start the mock-recon service (Terminal 6) and k-space streamer (Terminal 8). The `RECON_ENDPOINT` is already configured in `.env.demo`.
 
+### Clearing the Latest Frame Cache (Session End)
+
+Marshal caches the most recent stored frame in memory so `GET /v1/mrd/latest` can serve it instantly. The cache is sticky for the lifetime of the marshal process - after a producer stops, the last frame keeps showing up until marshal is restarted or the cache is explicitly cleared.
+
+To explicitly clear it, call:
+
+```bash
+curl -X DELETE http://localhost:8080/v1/mrd/latest
+```
+
+Effects:
+
+- Next `GET /v1/mrd/latest` returns `204 No Content` until the next frame is POSTed.
+- HDF5 files on disk, `/v1/mrd/since` history, WebSocket subscribers, and every other marshal state are unaffected - only the in-memory "latest" cache is wiped.
+- The coordinator safety poller (`clients/bridge/coordinator.py`) is unaffected: it ignores non-200 responses and only acts on observed fault envelopes, so a cleared cache just means it waits for the next real frame.
+
+Typical callers:
+
+- An operator running the curl above manually at end-of-experiment.
+- A session orchestration script in a `trap` / `finally` block.
+- A scanner / producer shutdown hook that fires on Ctrl-C.
+
+The endpoint is purely additive and optional: if nobody calls it, marshal behaves exactly as before.
+
 ---
 
 ### Terminal 2: Robot Marshal (Core Service)
