@@ -77,7 +77,7 @@ if [[ "$status" != "healthy" ]]; then
     exit 3
 fi
 RECON_IP=$(docker inspect "$RECON_CONTAINER" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
-echo "recon-sim up at $RECON_IP:9003 (healthy)"
+echo "recon-sim up at $RECON_IP:9002 (healthy)"
 
 # --- start marshal ---------------------------------------------------------
 echo
@@ -88,7 +88,7 @@ rm -rf "$DATA_DIR" && mkdir -p "$DATA_DIR"
     --ws 0.0.0.0:8090 \
     --data "$DATA_DIR" \
     --sink mrd \
-    --recon-endpoint "http://$RECON_IP:9003" \
+    --recon-endpoint "http://$RECON_IP:9002" \
     > "$MARSHAL_LOG" 2>&1 &
 MARSHAL_PID=$!
 echo "marshal pid=$MARSHAL_PID"

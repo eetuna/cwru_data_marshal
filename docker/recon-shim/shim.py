@@ -7,7 +7,7 @@ Marshal POSTs raw k-space (AcquisitionHeader + samples, concatenated) to
 
   1. Parses the body into individual ISMRMRD acquisitions.
   2. Fabricates a minimal XML dataset header from the first acquisition.
-  3. Opens a TCP connection to python-ismrmrd-server on localhost:9002.
+  3. Opens a TCP connection to python-ismrmrd-server on localhost:9004.
   4. Sends: CONFIG_TEXT("simplefft") -> METADATA_XML_TEXT(header) ->
      ISMRMRD_ACQUISITION * N -> CLOSE.
   5. Reads back ISMRMRD_IMAGE messages and strips python-ismrmrd-server's
@@ -32,9 +32,9 @@ import ismrmrd
 import numpy as np
 import requests
 
-SHIM_PORT = 9003
+SHIM_PORT = 9002
 RECON_HOST = "127.0.0.1"
-RECON_PORT = 9002
+RECON_PORT = 9004
 RECON_CONFIG = "simplefft"  # Inverse FFT - realistic recon for k-space
 
 # ISMRMRD wire protocol constants (match constants.py in python-ismrmrd-server)

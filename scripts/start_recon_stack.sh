@@ -40,7 +40,7 @@ for i in $(seq 1 20); do
     sleep 0.5
 done
 RECON_IP=$(docker inspect "$RECON_CONTAINER" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
-echo "recon-sim up at $RECON_IP:9003"
+echo "recon-sim up at $RECON_IP:9002"
 
 rm -rf "$DATA_DIR" && mkdir -p "$DATA_DIR"
 ./build/marshal \
@@ -48,7 +48,7 @@ rm -rf "$DATA_DIR" && mkdir -p "$DATA_DIR"
     --ws 0.0.0.0:8090 \
     --data "$DATA_DIR" \
     --sink mrd \
-    --recon-endpoint "http://$RECON_IP:9003" \
+    --recon-endpoint "http://$RECON_IP:9002" \
     > "$MARSHAL_LOG" 2>&1 &
 MARSHAL_PID=$!
 for i in $(seq 1 20); do

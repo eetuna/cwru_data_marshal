@@ -29,9 +29,9 @@ COPY docker/recon-shim/shim.py /opt/recon-shim/shim.py
 COPY docker/recon-shim/entrypoint.sh /opt/recon-shim/entrypoint.sh
 RUN chmod +x /opt/recon-shim/entrypoint.sh
 
-EXPOSE 9003
+EXPOSE 9002
 
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
-    CMD curl -sf http://127.0.0.1:9003/health || exit 1
+    CMD curl -sf http://127.0.0.1:9002/health || exit 1
 
 ENTRYPOINT ["/opt/recon-shim/entrypoint.sh"]

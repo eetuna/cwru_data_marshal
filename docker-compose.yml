@@ -14,20 +14,20 @@ x-build-command: &build-command "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE
 
 services:
   # Reconstruction simulator: python-ismrmrd-server + HTTP->TCP shim.
-  # Exposes HTTP /reconstruct on 9003; marshal is wired to it via --recon-endpoint.
+  # Exposes HTTP /reconstruct on 9002; marshal is wired to it via --recon-endpoint.
   recon-sim:
     build:
       context: .
       dockerfile: docker/recon-shim/Dockerfile
     ports:
-      - "9003:9003"
+      - "9002:9002"
 
   # MRI Data Marshal (Hardened Hub)
   # Hostname is "mri-marshal" to match marshal's hardcoded callback URL
   # (src/marshal_http.hpp: http://mri-marshal:8080/v1/mrd/callback).
   mri-marshal:
     build: *build-dev
-    command: bash -lc "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build && ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data /data --sink mrd --recon-endpoint http://recon-sim:9003"
+    command: bash -lc "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build && ./build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data /data --sink mrd --recon-endpoint http://recon-sim:9002"
     ports:
       - "8080:8080"
       - "8090:8090"
