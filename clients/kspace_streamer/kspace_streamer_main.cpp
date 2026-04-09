@@ -42,6 +42,8 @@
 
 #include <ismrmrd/ismrmrd.h>
 
+#include "phantom.hpp"
+
 namespace http = boost::beast::http;
 
 struct Options {
@@ -206,75 +208,99 @@ int main(int argc, char **argv) {
 
         // Required fields for valid detection (see mrd_type_detector.hpp)
         const std::size_t header_bytes = sizeof(ISMRMRD::AcquisitionHeader);
-        const std::size_t data_samples = static_cast<std::size_t>(opt.samples) * opt.channels;
-        const std::size_t data_bytes = data_samples * sizeof(std::complex<float>);
+        const std::size_t nx = static_cast<std::size_t>(opt.samples);
+        const std::size_t ny = static_cast<std::size_t>(opt.lines);
+        const std::size_t ncoils = static_cast<std::size_t>(opt.channels);
+        const std::size_t line_samples = nx * ncoils;              // per-readout complex samples
+        const std::size_t line_data_bytes = line_samples * sizeof(std::complex<float>);
 
-        // For multi-slice: we'll send one readout per slice (simplified from full k-space)
-        const std::size_t acquisitions_per_volume = opt.slices;
-        std::vector<std::complex<float>> kspace_data(data_samples);
+        // One acquisition per phase-encode line per slice - real 2D k-space
+        // that python-ismrmrd-server simplefft can reconstruct into an image.
+        const std::size_t acquisitions_per_volume =
+            static_cast<std::size_t>(opt.slices) * ny;
+
+        // Scratch buffers reused every volume/slice.
+        std::vector<double> phantom_img;
+        std::vector<std::complex<float>> slice_kspace(nx * ny);
+        std::vector<std::complex<float>> line_data(line_samples);
 
         std::size_t volume_index = 0;
         const std::size_t total_volumes = opt.readouts > 0 ? opt.readouts : 0;
         const std::size_t log_stride = opt.log_stride;
 
         while (total_volumes == 0 || volume_index < total_volumes) {
-            // Build multi-slice k-space volume
+            // Build multi-slice k-space volume: one acquisition per phase
+            // encode line per slice, full 2D k-space from a Shepp-Logan
+            // phantom that rotates + brightness-modulates over time.
             std::vector<uint8_t> volume_body;
-            volume_body.reserve(acquisitions_per_volume * (header_bytes + data_bytes));
+            volume_body.reserve(acquisitions_per_volume *
+                                (header_bytes + line_data_bytes));
+
+            const double rotation = 0.05 * static_cast<double>(volume_index);
+            const double brightness =
+                0.75 + 0.25 * std::sin(0.1 * static_cast<double>(volume_index));
 
             for (std::uint16_t slice = 0; slice < opt.slices; ++slice) {
-                // Create acquisition header for this slice
-                ISMRMRD::AcquisitionHeader acq_header;
-                std::memset(&acq_header, 0, sizeof(acq_header));
+                // Per-slice rotation offset so slices look distinct.
+                const double slice_rot = rotation + 0.1 * static_cast<double>(slice);
+                const double slice_wt =
+                    std::cos(0.5 * M_PI *
+                             (static_cast<double>(slice) -
+                              (opt.slices - 1) / 2.0) /
+                             std::max(1.0, (opt.slices - 1) / 2.0));
+                const double slice_bright =
+                    brightness * (slice_wt * slice_wt);
 
-                acq_header.version = 1;
-                acq_header.number_of_samples = opt.samples;
-                acq_header.active_channels = opt.channels;
-                acq_header.available_channels = opt.channels;
-                acq_header.trajectory_dimensions = 0;  // Cartesian
-                acq_header.sample_time_us = 10.0f;     // 10 μs dwell time
+                kspace_sim::build_shepp_logan(nx, ny, slice_rot, slice_bright,
+                                              phantom_img);
+                kspace_sim::image_to_kspace(phantom_img, nx, ny, slice_kspace);
 
-                // Set indices
-                acq_header.scan_counter = static_cast<uint32_t>(volume_index * opt.slices + slice);
-                acq_header.idx.slice = slice;
-                acq_header.idx.kspace_encode_step_1 = 0;  // Simplified: single phase encode per slice
-                acq_header.idx.repetition = static_cast<uint16_t>(volume_index % 65535);
+                for (std::uint16_t line = 0; line < ny; ++line) {
+                    ISMRMRD::AcquisitionHeader acq_header;
+                    std::memset(&acq_header, 0, sizeof(acq_header));
 
-                // Set flags for first/last in slice
-                acq_header.flags = 0;
-                acq_header.flags |= (1ULL << (ISMRMRD::ISMRMRD_ACQ_FIRST_IN_SLICE - 1));
-                acq_header.flags |= (1ULL << (ISMRMRD::ISMRMRD_ACQ_LAST_IN_SLICE - 1));
+                    acq_header.version = 1;
+                    acq_header.number_of_samples = opt.samples;
+                    acq_header.active_channels = opt.channels;
+                    acq_header.available_channels = opt.channels;
+                    acq_header.trajectory_dimensions = 0;   // Cartesian
+                    acq_header.sample_time_us = 10.0f;
 
-                // Generate synthetic k-space data
-                // Vary pattern slightly by slice for visual verification
-                const double t = static_cast<double>(volume_index);
-                const double slice_phase = slice * 0.2;
+                    acq_header.scan_counter = static_cast<uint32_t>(
+                        (volume_index * opt.slices + slice) * ny + line);
+                    acq_header.idx.slice = slice;
+                    acq_header.idx.kspace_encode_step_1 = line;
+                    acq_header.idx.repetition =
+                        static_cast<uint16_t>(volume_index % 65535);
 
-                for (std::size_t ch = 0; ch < opt.channels; ++ch) {
-                    const double channel_phase = ch * 0.3;
-                    for (std::size_t s = 0; s < opt.samples; ++s) {
-                        const double kx = static_cast<double>(s) / opt.samples - 0.5;
-                        const double k_radius = std::abs(kx);
-
-                        // Gaussian k-space pattern with slice variation
-                        const double magnitude = std::exp(-k_radius * k_radius * 20.0) *
-                                                (1.0 + 0.1 * std::sin(t * 0.1 + slice_phase));
-                        const double phase = channel_phase + slice_phase + kx * 2.0 * M_PI;
-
-                        const std::size_t idx = ch * opt.samples + s;
-                        kspace_data[idx] = std::complex<float>(
-                            static_cast<float>(magnitude * std::cos(phase)),
-                            static_cast<float>(magnitude * std::sin(phase))
-                        );
+                    acq_header.flags = 0;
+                    if (line == 0) {
+                        acq_header.flags |=
+                            (1ULL << (ISMRMRD::ISMRMRD_ACQ_FIRST_IN_SLICE - 1));
                     }
+                    if (line == ny - 1) {
+                        acq_header.flags |=
+                            (1ULL << (ISMRMRD::ISMRMRD_ACQ_LAST_IN_SLICE - 1));
+                    }
+
+                    // Replicate this k-space line across all coil channels
+                    // (simple uniform sensitivity - simplefft just sums them).
+                    for (std::size_t ch = 0; ch < ncoils; ++ch) {
+                        std::memcpy(&line_data[ch * nx],
+                                    &slice_kspace[line * nx],
+                                    nx * sizeof(std::complex<float>));
+                    }
+
+                    const uint8_t* header_ptr =
+                        reinterpret_cast<const uint8_t*>(&acq_header);
+                    volume_body.insert(volume_body.end(), header_ptr,
+                                       header_ptr + header_bytes);
+
+                    const uint8_t* data_ptr =
+                        reinterpret_cast<const uint8_t*>(line_data.data());
+                    volume_body.insert(volume_body.end(), data_ptr,
+                                       data_ptr + line_data_bytes);
                 }
-
-                // Append header + k-space data to volume body
-                const uint8_t* header_ptr = reinterpret_cast<const uint8_t*>(&acq_header);
-                volume_body.insert(volume_body.end(), header_ptr, header_ptr + header_bytes);
-
-                const uint8_t* data_ptr = reinterpret_cast<const uint8_t*>(kspace_data.data());
-                volume_body.insert(volume_body.end(), data_ptr, data_ptr + data_bytes);
             }
 
             // Send entire volume (all slices)
@@ -362,7 +388,7 @@ int main(int argc, char **argv) {
         }
 
         std::cout << "kspace_streamer: Finished sending " << volume_index << " volumes ("
-                  << (volume_index * opt.slices) << " total acquisitions)\n";
+                  << (volume_index * acquisitions_per_volume) << " total acquisitions)\n";
 
     } catch (const std::exception &e) {
         std::cerr << "kspace_streamer error: " << e.what() << "\n";
