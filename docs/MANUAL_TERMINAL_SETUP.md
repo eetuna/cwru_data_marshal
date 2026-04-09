@@ -155,6 +155,27 @@ MONITOR_INTERVAL=2    # Seconds between status updates
 
 This approach gives you maximum visibility - each service runs in its own terminal window so you can see real-time logs.
 
+### ⚠️ Always pass `--env-file .env.demo`
+
+**Every** `docker compose` command in this guide must include `--env-file .env.demo`. If you drop that flag, compose has no values for `RECON_ENDPOINT`, `IMAGE_INTERVAL`, `IMAGE_WIDTH`, `ECG_*`, `POSE_*`, etc., and you will see warnings like:
+
+```
+WARN[0000] The "RECON_ENDPOINT" variable is not set. Defaulting to a blank string.
+WARN[0000] The "IMAGE_INTERVAL" variable is not set. Defaulting to a blank string.
+```
+
+When those warnings appear:
+
+- Marshal starts **without** `--recon-endpoint`, so it returns `501 Not Implemented` to every k-space POST and the k-space path will never produce images.
+- Image-streamer / ECG / pose clients receive empty strings for their flags and will error out or behave unpredictably.
+
+If you do not want to type `--env-file .env.demo -f docker-compose.demo.yml` each time, define an alias once per shell:
+
+```bash
+alias cdd='docker compose --env-file .env.demo -f docker-compose.demo.yml'
+# then: cdd up mri-marshal
+```
+
 ### Preparation
 
 Before starting services, ensure `session-data/` is clean:
@@ -165,6 +186,39 @@ rm -rf session-data/*
 
 # Or set CLEANUP_DATA=false in .env.demo to keep data between runs
 ```
+
+### Which flow to run
+
+There are two valid end-to-end flows. **Pick one; do not mix them in the same session.**
+
+**Flow A — real reconstruction (k-space → recon → image).** The k-space streamer posts raw k-space, marshal forwards it to the reconstruction service, and the reconstructed images flow back via the callback endpoint. This exercises the full scanner-side path.
+
+Required terminals, **run in this order**:
+
+1. Terminal 1 — **mri-marshal** (wait for `healthy`).
+2. Terminal 6 — **mock-recon** (the reconstruction service). Must be up before any k-space arrives, otherwise marshal returns `501 Not Implemented`.
+3. Terminal 9 — **viz-client** (opens an empty "Waiting for data..." window).
+4. Terminal 8 — **kspace-streamer** (starts POSTing raw k-space; images begin appearing in viz a moment later).
+
+Do NOT run image-streamer in Flow A - it posts pre-reconstructed images to the same stream and will fight with the recon callbacks.
+
+**Flow B — bypass reconstruction (pre-made image producer).** The image streamer posts already-reconstructed images directly. Fastest way to smoke-test marshal + viz without touching recon at all.
+
+Required terminals, **run in this order**:
+
+1. Terminal 1 — **mri-marshal**.
+2. Terminal 9 — **viz-client**.
+3. Terminal 3 — **image-streamer**.
+
+Do NOT run mock-recon or kspace-streamer in Flow B - they are not used.
+
+**Optional add-ons that work with both flows:**
+
+- Terminal 2 — **robot-marshal** + Terminal 7 — **robot-clients** (robot side of the system, independent of the MRI flow).
+- Terminal 4 — **ecg-client** (posts synthetic ECG samples).
+- Terminal 5 — **pose-client** (posts synthetic tracking poses).
+
+The per-terminal reference sections below give the exact `docker compose` command, expected output, and configuration for each service, in the original numeric order. Refer back to the flow list above for the run sequence.
 
 ### Terminal 1: MRI Marshal (Core Service)
 
