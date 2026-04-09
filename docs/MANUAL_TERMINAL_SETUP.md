@@ -196,10 +196,21 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up mri-marshal
 
 The MRI marshal can forward raw k-space data to an external reconstruction service. This is **optional** - the demo works without it since the image streamer sends pre-reconstructed images.
 
+The `cwru/mock-recon` image has historically been a throwaway stand-in for whatever real reconstruction service is wired into production. It is now backed by **python-ismrmrd-server** (vendored) behind a small HTTP->TCP shim, so it performs real inverse-FFT reconstruction on the k-space it receives. The image tag, service name, port (9002), and HTTP contract are unchanged - swapping it for a real scanner-side recon is still a one-line change (`RECON_ENDPOINT=...`, see below).
+
 #### When You Need Reconstruction
 
 - **Demo/Testing**: NOT needed - image streamer sends reconstructed images (ImageHeader)
 - **Real Scanner**: NEEDED - scanners send raw k-space (AcquisitionHeader)
+
+#### Swapping the Simulator for Real Recon
+
+The simulator (`cwru/mock-recon`) is designed to be a drop-in placeholder. To use a real reconstruction service instead:
+
+1. Stop the `mock-recon` container.
+2. Start marshal with `RECON_ENDPOINT=http://<real-recon-host>:<port>` pointing at the real service.
+
+Nothing else changes - marshal, viz-client, kspace-streamer, and the manual terminal commands in this guide all keep working as-is. The contract marshal uses (`POST /reconstruct` out, callback to `POST /v1/mrd/callback` in) is identical regardless of what service is behind the endpoint.
 
 #### Data Flow with Reconstruction (Async/Callback)
 
@@ -350,24 +361,22 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up pose-client
 
 ---
 
-### Terminal 6: Mock Reconstruction Service
+### Terminal 6: Reconstruction Service (cwru/mock-recon)
 
-The mock reconstruction service simulates k-space to image reconstruction. This is required if you want to test the full reconstruction pipeline with the k-space streamer.
+Runs the reconstruction service that marshal forwards k-space to. Despite the legacy image name `cwru/mock-recon`, this is now real reconstruction (`python-ismrmrd-server` + HTTP->TCP shim) rather than a gradient stub. Required if you want to test the full reconstruction pipeline with the k-space streamer.
 
 ```bash
 cd /path/to/cwru_data_marshal
 
-# Run mock reconstruction service
+# Run reconstruction service
 docker compose --env-file .env.demo -f docker-compose.demo.yml up mock-recon
 ```
 
 **What you'll see:**
 ```
-[mock-recon] Starting ASYNC mock reconstruction service on port 9002
-[mock-recon] Simulated reconstruction delay: 0.5s
-[mock-recon] Endpoints:
-[mock-recon]   POST /reconstruct - Receive k-space, process async, callback with image
-[mock-recon]   GET /health - Health check
+[entrypoint] starting python-ismrmrd-server on 0.0.0.0:9004
+[entrypoint] starting shim on 0.0.0.0:9002
+[shim] shim listening on :9002, forwards to python-ismrmrd-server 127.0.0.1:9004
 ```
 
 **Endpoints:**
@@ -375,13 +384,13 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up mock-recon
 - Health: GET http://localhost:9002/health
 
 **How it works:**
-1. Receives k-space data with `X-MRD-Callback` header
-2. Returns HTTP 202 immediately (non-blocking)
-3. Spawns background thread to process reconstruction
-4. Simulates 0.5s processing delay (configurable in code)
-5. POSTs reconstructed image back to callback URL
+1. Receives k-space data with `X-MRD-Callback` header on HTTP `/reconstruct`.
+2. Returns HTTP 202 immediately (non-blocking).
+3. In a background thread: parses the acquisitions, opens a TCP connection to `python-ismrmrd-server` on port 9004 (inside the container), sends CONFIG + metadata XML + acquisition stream.
+4. `python-ismrmrd-server` runs `simplefft` (real 2D inverse FFT per slice) and streams images back.
+5. The shim strips the attribute envelope, combines multi-slice outputs into a single 3D ImageHeader+pixels, and POSTs it to the callback URL.
 
-**Note:** The `RECON_ENDPOINT` environment variable in `.env.demo` is already configured to point to this service.
+**Note:** The `RECON_ENDPOINT` environment variable in `.env.demo` is already configured to point to this service. To use a real scanner-side reconstruction service instead, stop this container and set `RECON_ENDPOINT=http://<real-recon-host>:<port>` when starting marshal (Terminal 1) - nothing else in this guide changes.
 
 ---
 
