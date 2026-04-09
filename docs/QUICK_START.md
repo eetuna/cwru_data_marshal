@@ -97,4 +97,7 @@ Individual robot clients (run separately instead of as the `robot-clients` bundl
 - Flow A and Flow B are mutually exclusive. Do not run `image-streamer` together with `mock-recon`/`kspace-streamer`.
 - `mock-recon` must be up before `kspace-streamer`, otherwise marshal returns 501 until it appears.
 - `viz-client` and `robot-clients` live behind compose profiles (`viz`, `robot-clients`). They only start when the matching `--profile` flag is on the command.
-- Commands shown block their terminal and stream logs. To run detached in the background, add `-d`: `cdd up -d <service>`, then follow logs with `cdd logs -f <service>`.
+- Commands shown block their terminal and stream logs. To run detached in the background, add `-d`: `cdd up -d <service>`, then follow logs with `cdd logs -f <service>`. Stop everything (works for both `-d` and blocking runs) with:
+  ```bash
+  cdd --profile viz --profile robot-clients down
+  ```
