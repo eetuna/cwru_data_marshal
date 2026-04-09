@@ -1169,6 +1169,20 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
         return make_response(http::status::no_content, {});
     }
 
+    // DELETE /v1/mrd/latest  (explicit session-end clear of the in-memory cache)
+    // Producers or operators call this when a session is done so subsequent
+    // GET /v1/mrd/latest returns 204 until the next frame is posted. Has no
+    // effect on stored HDF5 files, /v1/mrd/since history, or any other state.
+    if (req.method() == http::verb::delete_ && req.target() == "/v1/mrd/latest")
+    {
+        {
+            std::lock_guard<std::mutex> lock(state.latest_mrd_mutex);
+            state.latest_mrd_json.clear();
+        }
+        LOG_INFO("req=" << req_id << " DELETE /v1/mrd/latest: cache cleared");
+        return make_response(http::status::no_content, {});
+    }
+
     // GET /v1/mrd/since?ts=...&limit=...&last=...  (reads ${data_dir}/mrd/index.jsonl)
     // - ts + limit: return frames where ts > provided_ts, up to limit
     // - last: return the last N frames (most recent)
