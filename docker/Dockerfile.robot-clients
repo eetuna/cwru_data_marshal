@@ -15,6 +15,7 @@ RUN ln -s /usr/include/eigen3 /usr/include/eigen5
 
 # Copy source files from build context (robot worktree)
 COPY client-catheter-tracking.cpp /opt/robot/
+COPY client-force-sensor.cpp /opt/robot/
 COPY client-controller.cpp /opt/robot/
 COPY client-front-end.cpp /opt/robot/
 COPY client-planning.cpp /opt/robot/
@@ -29,6 +30,7 @@ WORKDIR /opt/robot
 
 # Patch clients to use compact single-line output with client-specific prefixes
 RUN sed -i 's/std::cout << "Read localization values: " << values.dump(2) << "\\n";/std::cout << "CATHETER: " << values.dump() << std::endl;/' client-catheter-tracking.cpp && \
+    sed -i 's/std::cout << "Read FK values: " << values.dump(2) << "\\n";/std::cout << "CATHETER: " << values.dump() << std::endl;/' client-force-sensor.cpp && \
     sed -i 's/std::cout << "Read values: " << values.dump(2) << "\\n";/std::cout << "CONTROLLER: " << values.dump() << std::endl;/' client-controller.cpp && \
     sed -i 's/std::cout << "Read values: " << values.dump(2) << "\\n";/std::cout << "PLANNING: " << values.dump() << std::endl;/' client-planning.cpp && \
     sed -i 's/std::cout << "Read values: " << values.dump(2) << "\\n";/std::cout << "FRONTEND: " << values.dump() << std::endl;/' client-front-end.cpp && \
@@ -37,6 +39,7 @@ RUN sed -i 's/std::cout << "Read localization values: " << values.dump(2) << "\\
 
 # Build all clients
 RUN g++ -std=c++17 client-catheter-tracking.cpp -o catheter-tracking -lpthread && \
+    g++ -std=c++17 client-force-sensor.cpp -o force-sensor -lpthread && \
     g++ -std=c++17 -O2 client-controller.cpp \
     CRM_CPPImplementation/src/CRM_ForwardKinematics.cpp \
     CRM_CPPImplementation/src/CRM_BVPSolver.cpp \

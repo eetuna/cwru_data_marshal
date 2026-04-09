@@ -167,6 +167,20 @@ services:
     networks:
       - cwru-net
 
+  force-sensor:
+    image: cwru/robot-clients:latest
+    container_name: cwru-force-sensor
+    command: ["./force-sensor"]
+    environment:
+      - ROBOT_MARSHAL_HOST=robot-marshal
+      - ROBOT_MARSHAL_PORT=8081
+    depends_on:
+      robot-marshal:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - cwru-net
+
   controller:
     image: cwru/robot-clients:latest
     container_name: cwru-controller
@@ -256,6 +270,7 @@ services:
       - |
         # Start all clients, redirect output to files for counting
         ./catheter-tracking >> /tmp/cath.log 2>&1 &
+        ./force-sensor >> /tmp/force.log 2>&1 &
         ./controller >> /tmp/ctrl.log 2>&1 &
         ./planning >> /tmp/plan.log 2>&1 &
         ./front-end >> /tmp/fe.log 2>&1 &
@@ -265,11 +280,12 @@ services:
         while true; do
           sleep $${MONITOR_INTERVAL:-10}
           CATH=$$(grep -c "CATHETER:" /tmp/cath.log 2>/dev/null || echo 0)
+          FORCE=$$(grep -c "FORCESENSOR:" /tmp/force.log 2>/dev/null || echo 0)
           CTRL=$$(grep -c "CONTROLLER:" /tmp/ctrl.log 2>/dev/null || echo 0)
           PLAN=$$(grep -c "PLANNING:" /tmp/plan.log 2>/dev/null || echo 0)
           FE=$$(grep -c "FRONTEND:" /tmp/fe.log 2>/dev/null || echo 0)
           SURF=$$(grep -c "SURFACE:" /tmp/surf.log 2>/dev/null || echo 0)
-          printf "[%s] Robot Clients: cath=%s ctrl=%s plan=%s fe=%s surf=%s\n" "$$(date +%H:%M:%S)" "$$CATH" "$$CTRL" "$$PLAN" "$$FE" "$$SURF"
+          printf "[%s] Robot Clients: cath=%s force=%s ctrl=%s plan=%s fe=%s surf=%s\n" "$$(date +%H:%M:%S)" "$$CATH" "$$FORCE" "$$CTRL" "$$PLAN" "$$FE" "$$SURF"
         done
     environment:
       - ROBOT_MARSHAL_HOST=robot-marshal
