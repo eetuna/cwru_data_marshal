@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -224,6 +225,10 @@ int main(int argc, char **argv) {
         std::vector<std::complex<float>> slice_kspace(nx * ny);
         std::vector<std::complex<float>> line_data(line_samples);
 
+        // RNG for per-line gaussian noise (matches the Python scanner client).
+        std::mt19937 rng{std::random_device{}()};
+        std::normal_distribution<float> gauss{0.0f, 0.05f};
+
         std::size_t volume_index = 0;
         const std::size_t total_volumes = opt.readouts > 0 ? opt.readouts : 0;
         const std::size_t log_stride = opt.log_stride;
@@ -249,7 +254,7 @@ int main(int argc, char **argv) {
                               (opt.slices - 1) / 2.0) /
                              std::max(1.0, (opt.slices - 1) / 2.0));
                 const double slice_bright =
-                    brightness * (slice_wt * slice_wt);
+                    brightness * std::max(0.25, slice_wt * slice_wt);
 
                 kspace_sim::build_shepp_logan(nx, ny, slice_rot, slice_bright,
                                               phantom_img);
@@ -283,12 +288,18 @@ int main(int argc, char **argv) {
                             (1ULL << (ISMRMRD::ISMRMRD_ACQ_LAST_IN_SLICE - 1));
                     }
 
-                    // Replicate this k-space line across all coil channels
-                    // (simple uniform sensitivity - simplefft just sums them).
+                    // Replicate this k-space line across all coil channels and
+                    // add per-sample gaussian noise (same as the Python scanner
+                    // client). Noise ensures simplefft never divides by zero
+                    // even if a slice is empty and gives slices a distinctive
+                    // grain.
                     for (std::size_t ch = 0; ch < ncoils; ++ch) {
-                        std::memcpy(&line_data[ch * nx],
-                                    &slice_kspace[line * nx],
-                                    nx * sizeof(std::complex<float>));
+                        for (std::size_t s = 0; s < nx; ++s) {
+                            const std::complex<float>& src = slice_kspace[line * nx + s];
+                            line_data[ch * nx + s] = std::complex<float>(
+                                src.real() + gauss(rng),
+                                src.imag() + gauss(rng));
+                        }
                     }
 
                     const uint8_t* header_ptr =
