@@ -51,9 +51,9 @@ struct Options {
     std::string stream{"kspace_stream"};
     std::size_t readouts{0};        // 0 = infinite
     double interval{0.1};           // seconds between readouts
-    std::uint16_t samples{256};     // samples per readout (k-space line width)
-    std::uint16_t channels{8};      // active coil channels
-    std::uint16_t lines{128};       // phase encode lines (total readouts per frame)
+    std::uint16_t samples{64};      // samples per readout (k-space line width)
+    std::uint16_t channels{1};      // active coil channels
+    std::uint16_t lines{64};        // phase encode lines (total readouts per frame)
     std::uint16_t slices{1};        // number of slices per volume
     std::size_t log_stride{10};
 };
