@@ -1,50 +1,53 @@
 # Mock Clients
 
-Mock clients for testing the MRI Data Marshal system without hardware.
+Python mock clients for testing the MRI Data Marshal without hardware.
 
-## Pure Python Clients (No Dependencies)
+## Available Clients
 
 ### ecg_client.py
-Simulates ECG signals. POST to `/v1/bio/signal`.
+
+Sends simulated ECG waveforms as ISMRMRD waveform messages via `POST /frame`. Uses `waveform_id=0` (ECG convention). Requires the `ismrmrd` Python package.
 
 ```bash
-# Send 10 signals
-python3 ecg_client.py --count 10
-
-# Custom endpoint and heart rate
-python3 ecg_client.py --endpoint http://localhost:8080 --heart-rate 80 --count 20
+python3 ecg_client.py --endpoint http://localhost:8080 --count 100
 ```
 
 ### pose_client.py
-Simulates robot/tracker poses. POST to `/v1/pose/update`.
+
+Sends simulated robot pose updates via `POST /pose` (JSON).
 
 ```bash
-# Send 50 pose updates
-python3 pose_client.py --count 50
-
-# Circular trajectory at 10Hz
-python3 pose_client.py --trajectory circular --interval 0.1 --count 100
+python3 pose_client.py --endpoint http://localhost:8080 --count 50
 ```
 
-## Clients Requiring Dependencies
-
 ### http_tracker.py
-Polls MRI/pose data via HTTP. Requires: `pip install requests`
 
-### planner.py
-WebSocket frame continuity checker. Requires: `pip install websockets`
+Polls `GET /image/latest` and `GET /pose` to display live data. Requires `requests`.
 
-### surface_tracker.py
-Mock surface tracker. Requires: `pip install websockets`
+```bash
+python3 http_tracker.py --endpoint http://localhost:8080
+```
+
+## Deleted Clients
+
+The following clients from v1 have been removed:
+
+- **scanner_kspace_client.py** -- folded into the C++ `kspace_streamer`
+- **surface_tracker.py** -- robot-domain feature, deferred
+- **planner.py** -- robot-domain feature, deferred
 
 ## Usage with Docker
 
-```bash
-# Start Docker containers
-cd /workspaces/cwru_data_marshal
-docker compose up -d
+From the umbrella repository:
 
-# Run mock clients
-python3 /workspaces/cwru_data_marshal/.worktrees/mri_data_marshal/clients/mocks/ecg_client.py --count 5
-python3 /workspaces/cwru_data_marshal/.worktrees/mri_data_marshal/clients/mocks/pose_client.py --count 20
+```bash
+docker compose -f docker-compose.demo.yml up
+```
+
+Or run individual mock clients against a running marshal:
+
+```bash
+python3 clients/mocks/ecg_client.py --endpoint http://localhost:8080 --count 10
+python3 clients/mocks/pose_client.py --endpoint http://localhost:8080 --count 20
+python3 clients/mocks/http_tracker.py --endpoint http://localhost:8080
 ```

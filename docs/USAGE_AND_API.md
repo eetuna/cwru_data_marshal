@@ -1,612 +1,185 @@
-# MRI Data Marshal: Usage & API Reference
+# MRI Data Marshal: Usage and API Reference
 
-**Technical reference for integrating with and operating the MRI Data Marshal system**
+Technical reference for operating and integrating with the MRI Data Marshal.
 
 ---
 
-## Entry Points
+## Overview
 
-### MRI Data Marshal
+The MRI Data Marshal is an HTTP server that sits between the MRI scanner and the reconstruction service. It:
 
-The main data ingestion and storage server.
+- Archives all scanner data to canonical libismrmrd HDF5 files (`from_scanner/`)
+- Forwards scanner data to the reconstruction service over HTTP
+- Archives reconstructed images to HDF5 files (`from_reconstruction/`)
+- Serves the latest reconstructed image for live visualization
+- Caches robot pose and slice-repositioning transforms
+- Stays running even if reconstruction fails
+
+---
+
+## Running the Marshal
 
 ```bash
-./build/marshal --http 127.0.0.1:8080 \
-                --ws 127.0.0.1:8090 \
-                --data ./data_mri \
-                --flush-frames 1
+./build/marshal --http 0.0.0.0:8080 \
+                --dump-dir ./data \
+                --recon-url http://recon-host:9002
 ```
 
-### Image Streamer
+### Command-Line Flags
 
-Synthetic frame generator for testing and demos.
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--http host:port` | HTTP listen address | `0.0.0.0:8080` |
+| `--dump-dir PATH` | Root for `from_scanner/` and `from_reconstruction/` directories | required |
+| `--recon-url URL` | Reconstruction service base URL | unset (archival-only) |
+| `--ws-port N` | Optional WebSocket listener port | unset |
 
-```bash
-./build/image_streamer --http http://127.0.0.1:8080 \
-                       --frames 300 \
-                       --dt-ms 50 \
-                       --size 192 \
-                       --nslices 10
-```
-
-### Visualizer Client
-
-Real-time OpenCV display with slice navigation.
-
-```bash
-./build/viz_client --http http://127.0.0.1:8080/v1/mrd/latest
-```
-
-### Robot Marshal
-
-State blackboard for multi-client coordination.
-
-```bash
-./build/robot_marshal_demo 8081
-```
+When `--recon-url` is omitted, the marshal runs in archival-only mode: scanner data is written to HDF5 but not forwarded anywhere.
 
 ---
 
-## Configuration Parameters
+## HTTP API
 
-### MRI Marshal Options
+### Scanner-Facing (archive + forward to recon)
 
-| Parameter | Description | Default | Example |
-|-----------|-------------|---------|---------|
-| `--http` | HTTP server address:port | `127.0.0.1:8080` | `0.0.0.0:9000` |
-| `--ws` | WebSocket server address:port | `127.0.0.1:8090` | `0.0.0.0:9090` |
-| `--data` | HDF5 storage directory | `./data` | `/mnt/fast_ssd/mri` |
-| `--flush-frames` | Flush to disk after N frames | `1` | `10` (for batching) |
+| Method | Path | Body | Response | Description |
+|--------|------|------|----------|-------------|
+| POST | `/header` | ISMRMRD XML bytes | 200 / 400 | Start scan, open HDF5 file |
+| POST | `/config` | Config name bytes | 200 / 409 | Set recon config (after /header) |
+| POST | `/frame` | One ISMRMRD message | 202 / 409 | Archive + forward acquisition/image/waveform |
+| POST | `/close` | empty | 200 | End scan, close HDF5 files |
 
-### Image Streamer Options
+### Recon-Facing (archive only, never forwarded)
 
-| Parameter | Description | Default | Example |
-|-----------|-------------|---------|---------|
-| `--http` | Marshal HTTP endpoint URL | Required | `http://127.0.0.1:8080` |
-| `--frames` | Total frames to generate | `0` (infinite) | `1000` |
-| `--dt-ms` | Interval between frames (ms) | `50` | `100` |
-| `--size` | Frame width and height (square) | `32` | `192` |
-| `--nslices` | Number of Z slices per frame | `4` | `15` |
+| Method | Path | Body | Response | Description |
+|--------|------|------|----------|-------------|
+| POST | `/image` | ISMRMRD image wire bytes | 200 | Archive recon image, update latest file |
 
-### Visualizer Options
+### Query and Control
 
-| Parameter | Description | Default | Example |
-|-----------|-------------|---------|---------|
-| `--http` | Marshal latest frame endpoint | Required | `http://127.0.0.1:8080/v1/mrd/latest` |
-| `--data` | Local data directory (optional) | None | `./cached_data` |
-
-### Robot Marshal Options
-
-| Parameter | Description | Default | Example |
-|-----------|-------------|---------|---------|
-| Port (positional) | HTTP server port | Required | `8081` |
+| Method | Path | Body | Response | Description |
+|--------|------|------|----------|-------------|
+| GET | `/image/latest` | -- | JSON | Path to latest image file |
+| GET | `/transform` | -- | JSON | Read and zero slice delta |
+| PUT | `/transform` | JSON | 200 | Write slice delta |
+| POST | `/pose` | JSON | 200 | Update cached pose |
+| GET | `/pose` | -- | JSON | Read cached pose |
+| GET | `/dump/scanner` | -- | JSON | List scanner HDF5 files |
+| GET | `/dump/recon` | -- | JSON | List recon HDF5 files |
+| GET | `/health` | -- | JSON | Health check |
 
 ---
 
-## HTTP API Reference
+## Scan Lifecycle
 
-### MRI Marshal Endpoints
-
-#### POST /v1/mrd/frame
-
-Append a frame to the active SWMR HDF5 file.
-
-**Request:**
-```http
-POST /v1/mrd/frame HTTP/1.1
-Content-Type: application/octet-stream
-Content-Length: 2211840
-
-<binary frame data>
+```
+Scanner                    Marshal                     Recon
+  |                          |                           |
+  |-- POST /header --------->|-- POST /header ---------->|
+  |-- POST /config --------->|-- POST /config ---------->|
+  |-- POST /frame (acq) ---->|-- POST /frame (acq) ---->|
+  |-- POST /frame (acq) ---->|-- POST /frame (acq) ---->|
+  |          ...              |          ...              |
+  |                          |<--- POST /image ----------|
+  |                          |<--- POST /image ----------|
+  |-- POST /close ---------->|-- POST /close ----------->|
+  |                          |                           |
 ```
 
-**Headers (optional):**
-| Header | Description | Default |
-|--------|-------------|---------|
-| `X-Frame-Width` | Frame width in pixels | Inferred |
-| `X-Frame-Height` | Frame height in pixels | Inferred |
-| `X-Frame-Slices` | Number of Z slices | Inferred |
-| `X-Frame-Dtype` | Data type (`float32`, `uint16`) | `float32` |
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "frame_id": 42,
-  "file": "mrd/session_20240115_143022.h5"
-}
-```
-
-**Error Response:**
-```json
-{
-  "status": "error",
-  "message": "SWMR write failed: file locked"
-}
-```
+The marshal opens `from_scanner/scan_<ts>.h5` on `/header` and closes it on `/close`. The recon sink (`from_reconstruction/scan_<ts>.h5`) is opened lazily on the first `POST /image` and closed by `/close`.
 
 ---
 
-#### POST /v1/mrd/ingest
+## Data Storage
 
-Create a new HDF5 file with a single frame (non-SWMR mode).
+### Directory Layout
 
-**Request:**
-```http
-POST /v1/mrd/ingest HTTP/1.1
-Content-Type: application/octet-stream
-Content-Length: 2211840
-
-<binary frame data>
+```
+${dump_dir}/
+  from_scanner/
+    scan_1712764800.h5       # canonical ISMRMRD HDF5 (acquisitions, images, waveforms)
+    scan_1712764900.h5
+  from_reconstruction/
+    scan_1712764800.h5       # canonical ISMRMRD HDF5 (reconstructed images)
+    latest_image.bin         # standalone file: latest recon image (raw wire bytes)
+    latest_error.png         # written when recon is down
 ```
 
-**Response:**
-```json
-{
-  "status": "ok",
-  "file": "mrd/ingest_20240115_143022.h5",
-  "size_bytes": 2211840
-}
-```
+### HDF5 Format
 
-**Use case:** Archival storage, one-time imports, batch processing.
-
-**Note:** Slower than `/v1/mrd/frame` due to file creation overhead (~1 fps vs ~19 fps).
-
----
-
-#### GET /v1/mrd/latest
-
-Retrieve the most recent frame from the SWMR file.
-
-**Request:**
-```http
-GET /v1/mrd/latest HTTP/1.1
-Accept: application/octet-stream
-```
-
-**Response:**
-```http
-HTTP/1.1 200 OK
-Content-Type: application/octet-stream
-X-Frame-Id: 42
-X-Frame-Width: 192
-X-Frame-Height: 192
-X-Frame-Slices: 10
-X-Frame-Dtype: float32
-
-<binary frame data>
-```
-
-**Response (no frames yet):**
-```http
-HTTP/1.1 204 No Content
-```
-
----
-
-#### GET /health
-
-Server health check.
-
-**Request:**
-```http
-GET /health HTTP/1.1
-```
-
-**Response:**
-```json
-{
-  "status": "healthy",
-  "uptime_seconds": 3600,
-  "frames_written": 1000,
-  "active_readers": 2
-}
-```
-
----
-
-### Robot Marshal Endpoints
-
-#### POST /write/{filename}
-
-Write state data to a named file.
-
-**Request:**
-```http
-POST /write/ecg_data HTTP/1.1
-Content-Type: application/json
-
-{"timestamp": 1705341022, "heart_rate": 72, "rhythm": "normal"}
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "entries": 1
-}
-```
-
----
-
-#### GET /read/{filename}
-
-Read the latest entry from a state file.
-
-**Request:**
-```http
-GET /read/ecg_data HTTP/1.1
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "data": {"timestamp": 1705341022, "heart_rate": 72, "rhythm": "normal"}
-}
-```
-
----
-
-#### GET /read/{filename}?last=N
-
-Read the N most recent entries.
-
-**Request:**
-```http
-GET /read/ecg_data?last=10 HTTP/1.1
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "count": 10,
-  "data": [
-    {"timestamp": 1705341022, "heart_rate": 72},
-    {"timestamp": 1705341021, "heart_rate": 71},
-    ...
-  ]
-}
-```
-
----
-
-## Visualizer Controls
-
-Interactive keyboard controls when the OpenCV window is focused:
-
-| Key | Action | Description |
-|-----|--------|-------------|
-| UP Arrow | Previous slice | Navigate to lower Z index |
-| DOWN Arrow | Next slice | Navigate to higher Z index |
-| ESC | Exit | Close visualizer window |
-
-**Display Information:**
-- Current slice number shown in window title
-- Frame counter displayed on image
-- Grayscale rendering of MRI data
-
----
-
-## Client Integration Examples
-
-### Python Client (Reading Frames)
+All HDF5 files use the canonical libismrmrd layout written via `appendAcquisition`, `appendImage`, and `appendWaveform`. They are standard ISMRMRD datasets readable with:
 
 ```python
-import requests
-import numpy as np
-
-def get_latest_frame(marshal_url="http://127.0.0.1:8080"):
-    """Fetch the latest MRI frame from the marshal."""
-    response = requests.get(f"{marshal_url}/v1/mrd/latest")
-
-    if response.status_code == 204:
-        return None  # No frames available yet
-
-    response.raise_for_status()
-
-    # Parse frame dimensions from headers
-    width = int(response.headers.get("X-Frame-Width", 192))
-    height = int(response.headers.get("X-Frame-Height", 192))
-    slices = int(response.headers.get("X-Frame-Slices", 10))
-    dtype = response.headers.get("X-Frame-Dtype", "float32")
-
-    # Convert binary data to numpy array
-    data = np.frombuffer(response.content, dtype=dtype)
-    frame = data.reshape((slices, height, width))
-
-    return frame
-
-# Usage
-frame = get_latest_frame()
-if frame is not None:
-    print(f"Frame shape: {frame.shape}")
-    print(f"Frame range: [{frame.min():.2f}, {frame.max():.2f}]")
+import ismrmrd
+dset = ismrmrd.Dataset("scan_1712764800.h5", "dataset", False)
+header = dset.read_xml_header()
+acq = dset.read_acquisition(0)
+dset.close()
 ```
 
-### Python Client (Streaming Frames)
+### Standalone Image File
 
-```python
-import requests
-import numpy as np
-import time
+The `latest_image.bin` file contains the raw ISMRMRD image wire format: 198-byte ImageHeader + 8-byte uint64 attribute_string_len + attribute string + pixel data. This is the same byte layout as the `POST /image` request body. The viz client reads this file directly for live display.
 
-def stream_frames(marshal_url="http://127.0.0.1:8080", width=192, height=192, slices=10):
-    """Generate synthetic frames and POST to marshal."""
-    for i in range(100):
-        # Generate synthetic frame (replace with real MRI data)
-        frame = np.random.rand(slices, height, width).astype(np.float32)
+---
 
-        # POST to marshal
-        response = requests.post(
-            f"{marshal_url}/v1/mrd/frame",
-            data=frame.tobytes(),
-            headers={
-                "Content-Type": "application/octet-stream",
-                "X-Frame-Width": str(width),
-                "X-Frame-Height": str(height),
-                "X-Frame-Slices": str(slices),
-                "X-Frame-Dtype": "float32"
-            }
-        )
+## Visualization
 
-        if response.status_code == 200:
-            print(f"Frame {i} sent successfully")
-        else:
-            print(f"Frame {i} failed: {response.text}")
+The viz client polls `GET /image/latest` for the file path, then opens the file from disk:
 
-        time.sleep(0.050)  # 50ms interval
-
-stream_frames()
-```
-
-### C++ Client (Using cpp-httplib)
-
-```cpp
-#include <httplib.h>
-#include <vector>
-#include <iostream>
-
-int main() {
-    httplib::Client cli("127.0.0.1", 8080);
-
-    // Read latest frame
-    auto res = cli.Get("/v1/mrd/latest");
-    if (res && res->status == 200) {
-        int width = std::stoi(res->get_header_value("X-Frame-Width"));
-        int height = std::stoi(res->get_header_value("X-Frame-Height"));
-        int slices = std::stoi(res->get_header_value("X-Frame-Slices"));
-
-        std::cout << "Frame: " << width << "x" << height << "x" << slices << std::endl;
-
-        // Access raw data
-        const float* data = reinterpret_cast<const float*>(res->body.data());
-        size_t num_pixels = width * height * slices;
-        // Process data...
-    }
-
-    return 0;
-}
-```
-
-### Curl Examples
+- If `error` is `false`: reads `latest_image.bin` as ISMRMRD image wire bytes
+- If `error` is `true`: reads `latest_error.png` as a PNG (reconstruction failed)
 
 ```bash
-# Health check
-curl http://127.0.0.1:8080/health
-
-# Get latest frame (save to file)
-curl -o frame.bin http://127.0.0.1:8080/v1/mrd/latest
-
-# Post a frame from file
-curl -X POST \
-  -H "Content-Type: application/octet-stream" \
-  -H "X-Frame-Width: 192" \
-  -H "X-Frame-Height: 192" \
-  -H "X-Frame-Slices: 10" \
-  --data-binary @frame.bin \
-  http://127.0.0.1:8080/v1/mrd/frame
-
-# Robot marshal: write state
-curl -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"position": [1.0, 2.0, 3.0]}' \
-  http://127.0.0.1:8081/write/robot_pose
-
-# Robot marshal: read state
-curl http://127.0.0.1:8081/read/robot_pose
+./build/viz_client --http http://localhost:8080
 ```
+
+No network image delivery. The viz client and marshal share access to the dump directory (via filesystem or Docker volume mount).
 
 ---
 
-## Performance Tuning
+## Reconstruction Interface
 
-### For Real-Time Display (~20 fps)
+The reconstruction service receives forwarded scanner traffic at its own HTTP port:
 
-Optimized for immediate visualization:
+- `POST /header` -- ISMRMRD XML
+- `POST /config` -- config name
+- `POST /frame` -- raw ISMRMRD message (byte-for-byte from scanner)
+- `POST /close` -- end of scan
 
-```bash
-# Marshal: flush every frame for real-time SWMR reads
-./build/marshal --http 127.0.0.1:8080 --flush-frames 1
+The recon service posts results back to the marshal:
 
-# Streamer: 50ms interval is sustainable
-./build/image_streamer --http http://127.0.0.1:8080 \
-                       --dt-ms 50 \
-                       --size 128 \
-                       --nslices 10
-```
+- `POST /image` -- ISMRMRD image wire bytes
 
-**Expected:** ~19 fps display, ~8ms read latency
-
-### For Maximum Throughput
-
-Optimized for data ingestion (sacrifices real-time):
-
-```bash
-# Marshal: batch 10 frames before flush
-./build/marshal --http 127.0.0.1:8080 --flush-frames 10
-
-# Streamer: can request faster intervals (will be limited by HDF5)
-./build/image_streamer --http http://127.0.0.1:8080 \
-                       --dt-ms 20 \
-                       --size 256 \
-                       --nslices 20
-```
-
-**Expected:** 4-8 fps effective, 40-80 MB/s throughput, 100ms+ latency
-
-### For Large Frame Sizes
-
-Optimized for high-resolution MRI:
-
-```bash
-# Use smaller flush intervals to prevent memory buildup
-./build/marshal --http 127.0.0.1:8080 --flush-frames 1
-
-# Larger frames, slower intervals
-./build/image_streamer --http http://127.0.0.1:8080 \
-                       --dt-ms 100 \
-                       --size 512 \
-                       --nslices 32
-
-# Frame size: 512x512x32 = 33.5 MB per frame
-```
-
-**Expected:** ~10 fps due to HDF5 overhead, works but slower
+The marshal is a transparent proxy: the recon sees identical bytes whether data comes from a real scanner or from a mock.
 
 ---
 
-## Data Format Reference
+## Resilience
 
-### HDF5 File Structure
+If the reconstruction service is unreachable:
 
-```
-session_YYYYMMDD_HHMMSS.h5
-├── frames/
-│   ├── frame_000000  [H x W x S float32]
-│   ├── frame_000001  [H x W x S float32]
-│   └── ...
-├── metadata/
-│   ├── timestamp     [N int64]
-│   ├── width         [scalar int32]
-│   ├── height        [scalar int32]
-│   └── slices        [scalar int32]
-└── SWMR_ENABLED     [attribute: bool]
-```
-
-### Reading HDF5 with Python (h5py)
-
-```python
-import h5py
-import numpy as np
-
-with h5py.File("data_mri/mrd/session.h5", "r", swmr=True) as f:
-    # Refresh to see latest SWMR data
-    f.id.refresh()
-
-    # Read frame count
-    frame_count = len(f["frames"])
-    print(f"Frames: {frame_count}")
-
-    # Read latest frame
-    latest = f["frames"][f"frame_{frame_count-1:06d}"][:]
-    print(f"Shape: {latest.shape}")
-```
-
-### Reading HDF5 with MATLAB
-
-```matlab
-% Open file in SWMR mode
-file = H5F.open('data_mri/mrd/session.h5', 'H5F_ACC_RDONLY', 'H5P_DEFAULT');
-
-% Read frame
-frame = h5read('data_mri/mrd/session.h5', '/frames/frame_000000');
-disp(size(frame));
-
-% Close
-H5F.close(file);
-```
+1. `POST /frame` still returns `202` -- the marshal never blocks on recon.
+2. Scanner data continues to be archived to `from_scanner/`.
+3. The marshal writes a "reconstruction failed" PNG and updates `GET /image/latest` to point to it with `"error": true`.
+4. When recon comes back, new frames are forwarded normally.
 
 ---
 
-## WebSocket API (Port 8090)
+## Clients
 
-For real-time streaming without polling.
+### C++ Clients (in `clients/`)
 
-### Connection
+| Binary | Purpose |
+|--------|---------|
+| `kspace_streamer` | Full scanner mock: sends header + config + acquisitions + close |
+| `image_streamer` | Sends synthetic ISMRMRD images via /header + /config + /frame + /close |
+| `viz_client` | Polls /image/latest, reads standalone file, displays with OpenCV |
 
-```javascript
-const ws = new WebSocket('ws://127.0.0.1:8090/ws');
+### Python Mock Clients (in `clients/mocks/`)
 
-ws.onmessage = (event) => {
-    const metadata = JSON.parse(event.data);
-    // Process metadata notification...
-    console.log(metadata.type, metadata.ts);
-};
-```
-
-### Message Format
-
-JSON metadata notifications broadcast on subscribed topics (e.g., `mrd`, `pose`, `bio`).
-
-**Example notification:**
-```json
-{
-  "type": "mrd",
-  "stream_id": "cardiac_scan",
-  "seq": 42,
-  "ts": "2026-01-15T10:30:45.123Z"
-}
-```
-
-Clients read actual frame data via SWMR HDF5 file access, not via WebSocket.
-
----
-
-## File Organization
-
-```
-/workspaces/cwru_data_marshal/
-├── build/                      # Compiled binaries
-│   ├── marshal                 # MRI data marshal server
-│   ├── image_streamer          # Synthetic frame generator
-│   ├── viz_client              # OpenCV visualizer
-│   └── robot_marshal_demo      # State blackboard server
-├── src/                        # Core library source
-├── clients/                    # Client application source
-│   ├── image_streamer/
-│   └── viz_client/
-├── scripts/
-│   ├── run_demo_simultaneous.sh    # Full demo script
-│   ├── run_demo_manual.sh          # Step-by-step demo
-│   └── benchmarks/
-│       ├── mri_marshal_stress_test.sh
-│       └── swmr_continuous_bench.sh
-├── data_mri/                   # MRI HDF5 storage (created at runtime)
-│   └── mrd/
-├── data_robot/                 # Robot state storage (created at runtime)
-└── docs/                       # Documentation
-```
-
----
-
-## Error Codes Reference
-
-| HTTP Code | Meaning | Cause |
-|-----------|---------|-------|
-| 200 | Success | Operation completed |
-| 201 | Created | File ingested successfully |
-| 202 | Accepted | K-space queued for async reconstruction |
-| 204 | No Content | No data available yet (empty cache) |
-| 400 | Bad Request | Invalid frame data, unknown format, or missing parameters |
-| 500 | Server Error | SWMR write failed, disk full, etc. |
-| 501 | Not Implemented | Reconstruction service not configured |
-| 502 | Bad Gateway | Reconstruction service failed |
-| 503 | Service Unavailable | Server overloaded or shutting down |
-
----
-
-*For architecture overview, see [MRI_DATA_MARSHAL_PRESENTATION.md](MRI_DATA_MARSHAL_PRESENTATION.md)*
-*For performance optimization, see [IMPROVEMENTS_AND_OPTIMIZATION.md](IMPROVEMENTS_AND_OPTIMIZATION.md)*
+| Script | Purpose |
+|--------|---------|
+| `ecg_client.py` | Sends ISMRMRD waveforms (ECG) via POST /frame |
+| `pose_client.py` | Sends pose updates via POST /pose |
+| `http_tracker.py` | Polls GET /image/latest and GET /pose |

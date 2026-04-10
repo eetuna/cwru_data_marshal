@@ -4,384 +4,281 @@
 
 ---
 
-## Writing Data (POST)
+## Scanner-Facing Endpoints
 
-### Send MRI Frame (SWMR Mode)
+These endpoints are called by the scanner (or scanner mock) to send data to the marshal.
+Data is archived to `from_scanner/` and forwarded to the reconstruction service.
+
+### POST /header
+
+Start a new scan. Body is the ISMRMRD XML header as raw bytes.
+
 ```bash
-curl -X POST http://localhost:8080/v1/mrd/frame \
-  -H "X-MRD-Stream: acquisition_001" \
+curl -X POST http://localhost:8080/header \
   -H "Content-Type: application/octet-stream" \
-  --data-binary @frame.bin
-```
-```json
-{
-  "path": "/data/mrd/acquisition_001.h5",
-  "stream": "acquisition_001",
-  "frame_index": 42,
-  "flushed": true,
-  "ts": "2024-01-15T10:30:45.123Z",
-  "t_ms": 1705315845123,
-  "dims": [192, 192, 15],
-  "channels": 1,
-  "datatype": "float",
-  "size_bytes": 2211840
-}
+  --data-binary @header.xml
 ```
 
-### Ingest MRD File (Batch Mode)
+**Response:** `200 OK` on success, `400` if XML is malformed.
+
+### POST /config
+
+Send the reconstruction config name (e.g. `simplefft`). Required after `/header`, before `/frame`.
+
 ```bash
-curl -X POST http://localhost:8080/v1/mrd/ingest \
+curl -X POST http://localhost:8080/config \
   -H "Content-Type: application/octet-stream" \
-  --data-binary @file.mrd
-```
-```json
-{
-  "path": "/data/mrd/2024-01-15T10:30:45.123Z_000042.mrd",
-  "ts": "2024-01-15T10:30:45.123Z",
-  "t_ms": 1705315845123,
-  "size_bytes": 2200000,
-  "type": "mrd",
-  "seq": 42,
-  "source": "http"
-}
+  -d "simplefft"
 ```
 
-### Update Pose
+**Response:** `200 OK` on success, `409` if no `/header` received yet.
+
+### POST /frame
+
+Send one ISMRMRD message (acquisition, image, or waveform). The marshal detects the type automatically from the wire format and archives it with the appropriate typed append (appendAcquisition, appendImage, or appendWaveform). The raw body is forwarded unmodified to the reconstruction service.
+
 ```bash
-curl -X POST http://localhost:8080/v1/pose/update \
-  -H "Content-Type: application/json" \
-  -d '{
-    "p": [12.5, 8.3, -4.2],
-    "R": [1,0,0, 0,1,0, 0,0,1],
-    "frame": "scanner",
-    "source": "fk_tracker"
-  }'
-```
-```json
-{
-  "pose": {
-    "p": [12.5, 8.3, -4.2],
-    "R": [1,0,0, 0,1,0, 0,0,1],
-    "frame": "scanner"
-  },
-  "ts": "2024-01-15T10:30:45.123Z",
-  "t_ms": 1705315845123
-}
+curl -X POST http://localhost:8080/frame \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @acquisition.bin
 ```
 
-### Send Biosignal Data
+**Response:** `202 Accepted` (always, even if recon is down). `409` if no `/header` or `/config` received yet.
+
+### POST /close
+
+End the current scan. Finalizes all HDF5 files and clears state. Empty body.
+
 ```bash
-curl -X POST http://localhost:8080/v1/bio/signal \
-  -H "Content-Type: application/json" \
-  -d '{
-    "source": "ecg",
-    "data": [0.1, 0.15, 0.2, 0.18, 0.12],
-    "rate_hz": 250
-  }'
+curl -X POST http://localhost:8080/close
 ```
+
+**Response:** `200 OK`.
 
 ---
 
-## Reading MRI Frame Data
+## Recon-Facing Endpoints
 
-### Get Latest Frame Metadata
+These endpoints are called by the reconstruction service to send results back to the marshal.
+Data is archived to `from_reconstruction/`.
+
+### POST /image
+
+Send a reconstructed image. Body is the ISMRMRD image wire format:
+198-byte ImageHeader + 8-byte little-endian uint64 attribute_string_len + attribute string + pixel data.
+
 ```bash
-curl http://localhost:8080/v1/mrd/latest
+curl -X POST http://localhost:8080/image \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @recon_image.bin
 ```
+
+**Response:** `200 OK`. The image is archived to the recon HDF5 file and written as a standalone binary file for live visualization.
+
+---
+
+## Query and Control Endpoints
+
+### GET /image/latest
+
+Returns the path to the latest reconstructed image file for visualization.
+
+```bash
+curl http://localhost:8080/image/latest
+```
+
+**Normal response:**
+```json
+{"path": "/data/from_reconstruction/latest_image.bin", "error": false}
+```
+
+**When reconstruction has failed:**
+```json
+{"path": "/data/from_reconstruction/latest_error.png", "error": true}
+```
+
+The viz client opens the file directly. When `error` is false, the file contains raw ISMRMRD image wire bytes. When `error` is true, the file is a PNG.
+
+### GET /transform
+
+Returns the current slice-repositioning delta and atomically zeros it (consume-on-read).
+
+```bash
+curl http://localhost:8080/transform
+```
+
 ```json
 {
-  "ts": "2024-01-15T10:30:45.123Z",
-  "t_ms": 1705315845123,
-  "path": "/data/mrd/latest.mrd",
-  "size_bytes": 2200000,
-  "type": "mrd",
-  "seq": 42,
-  "source": "http"
+  "through_plane_mm": 0.0,
+  "readout_mm": 0.0,
+  "phase_mm": 0.0,
+  "rotation_rad": 0.0
 }
 ```
 
-### Get Last N Frames
+### PUT /transform
+
+Write a new slice-repositioning delta. Overwrites any unconsumed value.
+
 ```bash
-curl "http://localhost:8080/v1/mrd/since?last=5"
+curl -X PUT http://localhost:8080/transform \
+  -H "Content-Type: application/json" \
+  -d '{"through_plane_mm": 2.5, "readout_mm": 0.0, "phase_mm": -1.0, "rotation_rad": 0.01}'
 ```
+
+**Response:** `200 OK`.
+
+### POST /pose
+
+Update the cached robot pose.
+
+```bash
+curl -X POST http://localhost:8080/pose \
+  -H "Content-Type: application/json" \
+  -d '{"position": [12.5, 8.3, -4.2], "orientation": [1, 0, 0, 0]}'
+```
+
+**Response:** `200 OK`.
+
+### GET /pose
+
+Returns the latest cached pose.
+
+```bash
+curl http://localhost:8080/pose
+```
+
+```json
+{"position": [12.5, 8.3, -4.2], "orientation": [1, 0, 0, 0]}
+```
+
+### GET /dump/scanner
+
+List archived HDF5 files from the scanner.
+
+```bash
+curl http://localhost:8080/dump/scanner
+```
+
 ```json
 [
-  {"ts": "2024-01-15T10:30:38.000Z", "path": "...", "size_bytes": 2200000, ...},
-  {"ts": "2024-01-15T10:30:39.000Z", "path": "...", "size_bytes": 2200000, ...},
-  {"ts": "2024-01-15T10:30:40.000Z", "path": "...", "size_bytes": 2200000, ...}
+  {"path": "/data/from_scanner/scan_1712764800.h5", "size": 52428800, "modified": "2026-04-10T12:00:00Z"}
 ]
 ```
 
-### Get Frames After Timestamp
+### GET /dump/recon
+
+List archived HDF5 files from the reconstruction service.
+
 ```bash
-curl "http://localhost:8080/v1/mrd/since?ts=2024-01-15T10:30:00.000Z&limit=10"
+curl http://localhost:8080/dump/recon
 ```
 
----
-
-## Reading Pose Data
-
-### Get Current Pose
-```bash
-curl http://localhost:8080/v1/pose/current
-```
 ```json
-{
-  "pose": {
-    "p": [12.5, 8.3, -4.2],
-    "R": [1,0,0, 0,1,0, 0,0,1],
-    "frame": "scanner"
-  },
-  "source": "fk_tracker",
-  "ts": "2024-01-15T10:30:45.123Z"
-}
+[
+  {"path": "/data/from_reconstruction/scan_1712764800.h5", "size": 10485760, "modified": "2026-04-10T12:00:05Z"}
 ```
 
----
+### GET /health
 
-## Reading Biosignal Data
+Health check.
 
-### Get Latest Biosignal
-```bash
-curl http://localhost:8080/v1/bio/latest
-```
-```json
-{
-  "ts": "2024-01-15T10:30:45.123Z",
-  "source": "ecg",
-  "data": [0.1, 0.15, 0.2, 0.18, ...],
-  "rate_hz": 250
-}
-```
-
----
-
-## System Endpoints
-
-### Health Check
 ```bash
 curl http://localhost:8080/health
 ```
+
 ```json
 {"status": "ok"}
 ```
 
-### Server Configuration
-```bash
-curl http://localhost:8080/v1/config
-```
+---
+
+## Scan Lifecycle
+
+A complete scan follows this sequence:
+
+1. `POST /header` -- ISMRMRD XML header (starts scan, opens `from_scanner/*.h5`)
+2. `POST /config` -- recon config name (e.g. `simplefft`)
+3. `POST /frame` (repeated) -- acquisitions, images, waveforms
+4. `POST /close` -- ends scan, closes all HDF5 files
+
+The recon service receives forwarded `/header`, `/config`, `/frame`, and `/close` calls. It posts reconstructed images back via `POST /image`.
 
 ---
 
 ## Client Code Examples
 
-### Python (Reading)
+### Python -- Sending a Scan
+
 ```python
 import requests
 
-BASE = "http://localhost:8080"
+MARSHAL = "http://localhost:8080"
 
-# Get latest frame
-resp = requests.get(f"{BASE}/v1/mrd/latest")
-frame = resp.json()
-print(f"Latest frame: {frame['path']} at {frame['ts']}")
+# 1. Send header
+with open("header.xml", "rb") as f:
+    requests.post(f"{MARSHAL}/header", data=f.read())
 
-# Get last 5 frames
-resp = requests.get(f"{BASE}/v1/mrd/since", params={"last": 5})
-frames = resp.json()
-for f in frames:
-    print(f"  {f['ts']}: {f['path']}")
+# 2. Send config
+requests.post(f"{MARSHAL}/config", data=b"simplefft")
 
-# Get current pose
-resp = requests.get(f"{BASE}/v1/pose/current")
-pose = resp.json()
-print(f"Position: {pose['pose']['p']}")
+# 3. Send frames (acquisitions)
+for acq_bytes in acquisition_list:
+    requests.post(f"{MARSHAL}/frame", data=acq_bytes)
 
-# Get latest biosignal
-resp = requests.get(f"{BASE}/v1/bio/latest")
-bio = resp.json()
-print(f"ECG samples: {len(bio.get('data', []))}")
+# 4. Close scan
+requests.post(f"{MARSHAL}/close")
 ```
 
-### Python (Writing)
+### Python -- Polling for Images
+
 ```python
 import requests
-import struct
-
-BASE = "http://localhost:8080"
-
-# Send MRI frame (SWMR mode) - requires ISMRMRD header + pixel data
-def send_mrd_frame(stream_id, width, height, slices, pixel_data):
-    # Build minimal ISMRMRD ImageHeader (198 bytes)
-    header = bytearray(198)
-    struct.pack_into('<H', header, 0, 1)  # version
-    struct.pack_into('<H', header, 4, 7)  # data_type (float)
-    struct.pack_into('<HHH', header, 100, width, height, slices)  # matrix_size
-    struct.pack_into('<H', header, 106, 1)  # channels
-
-    resp = requests.post(f"{BASE}/v1/mrd/frame",
-        headers={
-            "Content-Type": "application/octet-stream",
-            "X-MRD-Stream": stream_id
-        },
-        data=bytes(header) + pixel_data)
-    return resp.json()
-
-# Update pose
-resp = requests.post(f"{BASE}/v1/pose/update", json={
-    "p": [12.5, 8.3, -4.2],
-    "R": [1,0,0, 0,1,0, 0,0,1],
-    "frame": "scanner",
-    "source": "fk_tracker"
-})
-print(f"Pose updated: {resp.json()}")
-
-# Send biosignal (server generates ts)
-resp = requests.post(f"{BASE}/v1/bio/signal", json={
-    "source": "ecg",
-    "data": [0.1, 0.15, 0.2, 0.18, 0.12],
-    "rate_hz": 250
-})
-print(f"Biosignal sent: {resp.status_code}")
-
-# Ingest MRD file (batch mode)
-with open("file.mrd", "rb") as f:
-    resp = requests.post(f"{BASE}/v1/mrd/ingest",
-        headers={"Content-Type": "application/octet-stream"},
-        data=f.read())
-print(f"Ingested: {resp.json()['path']}")
-```
-
-### C++ (Reading) - using httplib
-```cpp
-#include "httplib.h"
-#include "json.hpp"
-
-using json = nlohmann::json;
-
-int main() {
-    httplib::Client cli("127.0.0.1", 8080);
-
-    // Get latest frame
-    auto res = cli.Get("/v1/mrd/latest");
-    if (res && res->status == 200) {
-        json frame = json::parse(res->body);
-        std::cout << "Latest: " << frame["path"] << " at " << frame["ts"] << "\n";
-    }
-
-    // Get last 5 frames
-    res = cli.Get("/v1/mrd/since?last=5");
-    if (res && res->status == 200) {
-        json frames = json::parse(res->body);
-        for (auto& f : frames) {
-            std::cout << "  " << f["ts"] << ": " << f["path"] << "\n";
-        }
-    }
-
-    // Get current pose
-    res = cli.Get("/v1/pose/current");
-    if (res && res->status == 200) {
-        json pose = json::parse(res->body);
-        auto p = pose["pose"]["p"];
-        std::cout << "Position: [" << p[0] << ", " << p[1] << ", " << p[2] << "]\n";
-    }
-
-    // Get latest biosignal
-    res = cli.Get("/v1/bio/latest");
-    if (res && res->status == 200) {
-        json bio = json::parse(res->body);
-        std::cout << "Biosignal source: " << bio["source"] << "\n";
-    }
-
-    return 0;
-}
-```
-
-### C++ (Writing) - using httplib
-```cpp
-#include "httplib.h"
-#include "json.hpp"
-#include <fstream>
-
-using json = nlohmann::json;
-
-int main() {
-    httplib::Client cli("127.0.0.1", 8080);
-
-    // Update pose
-    json pose_data = {
-        {"p", {12.5, 8.3, -4.2}},
-        {"R", {1,0,0, 0,1,0, 0,0,1}},
-        {"frame", "scanner"},
-        {"source", "fk_tracker"}
-    };
-    auto res = cli.Post("/v1/pose/update", pose_data.dump(), "application/json");
-    if (res && res->status == 200) {
-        std::cout << "Pose updated: " << res->body << "\n";
-    }
-
-    // Send biosignal
-    json bio_data = {
-        {"source", "ecg"},
-        {"data", {0.1, 0.15, 0.2, 0.18, 0.12}},
-        {"rate_hz", 250}
-    };
-    res = cli.Post("/v1/bio/signal", bio_data.dump(), "application/json");
-    if (res && res->status == 200) {
-        std::cout << "Biosignal sent\n";
-    }
-
-    // Ingest MRD file
-    std::ifstream file("file.mrd", std::ios::binary);
-    std::string data((std::istreambuf_iterator<char>(file)),
-                      std::istreambuf_iterator<char>());
-    res = cli.Post("/v1/mrd/ingest", data, "application/octet-stream");
-    if (res && res->status == 201) {
-        json resp = json::parse(res->body);
-        std::cout << "Ingested: " << resp["path"] << "\n";
-    }
-
-    return 0;
-}
-```
-
----
-
-## Polling Pattern
-
-For real-time updates, poll with timestamp tracking:
-
-```python
 import time
-import requests
 
-BASE = "http://localhost:8080"
-last_ts = ""
+MARSHAL = "http://localhost:8080"
+last_path = None
 
 while True:
-    if last_ts:
-        resp = requests.get(f"{BASE}/v1/mrd/since", params={"ts": last_ts})
-    else:
-        resp = requests.get(f"{BASE}/v1/mrd/since", params={"last": 1})
+    resp = requests.get(f"{MARSHAL}/image/latest").json()
+    if resp["path"] != last_path:
+        last_path = resp["path"]
+        if resp["error"]:
+            print(f"Reconstruction failed: {last_path}")
+        else:
+            with open(last_path, "rb") as f:
+                image_bytes = f.read()
+            # Decode ISMRMRD image wire format...
+            print(f"New image: {last_path}")
+    time.sleep(0.1)
+```
 
-    frames = resp.json()
-    for frame in frames:
-        print(f"New frame: {frame['path']}")
-        last_ts = frame['ts']
+### Python -- Pose Updates
 
-    time.sleep(0.05)  # 50ms polling interval
+```python
+import requests
+
+MARSHAL = "http://localhost:8080"
+
+# Write pose
+requests.post(f"{MARSHAL}/pose", json={
+    "position": [12.5, 8.3, -4.2],
+    "orientation": [1, 0, 0, 0]
+})
+
+# Read pose
+pose = requests.get(f"{MARSHAL}/pose").json()
+print(f"Position: {pose['position']}")
 ```
 
 ---
 
-## Response Fields Reference
+## Error Codes
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `ts` | string | ISO8601 timestamp |
-| `t_ms` | number | Unix epoch milliseconds |
-| `path` | string | File path on server |
-| `size_bytes` | number | Data size in bytes |
-| `seq` | number | Sequence number |
-| `source` | string | Data source (http, ws, etc.) |
-| `type` | string | Data type (mrd, etc.) |
+| Code | Meaning |
+|------|---------|
+| 200  | Success |
+| 202  | Accepted (frame queued, recon forwarding is async) |
+| 400  | Bad request (malformed XML header, invalid JSON) |
+| 409  | Conflict (frame sent before header/config, or close without scan) |
+| 500  | Internal server error |
