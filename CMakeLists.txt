@@ -134,4 +134,10 @@ if(BUILD_TESTING)
     Catch2::Catch2WithMain Boost::system Threads::Threads
     nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target} CURL::libcurl)
   add_test(NAME it_http COMMAND it_http)
+
+  add_executable(test_ws_client tests/test_ws_client.cpp src/mrd_sink.cpp)
+  target_link_libraries(test_ws_client PRIVATE
+    Catch2::Catch2WithMain Boost::system Threads::Threads
+    nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target} CURL::libcurl)
+  add_test(NAME test_ws_client COMMAND test_ws_client)
 endif()
