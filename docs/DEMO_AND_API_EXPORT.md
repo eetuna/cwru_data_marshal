@@ -6,13 +6,15 @@ The demo runs a complete simulated MRI-guided robot surgery system with:
 
 | Component | Container | Port | Purpose |
 |-----------|-----------|------|---------|
-| MRI Marshal | cwru-mri-marshal | 8080 (HTTP), 8090 (WS) | Receives/stores MRI frames, ECG, poses |
+| MRI Marshal | cwru-mri-marshal | 8080 (HTTP) | Archives scanner data, forwards to recon, serves image paths |
 | Robot Marshal | cwru-robot-marshal | 8081 | Robot state blackboard for coordination |
-| Image Streamer | cwru-image-streamer | - | Generates synthetic MRI frames (10 fps) |
-| ECG Client | cwru-ecg-client | - | Sends synthetic ECG waveforms (1 Hz) |
-| Pose Client | cwru-pose-client | - | Sends circular trajectory poses (1 Hz) |
-| Viz Client | cwru-viz-client | - | OpenCV window showing MRI slices |
-| Robot Clients | cwru-catheter-tracking, cwru-controller, cwru-planning, cwru-front-end, cwru-surface-tracking | - | Read/write robot state |
+| K-Space Streamer | cwru-kspace-streamer | - | Generates synthetic k-space, POSTs /header+/config+/frame+/close |
+| Image Streamer | cwru-image-streamer | - | Generates synthetic images, POSTs /header+/config+/frame+/close |
+| Mock Recon | cwru-mock-recon | 9002 | Reconstruction service, POSTs /image back to marshal |
+| ECG Client | cwru-ecg-client | - | Sends ISMRMRD waveforms via POST /frame |
+| Pose Client | cwru-pose-client | - | Sends pose updates via POST /pose |
+| Viz Client | cwru-viz-client | - | Polls GET /image/latest, renders with OpenCV |
+| Robot Clients | cwru-robot-clients | - | Read/write robot state channels |
 
 ---
 
@@ -21,76 +23,42 @@ The demo runs a complete simulated MRI-guided robot surgery system with:
 ### Health Check
 ```bash
 curl http://localhost:8080/health
-# {"status":"ok","data":{"uptime_s":123.45}}
+# {"status":"ok"}
 ```
 
-### Stream MRI Frame (Binary)
+### Get Latest Image Path
 ```bash
-# ISMRMRD ImageHeader (198 bytes) + voxel data
-curl -X POST http://localhost:8080/v1/mrd/frame \
-  -H "Content-Type: application/octet-stream" \
-  -H "X-MRD-Stream: my_scan" \
-  --data-binary @frame.bin
+curl http://localhost:8080/image/latest
+# {"path":"/session-data/from_reconstruction/latest_image.bin","error":false}
 ```
 
-### Get Latest Frame Metadata
+### Submit Pose
 ```bash
-curl http://localhost:8080/v1/mrd/latest
-# {"path":"/session-data/mrd/demo_stream-128x128x5-g0000.mrd","frame_index":42,"ts":"2024-01-15T10:30:45.123Z"}
-```
-
-### Get Frames Since Timestamp
-```bash
-curl "http://localhost:8080/v1/mrd/since?ts=2024-01-15T10:30:00Z&limit=100"
-```
-
-### Send ECG/Biosignal Data
-```bash
-curl -X POST http://localhost:8080/v1/bio/signal \
+curl -X POST http://localhost:8080/pose \
   -H "Content-Type: application/json" \
-  -d '{"source":"ecg","data":[0.1,0.15,0.2,0.18],"rate_hz":250}'
-```
-
-### Get Latest ECG
-```bash
-curl http://localhost:8080/v1/bio/latest
-```
-
-### Send Pose Update
-```bash
-curl -X POST http://localhost:8080/v1/pose/update \
-  -H "Content-Type: application/json" \
-  -d '{"p":[12.5,8.3,-4.2],"R":[1,0,0,0,1,0,0,0,1],"frame":"scanner","source":"tracker"}'
+  -d '{"position":[12.5,8.3,-4.2],"orientation":[0,0,0.707,0.707]}'
 ```
 
 ### Get Current Pose
 ```bash
-curl http://localhost:8080/v1/pose/current
+curl http://localhost:8080/pose
 ```
 
----
+### Get/Set Slice Transform
+```bash
+# Read (atomically zeros after read)
+curl http://localhost:8080/transform
 
-## WebSocket API (Port 8090)
-
-Connect to `ws://localhost:8090/ws` for real-time notifications.
-
-### Subscribe to Topics
-```json
-{"subscribe": "mrd"}
-{"subscribe": "bio"}
-{"subscribe": "pose"}
+# Write
+curl -X PUT http://localhost:8080/transform \
+  -H "Content-Type: application/json" \
+  -d '{"through_plane_mm":1.0,"readout_mm":0,"phase_mm":0,"rotation_rad":0}'
 ```
 
-### Notification Messages
-```json
-{
-  "type": "mrd",
-  "stream": "demo_stream",
-  "frame_index": 42,
-  "flushed": true,
-  "ts": "2024-01-15T10:30:45.123Z",
-  "t_ms": 1705315845123
-}
+### List Archived Files
+```bash
+curl http://localhost:8080/dump/scanner
+curl http://localhost:8080/dump/recon
 ```
 
 ---
@@ -99,19 +67,18 @@ Connect to `ws://localhost:8090/ws` for real-time notifications.
 
 ### List Available State Files
 ```bash
-curl http://localhost:8081/files
+curl http://localhost:8081/
 ```
 
 ### Read Latest State
 ```bash
-curl http://localhost:8081/read/robot_status
-curl http://localhost:8081/read/catheter_position
-curl "http://localhost:8081/read/controller_state?last=10"  # last 10 entries
+curl http://localhost:8081/read/tip_position_orientation
+curl "http://localhost:8081/read/controller_state?last=10"
 ```
 
 ### Write State
 ```bash
-curl -X POST http://localhost:8081/write/robot_commands \
+curl -X POST http://localhost:8081/write/user_input \
   -H "Content-Type: application/json" \
   -d '{"sent_at":1705315845123,"client_id":"my_client","values":[1,2,3]}'
 ```
@@ -120,204 +87,82 @@ curl -X POST http://localhost:8081/write/robot_commands \
 
 ## Python Client Examples
 
-### Send ECG Data
+### Submit Pose
 ```python
 import requests
 
-payload = {
-    "source": "ecg",
-    "data": [0.1, 0.15, 0.2, 0.18, 0.12],
-    "rate_hz": 250
-}
-resp = requests.post('http://localhost:8080/v1/bio/signal', json=payload)
+resp = requests.post('http://localhost:8080/pose', json={
+    "position": [12.5, 8.3, -4.2],
+    "orientation": [0, 0, 0.707, 0.707]
+})
 print(resp.json())
 ```
 
-### Send Pose Update
+### Get Latest Image Path
 ```python
 import requests
 
-payload = {
-    "p": [12.5, 8.3, -4.2],          # Position [x, y, z]
-    "R": [1,0,0, 0,1,0, 0,0,1],      # 3x3 rotation matrix (row-major)
-    "frame": "scanner",
-    "source": "fk_tracker"
-}
-resp = requests.post('http://localhost:8080/v1/pose/update', json=payload)
-print(resp.json())
-```
-
-### WebSocket Listener
-```python
-import asyncio
-import websockets
-import json
-
-async def listen():
-    async with websockets.connect('ws://localhost:8090/ws') as ws:
-        await ws.send(json.dumps({"subscribe": "mrd"}))
-        while True:
-            msg = await ws.recv()
-            data = json.loads(msg)
-            print(f"Frame {data.get('frame_index')}: {data.get('path')}")
-
-asyncio.run(listen())
+resp = requests.get('http://localhost:8080/image/latest')
+data = resp.json()
+print(f"Path: {data['path']}, Error: {data['error']}")
 ```
 
 ### Read Robot State
 ```python
 import requests
 
-resp = requests.get('http://localhost:8081/read/catheter_position')
-data = resp.json()
-print(data)
-```
-
----
-
-## C++ Client Example (ISMRMRD Frame)
-
-```cpp
-#include <ismrmrd/ismrmrd.h>
-#include <curl/curl.h>
-
-// Create frame
-ISMRMRD::Image<float> img(128, 128, 5, 1);
-ISMRMRD::ImageHeader& head = img.getHead();
-head.matrix_size[0] = 128;
-head.matrix_size[1] = 128;
-head.matrix_size[2] = 5;
-
-// Fill voxel data
-float* data = img.getDataPtr();
-for (size_t i = 0; i < 128*128*5; i++) {
-    data[i] = /* your value */;
-}
-
-// Pack binary: header + voxels
-std::vector<uint8_t> body(sizeof(ISMRMRD::ImageHeader) + 128*128*5*sizeof(float));
-memcpy(body.data(), &head, sizeof(ISMRMRD::ImageHeader));
-memcpy(body.data() + sizeof(ISMRMRD::ImageHeader), data, 128*128*5*sizeof(float));
-
-// POST to marshal
-CURL* curl = curl_easy_init();
-curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:8080/v1/mrd/frame");
-curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data());
-curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body.size());
-
-struct curl_slist* headers = NULL;
-headers = curl_slist_append(headers, "Content-Type: application/octet-stream");
-headers = curl_slist_append(headers, "X-MRD-Stream: my_scan");
-curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-
-curl_easy_perform(curl);
-curl_easy_cleanup(curl);
+resp = requests.get('http://localhost:8081/read/tip_position_orientation')
+print(resp.json())
 ```
 
 ---
 
 ## Data Files (session-data/)
 
-After running the demo, you'll find:
+After running the demo, you will find:
 
-| File | Contents |
-|------|----------|
-| `mrd/*.mrd` | HDF5 MRI frame data (ISMRMRD format) |
-| `mrd/index.jsonl` | Frame metadata index (JSON lines) |
-| `mrd/latest.json` | Latest frame pointer |
-| `mrd/bio.jsonl` | ECG/biosignal data (JSON lines) |
-| `mrd/poses.jsonl` | Pose updates (JSON lines) |
+| Directory | Contents |
+|-----------|----------|
+| `from_scanner/*.h5` | Archived scanner data (ISMRMRD HDF5, readable after /close) |
+| `from_reconstruction/*.h5` | Archived recon data (ISMRMRD HDF5, readable after /close) |
+| `from_reconstruction/latest_image.bin` | Latest reconstructed image (raw ISMRMRD wire bytes, live view) |
 
 ---
 
 ## Export to USB / Transfer
 
-### Copy Session Data
-```bash
-# Copy all session data
-cp -r session-data/ /media/usb/cwru_session_$(date +%Y%m%d)/
-
-# Or just the MRD files
-cp session-data/mrd/*.mrd /media/usb/
-```
-
-### Export Demo Configuration
-```bash
-# Copy config files needed to run elsewhere
-cp .env.demo /media/usb/
-cp docker-compose.demo.yml /media/usb/
-cp scripts/demo-docker.sh /media/usb/
-```
-
 ### Export Docker Images
 ```bash
-# Save images for offline transfer
-docker save cwru/mri-marshal:latest | gzip > /media/usb/mri-marshal.tar.gz
-docker save cwru/robot-marshal:latest | gzip > /media/usb/robot-marshal.tar.gz
-docker save cwru/image-streamer:latest | gzip > /media/usb/image-streamer.tar.gz
-docker save cwru/ecg-client:latest | gzip > /media/usb/ecg-client.tar.gz
-docker save cwru/pose-client:latest | gzip > /media/usb/pose-client.tar.gz
-docker save cwru/viz-client:latest | gzip > /media/usb/viz-client.tar.gz
-docker save cwru/robot-clients:latest | gzip > /media/usb/robot-clients.tar.gz
-
-# Load on another machine
-docker load < /media/usb/mri-marshal.tar.gz
-# ... etc
+# Full export with all 9 images + docs + scripts
+./scripts/export_usb.sh /media/usb/cwru_marshal_deploy
 ```
 
-### Export All Images at Once
+### Copy Session Data
 ```bash
-#!/bin/bash
-# save-all-images.sh
-IMAGES="cwru/mri-marshal cwru/robot-marshal cwru/image-streamer cwru/ecg-client cwru/pose-client cwru/viz-client cwru/robot-clients"
-for img in $IMAGES; do
-    name=$(echo $img | tr '/' '-')
-    echo "Saving $img..."
-    docker save $img:latest | gzip > "${name}.tar.gz"
-done
+cp -r session-data/ /media/usb/cwru_session_$(date +%Y%m%d)/
 ```
 
 ---
 
 ## External Client Requirements
 
-To write your own client that interacts with the marshals:
-
 ### Minimum Requirements
 - HTTP client library (requests, curl, fetch, etc.)
 - JSON parser
-- Network access to marshal ports (8080, 8081, 8090)
-
-### For MRI Frame Streaming
-- ISMRMRD library (or manual binary packing)
-- Understanding of ISMRMRD ImageHeader struct (198 bytes)
-
-### For Real-time Notifications
-- WebSocket client library
+- Network access to marshal port (8080)
 
 ### Dependencies by Language
 
 **Python:**
 ```
-pip install requests websockets
-pip install ismrmrd  # optional, for MRI frames
+pip install requests
 ```
 
 **C++:**
 ```
-libcurl, boost::beast (HTTP)
+libcurl (HTTP)
 nlohmann/json (JSON)
-ismrmrd (MRI frames)
-```
-
-**JavaScript/Node:**
-```
-npm install axios ws
-```
-
-**MATLAB:**
-```matlab
-% Built-in: webread, webwrite, websocket (R2021a+)
+ismrmrd (for scanner clients)
 ```
 
 ---
@@ -329,28 +174,16 @@ npm install axios ws
    curl http://localhost:8080/health
    ```
 
-2. **Send data:**
+2. **Send pose data:**
    ```bash
-   # ECG
-   curl -X POST http://localhost:8080/v1/bio/signal \
+   curl -X POST http://localhost:8080/pose \
      -H "Content-Type: application/json" \
-     -d '{"source":"ecg","data":[0.5],"rate_hz":1}'
-
-   # Pose
-   curl -X POST http://localhost:8080/v1/pose/update \
-     -H "Content-Type: application/json" \
-     -d '{"p":[0,0,0],"R":[1,0,0,0,1,0,0,0,1],"frame":"world","source":"test"}'
+     -d '{"position":[0,0,0],"orientation":[0,0,0,1]}'
    ```
 
 3. **Read data:**
    ```bash
-   curl http://localhost:8080/v1/bio/latest
-   curl http://localhost:8080/v1/pose/current
-   curl http://localhost:8080/v1/mrd/latest
-   ```
-
-4. **Subscribe to updates:**
-   ```bash
-   websocat ws://localhost:8090/ws
-   # then type: {"subscribe":"mrd"}
+   curl http://localhost:8080/pose
+   curl http://localhost:8080/image/latest
+   curl http://localhost:8080/dump/scanner
    ```

@@ -1,4 +1,4 @@
-# CWRU Data Marshal — Developer Guide
+# CWRU Data Marshal - Developer Guide
 
 How the repository is organized, how to work with branches and worktrees, and how to replace mock clients with real ones.
 
@@ -7,9 +7,9 @@ How the repository is organized, how to work with branches and worktrees, and ho
 ## Branch Architecture
 
 ```
-main                          ← Umbrella branch (docs, Docker configs, scripts — no application code)
-├── mri-data-marshal          ← MRI marshal server + MRI clients (image streamer, viz, k-space)
-└── robot-data-marshal        ← Robot marshal server + robot clients (catheter, controller, planning)
+main                          <- Umbrella branch (docs, Docker configs, scripts - no application code)
+├── mri-data-marshal          <- MRI marshal server + MRI clients (image streamer, viz, k-space)
+└── robot-data-marshal        <- Robot marshal server + robot clients (catheter, controller, planning)
 ```
 
 `main` does **not** contain the marshal server source code or any client code. It is an umbrella/orchestration branch that holds:
@@ -19,17 +19,15 @@ main                          ← Umbrella branch (docs, Docker configs, scripts
 - Build and demo scripts (`scripts/`)
 - Configuration (`.env.demo`, `.gitignore`)
 
-The actual C++ server code and client code live on the domain branches. `main` ties them together for building and running via worktrees.
-
 | Branch | What it contains | Who works on it |
 |--------|-----------------|-----------------|
 | `main` | Docs, Dockerfiles, compose files, scripts (no source code) | Everyone (shared) |
-| `mri-data-marshal` | MRI marshal server (C++), image streamer, k-space streamer, viz client, ECG/pose clients | MRI team |
+| `feature/mri-marshal-rewrite-v2-inner` | MRI marshal server (C++), streamers, viz client, ECG/pose clients | MRI team |
 | `robot-data-marshal` | Robot marshal server (C++), catheter tracking, controller, planning, front-end, surface tracking | Robot team |
 
 **Rules:**
 - Docs, Dockerfiles, and scripts go into `main`, then merge `main` into domain branches
-- Domain branches never merge back into `main` — they only diverge with their own code
+- Domain branches never merge back into `main` -- they only diverge with their own code
 - New domain (e.g. ultrasound) = new branch off `main`
 
 ---
@@ -41,289 +39,161 @@ Git worktrees let you have all branches checked out simultaneously in separate d
 ### Directory Layout
 
 ```
-/workspaces/cwru_data_marshal/                        ← main (checked out here)
+/workspaces/cwru_data_marshal/                        <- main (checked out here)
 /workspaces/cwru_data_marshal/.worktrees/
-    ├── mri_data_marshal/                             ← mri-data-marshal branch
-    └── robot_data_marshal/                           ← robot-data-marshal branch
+    ├── mri_data_marshal/                             <- MRI branch
+    └── robot_data_marshal/                           <- Robot branch
 ```
 
 ### Creating Worktrees
 
 ```bash
 # From the repo root (main branch)
-git worktree add .worktrees/mri_data_marshal mri-data-marshal
-git worktree add .worktrees/robot_data_marshal robot-data-marshal
+git worktree add .worktrees/mri_data_marshal feature/mri-marshal-rewrite-v2-inner
+git worktree add .worktrees/robot_data_marshal robot_data_marshal_with_catheter_system_components
 ```
 
-Or just run the build script — it creates worktrees automatically:
+Or just run the build script -- it creates worktrees automatically:
 
 ```bash
 ./scripts/build-client-images.sh
 ```
-
-### Managing Worktrees
-
-```bash
-# List active worktrees
-git worktree list
-
-# Remove a worktree
-git worktree remove .worktrees/mri_data_marshal
-
-# Clean up stale references
-git worktree prune
-```
-
-### How Docker Builds Use Worktrees
-
-The build script (`scripts/build-client-images.sh`) does:
-
-1. Creates worktrees for `mri-data-marshal` and `robot-data-marshal`
-2. Builds MRI images from the MRI worktree using Dockerfiles in `docker/`
-3. Builds Robot images from the Robot worktree using Dockerfiles in `docker/`
-
-```
-main branch (docker/Dockerfile.mri)  +  mri-data-marshal worktree (source code)  →  cwru/mri-marshal image
-main branch (docker/Dockerfile.robot) +  robot-data-marshal worktree (source code) →  cwru/robot-marshal image
-```
-
-Dockerfiles live on `main`. Source code lives on domain branches. Worktrees bridge them.
 
 ---
 
 ## System Overview
 
 ```
-┌─────────────────┐     POST /v1/mrd/frame      ┌──────────────────────┐
-│  Your Client    │ ──────────────────────────── │  Marshal Server      │
-│  (MRI, Robot,   │     POST /v1/bio/signal      │  :8080 HTTP          │
-│   or custom)    │     POST /v1/pose/update      │  :8090 WebSocket     │
-└─────────────────┘     GET  /v1/mrd/latest       └──────────┬───────────┘
-                                                             │
-                                                    Stores to disk
-                                                             │
-                                                  ┌──────────▼───────────┐
-                                                  │  /session-data/      │
-                                                  │  ├── *.mrd (HDF5)    │
-                                                  │  ├── bio.jsonl       │
-                                                  │  └── poses.jsonl     │
-                                                  └──────────────────────┘
+Scanner / K-Space Streamer
+    |
+    | POST /header, /config, /frame, /close
+    v
+MRI Marshal (:8080)
+    |
+    | forwards to recon (if --recon-url set)
+    v
+Reconstruction Service (:9002)
+    |
+    | POST /image (reconstructed)
+    v
+MRI Marshal
+    |
+    | GET /image/latest -> file path
+    v
+Viz Client (reads file, renders with OpenCV)
 ```
 
-The marshal is a generic HTTP server. It accepts binary MRI data, ECG signals, and pose data. It stores everything to disk. Clients read back via HTTP or direct HDF5 file access.
-
-For the full HTTP flow with reconstruction routing, see [SYSTEM_DIAGRAM_COMPLETE.md](../SYSTEM_DIAGRAM_COMPLETE.md).
-
-For detailed request/response examples of every endpoint, see [HTTP_ROUTING_EXAMPLES.md](../HTTP_ROUTING_EXAMPLES.md).
+The marshal is a generic HTTP server. Scanner clients POST ISMRMRD data via `/header`, `/config`, `/frame`, and `/close`. Marshal archives to canonical ISMRMRD HDF5 and optionally forwards to a reconstruction service. Recon posts images back via `/image`. The viz client polls `/image/latest` for the file path and reads the standalone binary file directly.
 
 ---
 
 ## Replacing Mock Clients with Real Ones
 
-The demo ships with mock clients that generate synthetic data. To integrate real hardware or software, you replace these mocks on your domain branch.
+The demo ships with mock clients that generate synthetic data. To integrate real hardware or software, replace these mocks on your domain branch.
 
 ### What Are the Mock Clients?
 
 | Mock Client | What it does | Docker image | Branch |
 |-------------|-------------|--------------|--------|
-| `image_streamer` | Generates synthetic MRI frames, POSTs to `/v1/mrd/frame` | `cwru/image-streamer` | `mri-data-marshal` |
-| `kspace_streamer` | Generates synthetic k-space data, POSTs to `/v1/mrd/frame` | `cwru/kspace-streamer` | `mri-data-marshal` |
-| `ecg_client` | Generates synthetic ECG, POSTs to `/v1/bio/signal` | `cwru/ecg-client` | `mri-data-marshal` |
-| `pose_client` | Generates synthetic poses, POSTs to `/v1/pose/update` | `cwru/pose-client` | `mri-data-marshal` |
-| `viz_client` | Reads HDF5/SWMR files, displays with OpenCV | `cwru/viz-client` | `mri-data-marshal` |
-| `catheter-tracking` | Simulates catheter position updates | `cwru/robot-clients` | `robot-data-marshal` |
-| `controller` | Simulates robot controller | `cwru/robot-clients` | `robot-data-marshal` |
-| `planning` | Simulates motion planning | `cwru/robot-clients` | `robot-data-marshal` |
-| `front-end` | Simulates user interface | `cwru/robot-clients` | `robot-data-marshal` |
-| `surface-tracking` | Simulates surface tracking | `cwru/robot-clients` | `robot-data-marshal` |
+| `kspace_streamer` | Generates synthetic k-space, POSTs /header+/config+/frame+/close | `cwru/kspace-streamer` | MRI |
+| `image_streamer` | Generates synthetic images, POSTs /header+/config+/frame+/close | `cwru/image-streamer` | MRI |
+| `ecg_client` | Generates ISMRMRD waveforms (ECG), POSTs /frame | `cwru/ecg-client` | MRI |
+| `pose_client` | Generates synthetic poses, POSTs /pose | `cwru/pose-client` | MRI |
+| `viz_client` | Polls GET /image/latest, reads file, displays with OpenCV | `cwru/viz-client` | MRI |
+| `mock_recon` | Reconstruction service, accepts /header+/config+/frame+/close, POSTs /image | `cwru/mock-recon` | MRI |
+| Robot clients | Simulate catheter, controller, planning, front-end, surface tracking | `cwru/robot-clients` | Robot |
 
 ### Steps to Replace a Mock
 
-**Example: Replace the mock `image_streamer` with a real MRI scanner bridge**
+**Example: Replace the mock `kspace_streamer` with a real MRI scanner bridge**
 
 1. **Work on your domain branch:**
    ```bash
    cd .worktrees/mri_data_marshal
-   # or: git checkout mri-data-marshal
    ```
 
-2. **Understand the interface the mock uses.** The image streamer POSTs binary data to the marshal:
+2. **Understand the interface.** The k-space streamer sends:
    ```
-   POST /v1/mrd/frame
-   Header: X-MRD-Stream: <stream_name>
-   Body: ImageHeader (198 bytes) + pixel data
-   ```
-   The marshal auto-detects the data type from the binary header. Your real client just needs to POST in the same format.
-
-3. **Write your real client.** It can be any language. It just needs to make HTTP POST requests:
-   ```python
-   # Example: Real scanner bridge (Python)
-   import requests
-   import struct
-
-   MARSHAL = "http://mri-marshal:8080"
-
-   def send_frame(image_header_bytes, pixel_data):
-       resp = requests.post(
-           f"{MARSHAL}/v1/mrd/frame",
-           headers={
-               "X-MRD-Stream": "cardiac_scan",
-               "Content-Type": "application/octet-stream"
-           },
-           data=image_header_bytes + pixel_data
-       )
-       return resp.status_code == 200
+   POST /header   (ISMRMRD XML header)
+   POST /config   (recon config name, e.g. "simplefft")
+   POST /frame    (one ISMRMRD acquisition per call, repeated)
+   POST /close    (end of scan)
    ```
 
-4. **Update the Dockerfile** (on `main`, in `docker/`):
-   ```dockerfile
-   # docker/Dockerfile.my-scanner
-   FROM python:3.11-slim
-   COPY my_scanner_bridge.py /app/
-   CMD ["python3", "/app/my_scanner_bridge.py"]
-   ```
+3. **Write your real client.** It just needs to make the same HTTP POST requests.
 
-5. **Update `docker-compose.demo.yml`** to use your new image instead of the mock:
-   ```yaml
-   image-streamer:
-     image: cwru/my-scanner:latest    # was cwru/image-streamer
-     command: ["python3", "/app/my_scanner_bridge.py"]
-   ```
+4. **Update the Dockerfile** (on `main`, in `docker/`).
 
-6. **The marshal server does not change.** It accepts data based on binary headers, not client identity.
+5. **Update `docker-compose.demo.yml`** to use your new image.
 
-### Example: Replace viz_client
-
-The viz client reads reconstructed images and displays them. To replace it:
-
-1. The mock viz client reads HDF5/SWMR files directly from the shared volume and polls `/v1/mrd/latest` for metadata.
-
-2. Your real visualization can either:
-   - **Read HDF5 directly** (mount the same `session-data` volume, open with `swmr=True`)
-   - **Poll the HTTP API** (`GET /v1/mrd/latest`, `GET /v1/mrd/since`)
-   - **Use WebSocket** (`ws://mri-marshal:8090`) for real-time frame notifications
-
-3. Write your viz in whatever framework you want (Qt, web browser, Unity, etc.) — the marshal doesn't care what reads the data.
+6. **The marshal server does not change.** It accepts data based on ISMRMRD wire format, not client identity.
 
 ---
 
 ## HTTP API Quick Reference
 
+### MRI Marshal (port 8080)
+
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/health` | GET | Health check |
-| `/v1/mrd/frame` | POST | Stream MRI frame (auto-detects: IMAGE, ACQUISITION, HDF5) |
-| `/v1/mrd/ingest` | POST | Batch upload complete HDF5 file |
-| `/v1/mrd/latest` | GET | Latest frame metadata |
-| `/v1/mrd/since` | GET | Frames since timestamp |
-| `/v1/bio/signal` | POST | Submit ECG/biosignal |
-| `/v1/bio/latest` | GET | Latest biosignal |
-| `/v1/pose/update` | POST | Submit pose data |
-| `/v1/pose/current` | GET | Current pose |
-| `/v1/config` | GET | Server config |
+| `/header` | POST | Start scan (ISMRMRD XML header) |
+| `/config` | POST | Set recon config name |
+| `/frame` | POST | Submit ISMRMRD message (acquisition/image/waveform) |
+| `/close` | POST | End scan |
+| `/image` | POST | Receive reconstructed image from recon |
+| `/image/latest` | GET | Path to latest reconstructed image |
+| `/transform` | GET | Read slice transform delta (consume-on-read) |
+| `/transform` | PUT | Write slice transform delta |
+| `/pose` | POST | Submit pose update |
+| `/pose` | GET | Get latest pose |
+| `/dump/scanner` | GET | List scanner archive files |
+| `/dump/recon` | GET | List recon archive files |
 
 **Robot Marshal** (port 8081):
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/` | GET | Status |
+| `/` | GET | List channels |
 | `/read/{filename}` | GET | Read data channel |
 | `/write/{filename}` | POST | Write data channel |
-
-For complete request/response examples: [HTTP_ROUTING_EXAMPLES.md](../HTTP_ROUTING_EXAMPLES.md)
 
 ---
 
 ## Storage
 
-Images are stored to **disk** as HDF5 files with SWMR (Single-Writer Multiple-Reader) support:
+Data is archived to disk as canonical ISMRMRD HDF5 files:
 
 ```
-/session-data/run_YYYYMMDD_HHMMSS/
-├── mrd/
-│   ├── cardiac_scan.mrd       ← SWMR streaming frames
-│   └── batch_upload.mrd       ← Complete file uploads
-├── bio.jsonl                  ← ECG/biosignals (append-only)
-└── poses.jsonl                ← Pose tracking (append-only)
+${dump_dir}/
+├── from_scanner/
+│   └── scan_<timestamp>.h5      <- Scanner data (acquisitions, images, waveforms)
+├── from_reconstruction/
+│   ├── scan_<timestamp>.h5      <- Reconstructed images
+│   ├── latest_image.bin         <- Standalone file for live viz (raw ISMRMRD wire bytes)
+│   └── latest_error.png         <- Reconstruction-failed indicator (if applicable)
 ```
 
-- `/v1/mrd/frame` → appends to SWMR file (real-time, readers can read while writing)
-- `/v1/mrd/ingest` → saves as complete file (batch upload)
-- Viz clients can open SWMR files concurrently with `h5py.File("...", "r", swmr=True)`
+- `/header` + `/config` + `/frame` + `/close` -> scanner archive
+- `/image` (from recon) -> recon archive + standalone file
+- HDF5 files are readable only after `/close`
+- `latest_image.bin` is updated atomically during the scan for live viewing
 
 ---
 
 ## Docker Compose Files
 
-There are three compose files, each for a different purpose:
-
-### `docker-compose.demo.yml` — Full demo with all mock clients
+### `docker-compose.demo.yml` - Full demo with all mock clients
 
 Runs the complete system: both marshals, all mock clients, and optionally viz.
 
 ```bash
-# Quick demo (runs for DEMO_DURATION seconds, then stops)
-./scripts/demo-docker.sh
-
-# Persistent demo (containers keep running after script exits)
-./scripts/demo-persistent.sh
-
-# Or run manually:
-docker compose --env-file .env.demo -f docker-compose.demo.yml up -d
+# Using the alias
+alias cdd='docker compose --env-file .env.demo -f docker-compose.demo.yml'
+cdd up mri-marshal
 ```
-
-**Services included:**
-
-| Service | Image | Port | Role |
-|---------|-------|------|------|
-| `mri-marshal` | `cwru/mri-marshal` | 8080, 8090 | MRI data server |
-| `robot-marshal` | `cwru/robot-marshal` | 8081 | Robot data server |
-| `image-streamer` | `cwru/image-streamer` | — | Mock MRI frames → marshal |
-| `ecg-client` | `cwru/ecg-client` | — | Mock ECG → marshal |
-| `pose-client` | `cwru/pose-client` | — | Mock poses → marshal |
-| `mock-recon` | `cwru/mock-recon` | 9002 | Mock reconstruction service |
-| `kspace-streamer` | `cwru/kspace-streamer` | — | Mock k-space → marshal |
-| `catheter-tracking` | `cwru/robot-clients` | — | Mock catheter → robot marshal |
-| `controller` | `cwru/robot-clients` | — | Mock controller → robot marshal |
-| `planning` | `cwru/robot-clients` | — | Mock planning → robot marshal |
-| `front-end` | `cwru/robot-clients` | — | Mock UI → robot marshal |
-| `surface-tracking` | `cwru/robot-clients` | — | Mock surface → robot marshal |
-| `viz-client` | `cwru/viz-client` | — | Display (profile: viz) |
 
 Configuration is in `.env.demo` (frame rate, image size, intervals, etc.).
-
-### `docker-compose.recon.yml` — Reconstruction overlay
-
-Extends `docker-compose.demo.yml` to add a real reconstruction service (e.g. Gadgetron) and configure the marshal to forward k-space to it.
-
-```bash
-# Run with reconstruction
-docker compose -f docker-compose.demo.yml -f docker-compose.recon.yml up
-```
-
-This overrides the `mri-marshal` command to include `--recon-endpoint` and adds a `reconstruction-service` container.
-
-### Running individual services in separate terminals
-
-For development and debugging, you can start each service in its own terminal for full log visibility:
-
-```bash
-# Terminal 1: MRI Marshal
-docker compose --env-file .env.demo -f docker-compose.demo.yml up mri-marshal
-
-# Terminal 2: Robot Marshal
-docker compose --env-file .env.demo -f docker-compose.demo.yml up robot-marshal
-
-# Terminal 3: Image Streamer
-docker compose --env-file .env.demo -f docker-compose.demo.yml up image-streamer
-
-# Terminal 4: ECG Client
-docker compose --env-file .env.demo -f docker-compose.demo.yml up ecg-client
-
-# ... etc
-```
-
-For the full terminal-by-terminal walkthrough with expected output, environment variables, and troubleshooting: [MANUAL_TERMINAL_SETUP.md](MANUAL_TERMINAL_SETUP.md)
 
 ---
 
@@ -331,19 +201,7 @@ For the full terminal-by-terminal walkthrough with expected output, environment 
 
 To add a completely new domain (e.g. ultrasound):
 
-1. Create a new branch off `main`:
-   ```bash
-   git checkout main
-   git checkout -b ultrasound-data-marshal
-   ```
-
+1. Create a new branch off `main`
 2. Add your domain-specific clients on that branch
-
-3. Add a worktree entry and Dockerfiles on `main`:
-   ```bash
-   git worktree add .worktrees/ultrasound_data_marshal ultrasound-data-marshal
-   ```
-
-4. Add Dockerfiles in `docker/` and update `build-client-images.sh`
-
-5. The marshal server stays the same — your clients just POST/GET to the same HTTP API
+3. Add a worktree entry and Dockerfiles on `main`
+4. The marshal server stays the same -- your clients just POST/GET to the same HTTP API

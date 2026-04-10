@@ -1,86 +1,105 @@
 # Image Ingest & Reconstruction Flow
 
-The scanner POSTs every frame to **`POST /v1/mrd/frame`**. Marshal sniffs the bytes via `detect_mrd_type()` and routes them:
+## Scanner-side ingest
 
-| Detected type | Action |
+The scanner client posts data through four endpoints:
+
+| Endpoint | Purpose |
 |---|---|
-| `ACQUISITION` (raw k-space) | Async-forward to recon service. Return `202 Accepted` immediately. Recon later POSTs the reconstructed image to `/v1/mrd/callback`. |
-| `IMAGE` (already reconstructed) | Store directly via `mrd_sink->append_frame`. |
-| `HDF5_FILE` (full `.h5`) | Hand off to `mrd::ingest_payload`. |
-| `UNKNOWN` | `400 Bad Request`. |
+| `POST /header` | ISMRMRD XML header for the session. |
+| `POST /config` | Reconstruction config (e.g. `simplefft`). |
+| `POST /frame` | One acquisition or image frame (binary). |
+| `POST /close` | End-of-session marker; flushes and closes the HDF5 file. |
 
-Both the IMAGE path and the recon callback call the **same** `mrd_sink->append_frame`, so reconstructed and direct images are indistinguishable in the store. The only way clients can tell them apart is if the scanner uses a different `X-MRD-Stream` ID for each input.
+Marshal writes every frame into `from_scanner/*.h5`.
 
-Clients consume frames by polling **`GET /v1/mrd/latest`** over HTTP. WebSockets are bound at startup but unused by image clients in the demo / docker compose setup.
+When `--recon-url` is set, each acquisition frame is forwarded to the reconstruction service at `POST /image` on that URL. If `--recon-url` is not set, acquisition frames are stored but no reconstruction occurs.
 
-## Headers on `POST /v1/mrd/frame`
+## Reconstruction callback
 
-| Header | Required | Meaning |
+The recon service posts reconstructed images back to the marshal:
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /image` | Reconstructed image (binary). |
+
+Marshal writes these into `from_reconstruction/*.h5`.
+
+## Query endpoints
+
+Downstream consumers (viz, robot bridge, etc.) read data via:
+
+| Endpoint | Method | Purpose |
 |---|---|---|
-| `X-MRD-Stream` | yes | Stream key. Stored with the frame and forwarded to recon. |
-| `X-MRD-Session` | no | Session id. Stored with the frame and forwarded to recon. |
-| `X-MRD-Reply-To` | no | Scanner URL to receive the reconstructed image back. ACQUISITION-only. Stored in an in-memory map keyed by `job_id`, erased on first use. |
+| `/image/latest` | GET | Latest reconstructed image (binary). |
+| `/transform` | GET | Current transform. |
+| `/pose` | GET | Current pose. |
+| `/health` | GET | Liveness check. |
 
-When forwarding to recon, marshal also sets `X-MRD-Callback` (hardcoded to `http://mri-marshal:8080/v1/mrd/callback`) and `X-MRD-Job-Id` (`<stream>_<iso8601_now>`).
+The viz client polls `GET /image/latest` to display frames. It reads a standalone HDF5 file and does not need concurrent-access modes.
 
-If marshal was started without `--recon-endpoint`, ACQUISITION frames return `501 Not Implemented`.
+## Storage layout
 
-## Run folder
+```
+<dump-dir>/
+  from_scanner/
+    *.h5          -- raw data written by marshal
+  from_reconstruction/
+    *.h5          -- reconstructed images written by marshal
+```
 
-Docker compose creates `/session-data/run_<timestamp>/mrd/` and passes it to marshal via `--data` ([docker-compose.demo.yml:13-21](docker-compose.demo.yml#L13-L21)). Inside `mrd/`:
-
-- MRD HDF5 file(s) — written by `append_frame` for both direct images and recon callbacks.
-- `bio.jsonl` — bio/ECG samples appended by the writer thread.
-- `poses.jsonl` — pose updates appended by the writer thread.
+The `--dump-dir` flag controls the root directory.
 
 ## Diagram
 
 ```
-                      ┌─────────────┐
-                      │   Scanner   │
-                      └──────┬──────┘
-                             │ POST /v1/mrd/frame
-                             ▼
-                ┌──────────────────────────┐
-                │   detect_mrd_type()      │
-                └──┬─────────┬──────────┬──┘
-          ACQUISITION    IMAGE     HDF5_FILE
-                   │         │          │
-                   ▼         │          ▼
-        ┌────────────────┐   │  ┌──────────────┐
-        │ async → recon  │   │  │ ingest_      │
-        │ + 202 to scnr  │   │  │ payload      │
-        └───────┬────────┘   │  └──────┬───────┘
-                │            │         │
-                ▼            │         │
-        ┌────────────────┐   │         │
-        │ Recon Service  │   │         │
-        └───────┬────────┘   │         │
-                │ POST       │         │
-                │ /v1/mrd/   │         │
-                │  callback  │         │
-                ▼            ▼         │
-        ┌──────────────────────────┐   │
-        │ mrd_sink->append_frame   │◄──┘
-        └────────────┬─────────────┘
-                     ▼
-            ┌────────────────┐
-            │ MRD HDF5 store │
-            │ in run folder  │
-            └────────┬───────┘
-                     │ GET /v1/mrd/latest
-                     ▼
-                  Clients
-
-   Side channel: if X-MRD-Reply-To was set, the recon
-   callback also async-POSTs the image back to that URL.
+                      +-------------+
+                      |   Scanner   |
+                      +------+------+
+                             | POST /header
+                             | POST /config
+                             | POST /frame
+                             | POST /close
+                             v
+                  +--------------------------+
+                  |       MRI Marshal        |
+                  |  (--http host:port)      |
+                  +-+----------+-----------+-+
+                    |          |           |
+                    v          |           v
+          +--------------+    |    +----------------+
+          | from_scanner |    |    | GET /image/    |
+          |   /*.h5      |    |    |   latest       |
+          +--------------+    |    | GET /transform |
+                              |    | GET /pose      |
+                              |    | GET /health    |
+                              |    +-------+--------+
+                              |            |
+                   if --recon-url set      v
+                              |         Clients
+                              v         (viz, bridge)
+                    +-----------------+
+                    | Recon Service   |
+                    | POST /image     |
+                    +---------+-------+
+                              |
+                              | POST /image (callback)
+                              v
+                  +--------------------------+
+                  |       MRI Marshal        |
+                  +-----------+--------------+
+                              |
+                              v
+                  +----------------------+
+                  | from_reconstruction/ |
+                  |   *.h5               |
+                  +----------------------+
 ```
 
-## Code references
+## Flags
 
-- Route on detected type: [marshal_http.hpp:562-720](.worktrees/mri_data_marshal/src/marshal_http.hpp#L562-L720)
-- ACQUISITION → recon (async, 202): [marshal_http.hpp:608-695](.worktrees/mri_data_marshal/src/marshal_http.hpp#L608-L695)
-- Recon callback handler: [marshal_http.hpp:367-543](.worktrees/mri_data_marshal/src/marshal_http.hpp#L367-L543)
-- Shared `append_frame` call: [marshal_http.hpp:425](.worktrees/mri_data_marshal/src/marshal_http.hpp#L425)
-- Reply-to lookup/erase/forward: [marshal_http.hpp:457-475](.worktrees/mri_data_marshal/src/marshal_http.hpp#L457-L475)
-- WS bind (optional, unused by image clients): [marshal_main.cpp:297](.worktrees/mri_data_marshal/src/marshal_main.cpp#L297)
+| Flag | Purpose |
+|---|---|
+| `--http host:port` | Address the marshal listens on. |
+| `--recon-url URL` | Where to forward acquisition frames for reconstruction. |
+| `--dump-dir PATH` | Root directory for HDF5 output. |

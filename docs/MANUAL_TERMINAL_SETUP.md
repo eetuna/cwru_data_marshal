@@ -250,7 +250,7 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up mri-marshal
 
 The MRI marshal can forward raw k-space data to an external reconstruction service. This is **optional** - the demo works without it since the image streamer sends pre-reconstructed images.
 
-The `cwru/mock-recon` image has historically been a throwaway stand-in for whatever real reconstruction service is wired into production. It is now backed by **python-ismrmrd-server** (vendored) behind a small HTTP->TCP shim, so it performs real inverse-FFT reconstruction on the k-space it receives. The image tag, service name, port (9002), and HTTP contract are unchanged - swapping it for a real scanner-side recon is still a one-line change (`RECON_ENDPOINT=...`, see below).
+The `cwru/mock-recon` image has historically been a throwaway stand-in for whatever real reconstruction service is wired into production. It is now backed by **python-ismrmrd-server** (vendored) behind a small HTTP server, so it performs real inverse-FFT reconstruction on the k-space it receives. The image tag, service name, port (9002), and HTTP contract are unchanged - swapping it for a real scanner-side recon is still a one-line change (`RECON_ENDPOINT=...`, see below).
 
 #### When You Need Reconstruction
 
@@ -264,14 +264,14 @@ The simulator (`cwru/mock-recon`) is designed to be a drop-in placeholder. To us
 1. Stop the `mock-recon` container.
 2. Start marshal with `RECON_ENDPOINT=http://<real-recon-host>:<port>` pointing at the real service.
 
-Nothing else changes - marshal, viz-client, kspace-streamer, and the manual terminal commands in this guide all keep working as-is. The contract marshal uses (`POST /reconstruct` out, callback to `POST /v1/mrd/callback` in) is identical regardless of what service is behind the endpoint.
+Nothing else changes - marshal, viz-client, kspace-streamer, and the manual terminal commands in this guide all keep working as-is. The contract marshal uses (`POST /frame` out, callback to `POST /image` in) is identical regardless of what service is behind the endpoint.
 
 #### Data Flow with Reconstruction (Async/Callback)
 
 ```
 K-Space Streamer                  MRI Marshal                    Recon Service
      │                                 │                              │
-     │ POST /v1/mrd/frame              │                              │
+     │ POST /frame              │                              │
      │ (raw k-space)                   │                              │
      │────────────────────────────────>│                              │
      │                                 │ Detects ACQUISITION          │
@@ -281,9 +281,9 @@ K-Space Streamer                  MRI Marshal                    Recon Service
      │<────────────────────────────────│                              │
      │                                 │                              │
      │                                 │ [Detached Thread]            │
-     │                                 │ POST /reconstruct            │
-     │                                 │ X-MRD-Callback: http://...   │
-     │                                 │ X-MRD-Job-Id: xxx            │
+     │                                 │ POST /frame            │
+     │                                 │ Content-Type: http://...   │
+     │                                 │ Content-Length: xxx            │
      │                                 │─────────────────────────────>│
      │                                 │                              │
      │                                 │ HTTP 202 Accepted            │
@@ -293,11 +293,11 @@ K-Space Streamer                  MRI Marshal                    Recon Service
      │                                 │   [Background Processing]    │
      │                                 │   (~0.5s simulated delay)    │
      │                                 │                              │
-     │                                 │ POST /v1/mrd/callback        │
+     │                                 │ POST /image        │
      │                                 │ (reconstructed image)        │
      │                                 │<─────────────────────────────│
      │                                 │                              │
-     │                                 │ Store to SWMR                │
+     │                                 │ Store to HDF5                │
      │                                 │ WebSocket emit "mrd"         │
      │                                 │ HTTP 200 OK                  │
      │                                 │─────────────────────────────>│
@@ -305,7 +305,7 @@ K-Space Streamer                  MRI Marshal                    Recon Service
 
 **Key Features:**
 - **Non-blocking**: K-space sender gets HTTP 202 immediately (doesn't wait for reconstruction)
-- **Callback-based**: Recon service POSTs result back when done via `/v1/mrd/callback`
+- **Callback-based**: Recon service POSTs result back when done via `/image`
 - **Event-driven**: Viz clients get WebSocket notification when image arrives (no polling needed)
 - **Concurrent**: Multiple k-space frames can reconstruct simultaneously
 
@@ -313,18 +313,18 @@ K-Space Streamer                  MRI Marshal                    Recon Service
 
 ### Clearing the Latest Frame Cache (Session End)
 
-Marshal caches the most recent stored frame in memory so `GET /v1/mrd/latest` can serve it instantly. The cache is sticky for the lifetime of the marshal process - after a producer stops, the last frame keeps showing up until marshal is restarted or the cache is explicitly cleared.
+Marshal caches the most recent stored frame in memory so `GET /image/latest` can serve it instantly. The cache is sticky for the lifetime of the marshal process - after a producer stops, the last frame keeps showing up until marshal is restarted or the cache is explicitly cleared.
 
 To explicitly clear it, call:
 
 ```bash
-curl -X DELETE http://localhost:8080/v1/mrd/latest
+curl -X DELETE http://localhost:8080/image/latest
 ```
 
 Effects:
 
-- Next `GET /v1/mrd/latest` returns `204 No Content` until the next frame is POSTed.
-- HDF5 files on disk, `/v1/mrd/since` history, WebSocket subscribers, and every other marshal state are unaffected - only the in-memory "latest" cache is wiped.
+- Next `GET /image/latest` returns `204 No Content` until the next frame is POSTed.
+- HDF5 files on disk, `/dump/scanner` history, WebSocket subscribers, and every other marshal state are unaffected - only the in-memory "latest" cache is wiped.
 - The coordinator safety poller (`clients/bridge/coordinator.py`) is unaffected: it ignores non-200 responses and only acts on observed fault envelopes, so a cleared cache just means it waits for the next real frame.
 
 Typical callers:
@@ -411,7 +411,7 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up ecg-client
 
 **Configuration:**
 - Sample rate: `ECG_INTERVAL` (default: 0.5s = 2 Hz)
-- Sends to: http://mri-marshal:8080/v1/bio/signal
+- Sends to: http://mri-marshal:8080/frame
 
 ---
 
@@ -435,13 +435,13 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up pose-client
 
 **Configuration:**
 - Update rate: `POSE_INTERVAL` (default: 0.1s = 10 Hz)
-- Sends to: http://mri-marshal:8080/v1/pose/update
+- Sends to: http://mri-marshal:8080/pose
 
 ---
 
 ### Terminal 6: Reconstruction Service (cwru/mock-recon)
 
-Runs the reconstruction service that marshal forwards k-space to. Despite the legacy image name `cwru/mock-recon`, this is now real reconstruction (`python-ismrmrd-server` + HTTP->TCP shim) rather than a gradient stub. Required if you want to test the full reconstruction pipeline with the k-space streamer.
+Runs the reconstruction service that marshal forwards k-space to. Despite the legacy image name `cwru/mock-recon`, this is now real reconstruction (`python-ismrmrd-server` + HTTP server) rather than a gradient stub. Required if you want to test the full reconstruction pipeline with the k-space streamer.
 
 ```bash
 cd /path/to/cwru_data_marshal
@@ -462,7 +462,7 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up mock-recon
 - Health: GET http://localhost:9002/health
 
 **How it works:**
-1. Receives k-space data with `X-MRD-Callback` header on HTTP `/reconstruct`.
+1. Receives k-space data with `Content-Type` header on HTTP `/reconstruct`.
 2. Returns HTTP 202 immediately (non-blocking).
 3. In a background thread: parses the acquisitions, opens a TCP connection to `python-ismrmrd-server` on port 9004 (inside the container), sends CONFIG + metadata XML + acquisition stream.
 4. `python-ismrmrd-server` runs `simplefft` (real 2D inverse FFT per slice) and streams images back.
@@ -529,7 +529,7 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up kspace-streame
 **Configuration:**
 - Frame rate: `KSPACE_INTERVAL` (default: 100ms = 10fps)
 - Slices per volume: `KSPACE_SLICES` (default: 5)
-- Sends multi-slice raw AcquisitionHeader data to: http://mri-marshal:8080/v1/mrd/frame
+- Sends multi-slice raw AcquisitionHeader data to: http://mri-marshal:8080/frame
 
 **Note:** To test the full reconstruction flow, ensure the mock-recon service (Terminal 6) is running. The marshal will automatically forward k-space data to the reconstruction endpoint.
 
@@ -561,7 +561,7 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml --profile viz up 
 
 **Configuration:**
 - Refresh rate: `VIZ_INTERVAL` (default: 0.067s ≈ 15 fps)
-- Reads from: http://mri-marshal:8080/v1/mrd/latest
+- Reads from: http://mri-marshal:8080/image/latest
 
 **Note:** Display FPS is lower than actual data ingestion FPS due to Docker X11 forwarding overhead. The marshals still process data at full speed (20+ fps).
 
@@ -619,13 +619,13 @@ docker compose --env-file .env.custom -f docker-compose.demo.yml up <service>
 curl http://localhost:8080/health
 
 # Get latest MRI frame metadata
-curl http://localhost:8080/v1/mrd/latest | jq
+curl http://localhost:8080/image/latest | jq
 
 # Get latest ECG data
-curl http://localhost:8080/v1/bio/latest | jq
+curl http://localhost:8080/health | jq
 
 # Get current pose
-curl http://localhost:8080/v1/pose/current | jq
+curl http://localhost:8080/pose | jq
 ```
 
 ### Robot Marshal API
@@ -668,7 +668,7 @@ ws.onmessage = (event) => {
   if (data.type === 'mrd') {
     console.log('New image available:', data.frame_index);
     // Fetch the actual image
-    fetch(`http://mri-marshal:8080/v1/mrd/latest`)
+    fetch(`http://mri-marshal:8080/image/latest`)
       .then(r => r.json())
       .then(img => displayImage(img));
   }

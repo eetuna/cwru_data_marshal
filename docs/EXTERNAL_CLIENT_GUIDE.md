@@ -106,15 +106,15 @@ docker run -d --name robot-marshal \
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health check |
-| `/v1/bio/signal` | POST | Submit ECG/physiological data |
-| `/v1/bio/latest` | GET | Get latest biosignal |
-| `/v1/pose/update` | POST | Submit position/orientation data |
-| `/v1/pose/current` | GET | Get current pose |
-| `/v1/mrd/frame` | POST | Stream MRI frame (SWMR mode) |
-| `/v1/mrd/ingest` | POST | Batch ingest MRD file |
-| `/v1/mrd/latest` | GET | Get latest MRI frame metadata |
-| `/v1/mrd/since` | GET | Get frames after timestamp |
-| `/v1/config` | GET | Server configuration |
+| `/frame` | POST | Submit ECG/physiological data |
+| `/health` | GET | Get latest biosignal |
+| `/pose` | POST | Submit position/orientation data |
+| `/pose` | GET | Get current pose |
+| `/frame` | POST | Stream MRI frame (HDF5 mode) |
+| `/frame` | POST | Batch ingest MRD file |
+| `/image/latest` | GET | Get latest MRI frame metadata |
+| `/dump/scanner` | GET | Get frames after timestamp |
+| `/health` | GET | Server configuration |
 
 ### WebSocket (Real-time Streaming)
 
@@ -246,7 +246,7 @@ ecg_data = {
     "data": [0.1, 0.2, 0.15, 0.25, 0.18],
     "rate_hz": 250.0
 }
-ok, resp = post_json(f"{MRI_MARSHAL}/v1/bio/signal", ecg_data)
+ok, resp = post_json(f"{MRI_MARSHAL}/frame", ecg_data)
 print(f"ECG sent: {ok}")
 
 # Send pose update
@@ -256,7 +256,7 @@ pose_data = {
     "frame": "scanner",
     "source": "my_tracker"
 }
-ok, resp = post_json(f"{MRI_MARSHAL}/v1/pose/update", pose_data)
+ok, resp = post_json(f"{MRI_MARSHAL}/pose", pose_data)
 print(f"Pose sent: {ok}")
 
 # Read robot data
@@ -290,7 +290,7 @@ print("Robot Marshal:", requests.get(f"{ROBOT_MARSHAL}/").text[:50])
 
 # Send ECG stream
 for i in range(10):
-    resp = requests.post(f"{MRI_MARSHAL}/v1/bio/signal", json={
+    resp = requests.post(f"{MRI_MARSHAL}/frame", json={
         "source": "ecg_monitor",
         "data": [0.1 + i*0.01] * 100,  # 100 samples
         "rate_hz": 100.0
@@ -305,7 +305,7 @@ while True:
     x = 50 * math.cos(t)
     y = 50 * math.sin(t)
 
-    resp = requests.post(f"{MRI_MARSHAL}/v1/pose/update", json={
+    resp = requests.post(f"{MRI_MARSHAL}/pose", json={
         "p": [x, y, 100.0],
         "R": [1, 0, 0, 0, 1, 0, 0, 0, 1],
         "frame": "scanner",
@@ -327,15 +327,15 @@ import requests
 MRI = "http://localhost:8080"
 
 # Get latest biosignal
-bio = requests.get(f"{MRI}/v1/bio/latest").json()
+bio = requests.get(f"{MRI}/health").json()
 print(f"Latest ECG: {len(bio.get('data', []))} samples from {bio.get('source')}")
 
 # Get current pose
-pose = requests.get(f"{MRI}/v1/pose/current").json()
+pose = requests.get(f"{MRI}/pose").json()
 print(f"Current pose: {pose.get('pose', {}).get('p')}")
 
 # Get latest MRI frame
-frame = requests.get(f"{MRI}/v1/mrd/latest").json()
+frame = requests.get(f"{MRI}/image/latest").json()
 print(f"Latest frame: {frame.get('path')} at {frame.get('ts')}")
 
 # Poll for new frames
@@ -343,7 +343,7 @@ import time
 last_ts = ""
 while True:
     params = {"ts": last_ts} if last_ts else {"last": 1}
-    frames = requests.get(f"{MRI}/v1/mrd/since", params=params).json()
+    frames = requests.get(f"{MRI}/dump/scanner", params=params).json()
     for f in frames:
         print(f"New frame: {f['path']}")
         last_ts = f['ts']
@@ -388,7 +388,7 @@ int main() {
         {"data", {0.1, 0.2, 0.15, 0.25, 0.18}},
         {"rate_hz", 250.0}
     };
-    res = mri.Post("/v1/bio/signal", ecg.dump(), "application/json");
+    res = mri.Post("/frame", ecg.dump(), "application/json");
     if (res && res->status == 200) {
         std::cout << "ECG sent successfully\n";
     }
@@ -400,7 +400,7 @@ int main() {
         {"frame", "scanner"},
         {"source", "cpp_tracker"}
     };
-    res = mri.Post("/v1/pose/update", pose.dump(), "application/json");
+    res = mri.Post("/pose", pose.dump(), "application/json");
     if (res && res->status == 200) {
         std::cout << "Pose sent: " << res->body << "\n";
     }
@@ -424,7 +424,7 @@ int main() {
     }
 
     // Get latest MRI frame
-    res = mri.Get("/v1/mrd/latest");
+    res = mri.Get("/image/latest");
     if (res && res->status == 200) {
         json frame = json::parse(res->body);
         std::cout << "Latest frame: " << frame["path"] << "\n";
@@ -467,7 +467,7 @@ int main() {
             {"source", "cpp_trajectory"}
         };
 
-        auto res = cli.Post("/v1/pose/update", pose.dump(), "application/json");
+        auto res = cli.Post("/pose", pose.dump(), "application/json");
         if (res && res->status == 200) {
             std::cout << "t=" << t << " pos=[" << x << ", " << y << ", " << z << "]\n";
         }
@@ -490,23 +490,23 @@ int main() {
 curl http://localhost:8080/health
 
 # Send ECG data
-curl -X POST http://localhost:8080/v1/bio/signal \
+curl -X POST http://localhost:8080/frame \
   -H "Content-Type: application/json" \
   -d '{"source": "test", "data": [0.1, 0.2, 0.3], "rate_hz": 100}'
 
 # Send pose
-curl -X POST http://localhost:8080/v1/pose/update \
+curl -X POST http://localhost:8080/pose \
   -H "Content-Type: application/json" \
   -d '{"p": [10, 20, 30], "R": [1,0,0,0,1,0,0,0,1], "frame": "scanner"}'
 
 # Get latest biosignal
-curl http://localhost:8080/v1/bio/latest
+curl http://localhost:8080/health
 
 # Get current pose
-curl http://localhost:8080/v1/pose/current
+curl http://localhost:8080/pose
 
 # Get latest MRI frame
-curl http://localhost:8080/v1/mrd/latest
+curl http://localhost:8080/image/latest
 ```
 
 ### Robot Marshal
@@ -531,7 +531,7 @@ curl http://localhost:8081/read/forward_kinematics
 
 ## HDF5 Data Files
 
-The MRI Marshal stores image data in HDF5 format with SWMR (Single-Writer Multiple-Reader) support.
+The MRI Marshal stores image data in HDF5 format with canonical ISMRMRD HDF5 format.
 
 ### File Location
 
@@ -551,8 +551,8 @@ The MRI Marshal stores image data in HDF5 format with SWMR (Single-Writer Multip
 import h5py
 import numpy as np
 
-# Open in SWMR mode for concurrent reading
-with h5py.File("./data/mri_data/acquisition_001.h5", "r", swmr=True) as f:
+# Open in HDF5 mode for concurrent reading
+with h5py.File("./data/mri_data/acquisition_001.h5", "r", hdf5=True) as f:
     # List datasets
     print("Datasets:", list(f.keys()))
 
@@ -567,10 +567,10 @@ with h5py.File("./data/mri_data/acquisition_001.h5", "r", swmr=True) as f:
             print(f"  {key}: {f['metadata'].attrs[key]}")
 ```
 
-### SWMR Considerations
+### HDF5 Considerations
 
 - Set `HDF5_USE_FILE_LOCKING=FALSE` environment variable
-- Open files with `swmr=True` for reading while marshal is writing
+- Open files with `hdf5=True` for reading while marshal is writing
 - Use `dataset.refresh()` to see latest data in long-running readers
 
 ---
