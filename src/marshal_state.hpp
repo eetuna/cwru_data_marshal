@@ -92,6 +92,9 @@ struct MarshalState {
     // WS emit hook (set by WsServer on init, optional)
     std::function<void(const std::string&)> ws_emit = [](const std::string&) {};
 
+    // MRD TCP image push hook (set by MrdTcpListener, pushes recon images to scanner)
+    std::function<void(const void*, size_t)> mrd_push_image = [](const void*, size_t) {};
+
     // ------ Methods ------
 
     // Close both sinks and clear per-scan state. Ready for next POST /header.

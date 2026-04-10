@@ -302,6 +302,13 @@ static auto handle_post_image(const http::request<Body>& req, MarshalState& stat
         LOG_WARN("Standalone write failed: " << e.what());
     }
 
+    // Push image to scanner via MRD TCP (if connected)
+    try {
+        state.mrd_push_image(data, size);
+    } catch (const std::exception& e) {
+        LOG_WARN("MRD push to scanner failed: " << e.what());
+    }
+
     return json_response(req, http::status::ok, {{"status", "ok"}});
 }
 

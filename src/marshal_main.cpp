@@ -24,6 +24,7 @@
 #include "marshal_state.hpp"
 #include "marshal_ws.hpp"
 #include "mrd_io.hpp"
+#include "mrd_tcp_listener.hpp"
 #include "recon_forwarder.hpp"
 
 namespace fs = std::filesystem;
@@ -133,6 +134,7 @@ int main(int argc, char** argv)
     std::string dump_dir  = "./data";
     std::string recon_url;
     uint16_t ws_port = 0;
+    uint16_t mrd_port = 0;
     std::size_t max_body_size = 128ULL * 1024ULL * 1024ULL;
 
     for (int i = 1; i < argc; ++i) {
@@ -141,6 +143,8 @@ int main(int argc, char** argv)
             http_bind = argv[++i];
         else if (a == "--ws-port" && i + 1 < argc)
             ws_port = static_cast<uint16_t>(std::stoi(argv[++i]));
+        else if (a == "--mrd-port" && i + 1 < argc)
+            mrd_port = static_cast<uint16_t>(std::stoi(argv[++i]));
         else if (a == "--recon-url" && i + 1 < argc)
             recon_url = argv[++i];
         else if (a == "--dump-dir" && i + 1 < argc)
@@ -193,6 +197,7 @@ int main(int argc, char** argv)
             << " max_body=" << max_body_size;
         if (!recon_url.empty()) cfg << " recon-url=" << recon_url;
         if (ws_port > 0) cfg << " ws-port=" << ws_port;
+        if (mrd_port > 0) cfg << " mrd-port=" << mrd_port;
         LOG_INFO(cfg.str());
     }
 
@@ -200,6 +205,17 @@ int main(int argc, char** argv)
     net::io_context ioc{1};
     tcp::acceptor acceptor{ioc, {net::ip::make_address(http_host), http_port}};
     acceptor.set_option(net::socket_base::reuse_address(true));
+
+    // MRD TCP listener for real scanner (--mrd-port)
+    std::unique_ptr<mrd::MrdTcpListener> mrd_listener;
+    if (mrd_port > 0) {
+        mrd_listener = std::make_unique<mrd::MrdTcpListener>(
+            ioc, mrd_port, state, forwarder.get());
+        // Hook: when recon POSTs /image, push it to scanner via MRD TCP
+        state.mrd_push_image = [&mrd_listener](const void* data, size_t len) {
+            if (mrd_listener) mrd_listener->push_image_to_scanner(data, len);
+        };
+    }
 
     // Optional WS server
     std::unique_ptr<WsServer> ws_server;
