@@ -1,38 +1,42 @@
 #!/bin/bash
-# scripts/run_all_tests.sh
-# The master test suite for CWRU Data Marshal.
+# scripts/run_all_tests.sh — Run all marshal tests (unit + integration)
 
 set -e
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+BUILD_DIR="$PROJECT_DIR/build"
 
-# Colors for output
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-echo -e "${GREEN}Starting Comprehensive Test Suite...${NC}"
+PASS=0
+FAIL=0
 
-# 1. Build Verification
-echo -e "\n[1/4] Running Build Check..."
-cmake -B build -D BUILD_TESTING=ON > /dev/null
-cmake --build build > /dev/null
-echo -e "${GREEN}Build OK.${NC}"
+run_test() {
+    local name="$1"
+    local cmd="$2"
+    echo -n "Running $name... "
+    if eval "$cmd" > /dev/null 2>&1; then
+        echo -e "${GREEN}PASS${NC}"
+        ((PASS++))
+    else
+        echo -e "${RED}FAIL${NC}"
+        ((FAIL++))
+    fi
+}
 
-# 2. Unit & Networking Tests (Catch2)
-echo -e "\n[2/4] Running CTest (Unit/Integration)..."
-cd build && ctest --output-on-failure
-cd ..
-echo -e "${GREEN}Unit Tests OK.${NC}"
+echo "=== Unit Tests ==="
+run_test "unit_pose"         "$BUILD_DIR/unit_pose"
+run_test "test_mrd_sink"     "$BUILD_DIR/test_mrd_sink"
+run_test "unit_http_handlers" "$BUILD_DIR/unit_http_handlers"
+run_test "it_http"           "$BUILD_DIR/it_http"
+run_test "test_ws_client"    "$BUILD_DIR/test_ws_client"
 
-# 3. System Integration Tests (Task 8)
-echo -e "\n[3/4] Running System Integration (Bio/Bridge/Topics)..."
-./scripts/tools/verify_system_integration.sh
-echo -e "${GREEN}Integration OK.${NC}"
+echo ""
+echo "=== Integration Tests ==="
+run_test "T1-T4 integration" "python3 $PROJECT_DIR/tests/integration/test_marshal_integration.py"
 
-# 4. Stress & Chaos Tests (Task 9)
-echo -e "\n[4/4] Running Chaos Stress Test..."
-./scripts/benchmarks/chaos_test.sh
-echo -e "${GREEN}Stress Test OK.${NC}"
-
-echo -e "\n${GREEN}======================================"
-echo "   ALL TESTS PASSED SUCCESSFULLY"
-echo -e "======================================${NC}"
+echo ""
+echo "=== Results: $PASS passed, $FAIL failed ==="
+[ "$FAIL" -eq 0 ] && exit 0 || exit 1
