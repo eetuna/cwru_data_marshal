@@ -6,9 +6,9 @@
  * The scanner connects via raw TCP and speaks the MRD wire protocol
  * (see python-ismrmrd-server/connection.py + constants.py).
  *
- * Marshal reads messages, archives, forwards to recon via HTTP.
- * When recon POSTs /image back, marshal pushes the image to the
- * scanner over the same TCP socket using MRD wire format.
+ * Marshal reads messages, archives, forwards to recon via MRD TCP.
+ * When recon sends images back, marshal pushes them to the scanner
+ * over the same TCP socket using MRD wire format.
  */
 
 #pragma once
@@ -148,7 +148,7 @@ private:
                     std::lock_guard<std::mutex> lk(state_.scan_mtx);
                     state_.current_config = config;
                     state_.config_received.store(true);
-                    if (forwarder_) forwarder_->post_config(config);
+                    if (forwarder_) forwarder_->post_config_text(config);
                     break;
                 }
 
@@ -220,7 +220,7 @@ private:
                         }
                     }
 
-                    // Forward raw bytes to recon
+                    // Forward raw bytes to recon with correct tag
                     if (forwarder_) {
                         std::string body(ACQUISITION_HEADER_BYTES + traj_bytes + sample_bytes, '\0');
                         std::memcpy(body.data(), &ahdr, ACQUISITION_HEADER_BYTES);
@@ -229,7 +229,7 @@ private:
                                         traj.data(), traj_bytes);
                         std::memcpy(body.data() + ACQUISITION_HEADER_BYTES + traj_bytes,
                                     samples.data(), sample_bytes);
-                        forwarder_->post_frame(body);
+                        forwarder_->post_frame(MRD_MESSAGE_ISMRMRD_ACQUISITION, body);
                     }
                     break;
                 }
@@ -270,7 +270,7 @@ private:
                         std::memcpy(body.data()+o, &attr_len, 8); o += 8;
                         if (attr_len > 0) { std::memcpy(body.data()+o, attr.data(), attr_len); o += attr_len; }
                         std::memcpy(body.data()+o, pixels.data(), pixel_bytes);
-                        forwarder_->post_frame(body);
+                        forwarder_->post_frame(MRD_MESSAGE_ISMRMRD_IMAGE, body);
                     }
                     break;
                 }
@@ -295,7 +295,7 @@ private:
                         std::string body(WAVEFORM_HEADER_BYTES + data_bytes, '\0');
                         std::memcpy(body.data(), &whdr, WAVEFORM_HEADER_BYTES);
                         std::memcpy(body.data() + WAVEFORM_HEADER_BYTES, wf_data.data(), data_bytes);
-                        forwarder_->post_frame(body);
+                        forwarder_->post_frame(MRD_MESSAGE_ISMRMRD_WAVEFORM, body);
                     }
                     break;
                 }

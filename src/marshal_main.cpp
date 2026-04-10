@@ -97,21 +97,28 @@ static void http_session(tcp::socket sock, MarshalState& state,
                 got_response = true;
             });
 
-            // If POST /frame and forwarder exists, also forward
-            if (req.method() == http::verb::post && req.target() == "/frame" && forwarder) {
-                forwarder->post_frame(std::string(req.body()));
-            }
-            // POST /header forward
-            if (req.method() == http::verb::post && req.target() == "/header" && forwarder) {
-                forwarder->post_header(std::string(req.body()));
-            }
-            // POST /config forward
-            if (req.method() == http::verb::post && req.target() == "/config" && forwarder) {
-                forwarder->post_config(std::string(req.body()));
-            }
-            // POST /close forward
-            if (req.method() == http::verb::post && req.target() == "/close" && forwarder) {
-                forwarder->post_close();
+            // Forward to recon via MRD TCP if forwarder exists
+            if (forwarder && req.method() == http::verb::post) {
+                auto t = req.target();
+                if (t == "/header") {
+                    forwarder->post_header(std::string(req.body()));
+                } else if (t == "/config") {
+                    forwarder->post_config(std::string(req.body()));
+                } else if (t == "/frame") {
+                    auto body_str = std::string(req.body());
+                    auto mrd_type = mrd::detect_mrd_type(body_str.data(), body_str.size());
+                    uint16_t tag = 0;
+                    switch (mrd_type) {
+                    case mrd::MrdDataType::ACQUISITION: tag = mrd::MRD_MESSAGE_ISMRMRD_ACQUISITION; break;
+                    case mrd::MrdDataType::IMAGE:       tag = mrd::MRD_MESSAGE_ISMRMRD_IMAGE; break;
+                    case mrd::MrdDataType::WAVEFORM:    tag = mrd::MRD_MESSAGE_ISMRMRD_WAVEFORM; break;
+                    default: break;
+                    }
+                    if (tag != 0)
+                        forwarder->post_frame(tag, body_str);
+                } else if (t == "/close") {
+                    forwarder->post_close();
+                }
             }
 
             if (got_response) {
@@ -132,7 +139,8 @@ int main(int argc, char** argv)
     // Defaults
     std::string http_bind = "0.0.0.0:8080";
     std::string dump_dir  = "./data";
-    std::string recon_url;
+    std::string recon_host;
+    uint16_t recon_port = 9002;
     uint16_t ws_port = 0;
     uint16_t mrd_port = 0;
     std::size_t max_body_size = 128ULL * 1024ULL * 1024ULL;
@@ -145,8 +153,10 @@ int main(int argc, char** argv)
             ws_port = static_cast<uint16_t>(std::stoi(argv[++i]));
         else if (a == "--mrd-port" && i + 1 < argc)
             mrd_port = static_cast<uint16_t>(std::stoi(argv[++i]));
-        else if (a == "--recon-url" && i + 1 < argc)
-            recon_url = argv[++i];
+        else if (a == "--recon-host" && i + 1 < argc)
+            recon_host = argv[++i];
+        else if (a == "--recon-port" && i + 1 < argc)
+            recon_port = static_cast<uint16_t>(std::stoi(argv[++i]));
         else if (a == "--dump-dir" && i + 1 < argc)
             dump_dir = argv[++i];
         else if (a == "--max-body-size" && i + 1 < argc)
@@ -166,27 +176,31 @@ int main(int argc, char** argv)
     state.http_port = http_port;
     state.ws_port = ws_port;
     state.dump_dir = dump_dir;
-    state.recon_url = recon_url;
+    state.recon_url = recon_host.empty() ? "" : recon_host + ":" + std::to_string(recon_port);
     state.max_body_bytes = max_body_size;
 
     // Ensure dump directories
     mrd::scanner_dir(state.dump_dir);
     mrd::recon_dir(state.dump_dir);
 
-    // Recon forwarder (optional)
+    // Recon forwarder via MRD TCP (optional)
     std::unique_ptr<mrd::ReconForwarder> forwarder;
-    if (!recon_url.empty()) {
+    if (!recon_host.empty()) {
+        auto on_failure = [&state]() {
+            write_error_png(state.dump_dir);
+            auto png_path = mrd::recon_dir(state.dump_dir) / "latest_error.png";
+            std::lock_guard<std::mutex> lk(state.latest_image_mtx);
+            state.latest_image_path = png_path.string();
+            state.latest_image_error = true;
+        };
+
+        // Image callback: reuses handle_recon_image from marshal_http.hpp
+        auto on_image = [&state](const void* data, size_t len) {
+            handle_recon_image(state, data, len);
+        };
+
         forwarder = std::make_unique<mrd::ReconForwarder>(
-            recon_url,
-            [&state, &dump_dir]() {
-                // On recon failure: write error PNG, update latest_image
-                write_error_png(state.dump_dir);
-                auto png_path = mrd::recon_dir(state.dump_dir) / "latest_error.png";
-                std::lock_guard<std::mutex> lk(state.latest_image_mtx);
-                state.latest_image_path = png_path.string();
-                state.latest_image_error = true;
-            }
-        );
+            recon_host, recon_port, on_image, on_failure);
     }
 
     // Log config
@@ -195,7 +209,7 @@ int main(int argc, char** argv)
         cfg << "marshal v2 listening http=" << http_bind
             << " dump-dir=" << dump_dir
             << " max_body=" << max_body_size;
-        if (!recon_url.empty()) cfg << " recon-url=" << recon_url;
+        if (!recon_host.empty()) cfg << " recon=" << recon_host << ":" << recon_port;
         if (ws_port > 0) cfg << " ws-port=" << ws_port;
         if (mrd_port > 0) cfg << " mrd-port=" << mrd_port;
         LOG_INFO(cfg.str());

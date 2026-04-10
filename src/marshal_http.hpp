@@ -249,34 +249,12 @@ static auto handle_post_close(const http::request<Body>& req, MarshalState& stat
 }
 
 // ---------------------------------------------------------------------------
-// POST /image — recon-facing (archive to from_reconstruction/)
+// Shared: archive recon image + write standalone + push to scanner
+// Called from both POST /image handler and ReconForwarder on_image callback.
 // ---------------------------------------------------------------------------
-template <class Body>
-static auto handle_post_image(const http::request<Body>& req, MarshalState& state)
+inline void handle_recon_image(MarshalState& state, const void* data, size_t size)
 {
-    const auto& body = req.body();
-    if (body.size() < mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t))
-        return json_response(req, http::status::bad_request,
-                             {{"error", "body too small for image"}});
-
-    std::lock_guard<std::mutex> lk(state.scan_mtx);
-
-    // If scan already closed (no header), drop gracefully
-    if (!state.header_received.load()) {
-        LOG_WARN("POST /image after /close — dropping late image");
-        return json_response(req, http::status::ok, {{"status", "ok_late"}});
-    }
-
-    // Open recon sink lazily
-    if (!state.recon_sink) {
-        auto recon_path = mrd::recon_dir(state.dump_dir) / mrd::scan_filename();
-        state.recon_sink = std::make_unique<mrd::MrdSink>(recon_path);
-        if (!state.current_xml_header.empty())
-            state.recon_sink->set_header(state.current_xml_header);
-    }
-
-    const void* data = body.data();
-    size_t size = body.size();
+    if (size < mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t)) return;
 
     const auto* ihdr = static_cast<const ISMRMRD::ImageHeader*>(data);
     const char* after_hdr = static_cast<const char*>(data) + mrd::IMAGE_HEADER_BYTES;
@@ -286,12 +264,24 @@ static auto handle_post_image(const http::request<Body>& req, MarshalState& stat
     const char* pixel_data = attr_str + attr_len;
     size_t pixel_bytes = size - mrd::IMAGE_HEADER_BYTES - sizeof(uint64_t) - attr_len;
 
-    std::string varname = "image_" + std::to_string(ihdr->image_series_index);
-    state.recon_sink->append_image(varname, *ihdr,
-                                   attr_str, static_cast<size_t>(attr_len),
-                                   pixel_data, pixel_bytes);
+    // Open recon sink lazily
+    {
+        std::lock_guard<std::mutex> lk(state.scan_mtx);
+        if (!state.recon_sink && state.header_received.load()) {
+            auto recon_path = mrd::recon_dir(state.dump_dir) / mrd::scan_filename();
+            state.recon_sink = std::make_unique<mrd::MrdSink>(recon_path);
+            if (!state.current_xml_header.empty())
+                state.recon_sink->set_header(state.current_xml_header);
+        }
+        if (state.recon_sink) {
+            std::string varname = "image_" + std::to_string(ihdr->image_series_index);
+            state.recon_sink->append_image(varname, *ihdr,
+                                           attr_str, static_cast<size_t>(attr_len),
+                                           pixel_data, pixel_bytes);
+        }
+    }
 
-    // Write standalone file for live viz
+    // Write standalone file for viz
     auto standalone = mrd::recon_dir(state.dump_dir) / "latest_image.bin";
     try {
         mrd::write_standalone_file(standalone, data, size);
@@ -302,13 +292,27 @@ static auto handle_post_image(const http::request<Body>& req, MarshalState& stat
         LOG_WARN("Standalone write failed: " << e.what());
     }
 
-    // Push image to scanner via MRD TCP (if connected)
-    try {
-        state.mrd_push_image(data, size);
-    } catch (const std::exception& e) {
-        LOG_WARN("MRD push to scanner failed: " << e.what());
+    // Push to scanner via MRD TCP
+    try { state.mrd_push_image(data, size); } catch (...) {}
+}
+
+// ---------------------------------------------------------------------------
+// POST /image — recon-facing (archive to from_reconstruction/)
+// ---------------------------------------------------------------------------
+template <class Body>
+static auto handle_post_image(const http::request<Body>& req, MarshalState& state)
+{
+    const auto& body = req.body();
+    if (body.size() < mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t))
+        return json_response(req, http::status::bad_request,
+                             {{"error", "body too small for image"}});
+
+    if (!state.header_received.load()) {
+        LOG_WARN("POST /image after /close — dropping late image");
+        return json_response(req, http::status::ok, {{"status", "ok_late"}});
     }
 
+    handle_recon_image(state, body.data(), body.size());
     return json_response(req, http::status::ok, {{"status", "ok"}});
 }
 

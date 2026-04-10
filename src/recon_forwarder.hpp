@@ -1,11 +1,12 @@
 /*
  * File: src/recon_forwarder.hpp
  * Project: CWRU Data Marshal - MRI Marshal
- * Purpose: Background thread that forwards scanner data to recon service
+ * Purpose: Forward scanner data to recon via MRD TCP, read images back
  *
- * Typed methods: post_header, post_config, post_frame, post_close.
- * No X-headers. Drops on failure (marshal keeps running per R11).
- * Uses libcurl for HTTP POST.
+ * Opens a TCP connection to the recon service (python-ismrmrd-server).
+ * Writer thread sends MRD messages. Reader thread receives images back.
+ * Full-duplex: reader and writer use the socket concurrently (no shared mutex).
+ * On failure: drops messages, calls failure callback (marshal keeps running).
  */
 
 #pragma once
@@ -16,26 +17,39 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <mutex>
 #include <queue>
 #include <string>
 #include <thread>
+#include <vector>
 
-#include <curl/curl.h>
+#include <boost/asio.hpp>
+#include <ismrmrd/ismrmrd.h>
+
+#include "mrd_stream_tags.hpp"
+
+namespace net = boost::asio;
+using tcp = net::ip::tcp;
 
 namespace mrd {
 
 class ReconForwarder {
 public:
     using FailureCallback = std::function<void()>;
+    using ImageCallback = std::function<void(const void*, size_t)>;
 
-    explicit ReconForwarder(const std::string& recon_url,
-                            FailureCallback on_failure = nullptr)
-        : recon_url_(recon_url), on_failure_(std::move(on_failure))
+    ReconForwarder(const std::string& recon_host, uint16_t recon_port,
+                   ImageCallback on_image = nullptr,
+                   FailureCallback on_failure = nullptr)
+        : recon_host_(recon_host)
+        , recon_port_(recon_port)
+        , on_image_(std::move(on_image))
+        , on_failure_(std::move(on_failure))
     {
-        worker_ = std::thread(&ReconForwarder::run, this);
+        writer_ = std::thread(&ReconForwarder::write_loop, this);
     }
 
     ~ReconForwarder() { stop(); }
@@ -43,104 +57,275 @@ public:
     ReconForwarder(const ReconForwarder&) = delete;
     ReconForwarder& operator=(const ReconForwarder&) = delete;
 
-    void post_header(const std::string& body)  { enqueue(recon_url_ + "/header",  body); }
-    void post_config(const std::string& body)  { enqueue(recon_url_ + "/config",  body); }
-    void post_frame(const std::string& body)   { enqueue(recon_url_ + "/frame",   body); }
-    void post_close()                          { enqueue(recon_url_ + "/close",   "");   }
+    // Enqueue a pre-built MRD message (tag + body already assembled)
+    void send_raw(std::vector<uint8_t> msg) { enqueue(std::move(msg)); }
+
+    // Build and enqueue CONFIG_FILE (tag 1, 1024 bytes fixed)
+    void send_config_file(const std::string& name) {
+        std::vector<uint8_t> msg(2 + 1024, 0);
+        uint16_t tag = MRD_MESSAGE_CONFIG_FILE;
+        std::memcpy(msg.data(), &tag, 2);
+        std::memcpy(msg.data() + 2, name.data(), std::min(name.size(), size_t(1024)));
+        enqueue(std::move(msg));
+    }
+
+    // Build and enqueue CONFIG_TEXT (tag 2)
+    void send_config_text(const std::string& text) {
+        std::string with_nul = text + '\0';
+        uint32_t len = static_cast<uint32_t>(with_nul.size());
+        std::vector<uint8_t> msg(2 + 4 + len);
+        uint16_t tag = MRD_MESSAGE_CONFIG_TEXT;
+        std::memcpy(msg.data(), &tag, 2);
+        std::memcpy(msg.data() + 2, &len, 4);
+        std::memcpy(msg.data() + 6, with_nul.data(), len);
+        enqueue(std::move(msg));
+    }
+
+    // Build and enqueue METADATA_XML (tag 3)
+    void send_header(const std::string& xml) {
+        std::string with_nul = xml + '\0';
+        uint32_t len = static_cast<uint32_t>(with_nul.size());
+        std::vector<uint8_t> msg(2 + 4 + len);
+        uint16_t tag = MRD_MESSAGE_METADATA_XML_TEXT;
+        std::memcpy(msg.data(), &tag, 2);
+        std::memcpy(msg.data() + 2, &len, 4);
+        std::memcpy(msg.data() + 6, with_nul.data(), len);
+        enqueue(std::move(msg));
+    }
+
+    // Build and enqueue a typed frame. Caller must specify the tag.
+    void send_typed_frame(uint16_t tag, const void* data, size_t len) {
+        std::vector<uint8_t> msg(2 + len);
+        std::memcpy(msg.data(), &tag, 2);
+        std::memcpy(msg.data() + 2, data, len);
+        enqueue(std::move(msg));
+    }
+
+    // Build and enqueue CLOSE (tag 4)
+    void send_close() {
+        std::vector<uint8_t> msg(2);
+        uint16_t tag = MRD_MESSAGE_CLOSE;
+        std::memcpy(msg.data(), &tag, 2);
+        enqueue(std::move(msg));
+    }
+
+    // Legacy API (used by mrd_tcp_listener)
+    void post_header(const std::string& xml)    { send_header(xml); }
+    void post_config(const std::string& config) { send_config_file(config); }
+    void post_config_text(const std::string& t) { send_config_text(t); }
+    void post_frame(uint16_t tag, const std::string& body) {
+        send_typed_frame(tag, body.data(), body.size());
+    }
+    void post_close() { send_close(); }
 
     void stop() {
         running_.store(false);
         cv_.notify_all();
-        if (worker_.joinable()) worker_.join();
+        if (writer_.joinable()) writer_.join();
+        // Cancel blocking read by closing socket
+        {
+            std::lock_guard<std::mutex> lk(connect_mtx_);
+            if (socket_ && socket_->is_open()) {
+                boost::system::error_code ec;
+                socket_->cancel(ec);
+                socket_->shutdown(tcp::socket::shutdown_both, ec);
+                socket_->close(ec);
+            }
+        }
+        if (reader_.joinable()) reader_.join();
+        connected_.store(false);
     }
 
-    bool is_running() const { return running_.load(); }
+    bool is_connected() const { return connected_.load(); }
 
 private:
-    struct Job {
-        std::string url;
-        std::string body;
-    };
-
-    std::string recon_url_;
+    std::string recon_host_;
+    uint16_t recon_port_;
+    ImageCallback on_image_;
     FailureCallback on_failure_;
+
     std::atomic<bool> running_{true};
-    std::queue<Job> queue_;
+    std::atomic<bool> connected_{false};
+
+    net::io_context ioc_;
+    std::unique_ptr<tcp::socket> socket_;
+    // connect_mtx_ protects socket creation/destruction only, NOT read/write.
+    // TCP is full-duplex: one thread reads, another writes, no mutex needed.
+    std::mutex connect_mtx_;
+
+    std::queue<std::vector<uint8_t>> queue_;
     std::mutex mtx_;
     std::condition_variable cv_;
-    std::thread worker_;
 
-    void enqueue(const std::string& url, const std::string& body) {
+    std::thread writer_;
+    std::thread reader_;
+
+    void enqueue(std::vector<uint8_t> msg) {
         std::lock_guard<std::mutex> lk(mtx_);
-        // Cap queue to prevent unbounded growth if recon is slow
         if (queue_.size() > 10000) {
-            LOG_WARN("Recon queue full (>10000), dropping message to " << url);
+            LOG_WARN("Recon queue full (>10000), dropping");
             return;
         }
-        queue_.push({url, body});
+        queue_.push(std::move(msg));
         cv_.notify_one();
     }
 
-    void run() {
-        CURL* curl = curl_easy_init();
-        if (!curl) {
-            LOG_ERROR("Failed to init curl for recon forwarder");
-            return;
-        }
+    bool try_connect() {
+        std::lock_guard<std::mutex> lk(connect_mtx_);
+        try {
+            if (socket_ && socket_->is_open()) {
+                boost::system::error_code ec;
+                socket_->shutdown(tcp::socket::shutdown_both, ec);
+                socket_->close(ec);
+            }
+            socket_.reset();
+            connected_.store(false);
 
+            tcp::resolver resolver(ioc_);
+            auto endpoints = resolver.resolve(recon_host_, std::to_string(recon_port_));
+            auto sock = std::make_unique<tcp::socket>(ioc_);
+            net::connect(*sock, endpoints);
+            sock->set_option(tcp::no_delay(true));
+            socket_ = std::move(sock);
+            connected_.store(true);
+            LOG_INFO("Connected to recon at " << recon_host_ << ":" << recon_port_);
+
+            // Start reader thread for this connection
+            if (reader_.joinable()) reader_.join();
+            reader_ = std::thread(&ReconForwarder::read_loop, this);
+            return true;
+        } catch (const std::exception& e) {
+            LOG_WARN("Failed to connect to recon: " << e.what());
+            connected_.store(false);
+            return false;
+        }
+    }
+
+    // Writer calls this — no mutex on socket (full-duplex safe)
+    bool write_bytes(const void* data, size_t len) {
+        if (!socket_ || !socket_->is_open()) return false;
+        try {
+            net::write(*socket_, net::buffer(data, len));
+            return true;
+        } catch (...) {
+            connected_.store(false);
+            return false;
+        }
+    }
+
+    void write_loop() {
         while (running_.load()) {
-            Job job;
+            std::vector<uint8_t> msg;
             {
                 std::unique_lock<std::mutex> lk(mtx_);
                 cv_.wait_for(lk, std::chrono::milliseconds(100),
                              [this] { return !queue_.empty() || !running_.load(); });
                 if (queue_.empty()) continue;
-                job = std::move(queue_.front());
+                msg = std::move(queue_.front());
                 queue_.pop();
             }
 
-            if (!do_post(curl, job.url, job.body)) {
-                LOG_WARN("Recon POST failed: " << job.url << " (dropping)");
-                if (on_failure_) {
-                    try { on_failure_(); } catch (...) {}
+            if (!connected_.load()) {
+                if (!try_connect()) {
+                    LOG_WARN("Recon not available, dropping message");
+                    if (on_failure_) { try { on_failure_(); } catch (...) {} }
+                    continue;
+                }
+            }
+
+            if (!write_bytes(msg.data(), msg.size())) {
+                LOG_WARN("Write to recon failed, reconnecting");
+                if (on_failure_) { try { on_failure_(); } catch (...) {} }
+                if (try_connect()) {
+                    if (!write_bytes(msg.data(), msg.size())) {
+                        LOG_WARN("Resend after reconnect failed, dropping");
+                    }
                 }
             }
         }
 
-        // Drain remaining
+        // Drain
         std::lock_guard<std::mutex> lk(mtx_);
         while (!queue_.empty()) {
-            auto& job = queue_.front();
-            do_post(curl, job.url, job.body);
+            auto& msg = queue_.front();
+            write_bytes(msg.data(), msg.size());
             queue_.pop();
         }
-
-        curl_easy_cleanup(curl);
     }
 
-    // Suppress response body
-    static size_t discard_cb(void*, size_t size, size_t nmemb, void*) {
-        return size * nmemb;
+    // Reader calls this — no mutex on socket (full-duplex safe)
+    bool read_bytes(void* buf, size_t n) {
+        if (!socket_ || !socket_->is_open()) return false;
+        try {
+            boost::system::error_code ec;
+            net::read(*socket_, net::buffer(buf, n), ec);
+            if (ec) { connected_.store(false); return false; }
+            return true;
+        } catch (...) {
+            connected_.store(false);
+            return false;
+        }
     }
 
-    bool do_post(CURL* curl, const std::string& url, const std::string& body) {
-        curl_easy_reset(curl);
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_POST, 1L);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, discard_cb);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 2L);
-        // No custom headers — no X-MRD-*, no X-Recon-*
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, nullptr);
+    void read_loop() {
+        LOG_INFO("Recon reader started");
+        while (running_.load() && connected_.load()) {
+            uint16_t msg_id = 0;
+            if (!read_bytes(&msg_id, 2)) break;
 
-        CURLcode res = curl_easy_perform(curl);
-        if (res != CURLE_OK) return false;
+            if (msg_id == MRD_MESSAGE_ISMRMRD_IMAGE) {
+                read_image_from_recon();
+            } else if (msg_id == MRD_MESSAGE_CLOSE) {
+                LOG_INFO("Recon sent CLOSE");
+                connected_.store(false);
+                break;
+            } else if (msg_id == MRD_MESSAGE_TEXT) {
+                uint32_t len = 0;
+                if (!read_bytes(&len, 4)) break;
+                std::vector<uint8_t> buf(len);
+                if (!read_bytes(buf.data(), len)) break;
+                LOG_INFO("Recon TEXT: " << std::string(buf.begin(), buf.end()));
+            } else {
+                LOG_WARN("Unexpected MRD message from recon: " << msg_id);
+                connected_.store(false);
+                break;
+            }
+        }
+        LOG_INFO("Recon reader ended");
+    }
 
-        long http_code = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-        return (http_code >= 200 && http_code < 300);
+    void read_image_from_recon() {
+        std::vector<uint8_t> hdr(IMAGE_HEADER_BYTES);
+        if (!read_bytes(hdr.data(), IMAGE_HEADER_BYTES)) return;
+        auto* ihdr = reinterpret_cast<const ISMRMRD::ImageHeader*>(hdr.data());
+
+        uint64_t attr_len = 0;
+        if (!read_bytes(&attr_len, 8)) return;
+
+        std::vector<uint8_t> attr(attr_len);
+        if (attr_len > 0 && !read_bytes(attr.data(), attr_len)) return;
+
+        size_t pixel_bytes = static_cast<size_t>(ihdr->matrix_size[0])
+                           * ihdr->matrix_size[1]
+                           * std::max<uint16_t>(ihdr->matrix_size[2], 1)
+                           * std::max<uint16_t>(ihdr->channels, 1)
+                           * ISMRMRD::ismrmrd_sizeof_data_type(ihdr->data_type);
+        std::vector<uint8_t> pixels(pixel_bytes);
+        if (!read_bytes(pixels.data(), pixel_bytes)) return;
+
+        LOG_INFO("Received image from recon: "
+                 << ihdr->matrix_size[0] << "x" << ihdr->matrix_size[1]);
+
+        if (on_image_) {
+            size_t total = IMAGE_HEADER_BYTES + 8 + attr_len + pixel_bytes;
+            std::vector<uint8_t> wire(total);
+            size_t off = 0;
+            std::memcpy(wire.data() + off, hdr.data(), IMAGE_HEADER_BYTES); off += IMAGE_HEADER_BYTES;
+            std::memcpy(wire.data() + off, &attr_len, 8); off += 8;
+            if (attr_len > 0) { std::memcpy(wire.data() + off, attr.data(), attr_len); off += attr_len; }
+            std::memcpy(wire.data() + off, pixels.data(), pixel_bytes);
+            try { on_image_(wire.data(), wire.size()); } catch (...) {}
+        }
     }
 };
 
