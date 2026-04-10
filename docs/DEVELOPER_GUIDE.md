@@ -65,25 +65,29 @@ Or just run the build script -- it creates worktrees automatically:
 
 ```
 Scanner / K-Space Streamer
-    |
-    | POST /header, /config, /frame, /close
+    │
+    │ MRD TCP (port 9100)
+    │ CONFIG_FILE + METADATA_XML + ACQUISITION×N + WAVEFORM + CLOSE
     v
-MRI Marshal (:8080)
-    |
-    | forwards to recon (if --recon-url set)
+MRI Marshal (HTTP :8080, MRD TCP :9100)
+    │                              │
+    │ MRD TCP forward              │ HTTP query/control
+    │ (if --recon-host set)        │ GET /image/latest, /transform, /pose, /health
+    v                              v
+Reconstruction Service (:9002)   Viz Client, Pose Client, etc.
+    │
+    │ MRD TCP IMAGE(1022) back
     v
-Reconstruction Service (:9002)
-    |
-    | POST /image (reconstructed)
+MRI Marshal → from_reconstruction/*.h5 + latest_image.bin
+    │
+    │ MRD TCP IMAGE(1022) pushed to scanner
     v
-MRI Marshal
-    |
-    | GET /image/latest -> file path
-    v
-Viz Client (reads file, renders with OpenCV)
+Scanner
 ```
 
-The marshal is a generic HTTP server. Scanner clients POST ISMRMRD data via `/header`, `/config`, `/frame`, and `/close`. Marshal archives to canonical ISMRMRD HDF5 and optionally forwards to a reconstruction service. Recon posts images back via `/image`. The viz client polls `/image/latest` for the file path and reads the standalone binary file directly.
+The marshal has two interfaces: **MRD TCP** for scanner data transport (the same wire protocol as python-ismrmrd-server) and **HTTP** for query/control endpoints. Scanner clients connect via MRD TCP and send ISMRMRD messages. Marshal archives to canonical ISMRMRD HDF5 and forwards to recon via MRD TCP. Recon sends images back on the same TCP connection. The viz client polls HTTP `GET /image/latest` for the file path and reads the standalone binary file directly.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full wire protocol reference and compose topology.
 
 ---
 
@@ -95,12 +99,11 @@ The demo ships with mock clients that generate synthetic data. To integrate real
 
 | Mock Client | What it does | Docker image | Branch |
 |-------------|-------------|--------------|--------|
-| `kspace_streamer` | Generates synthetic k-space, POSTs /header+/config+/frame+/close | `cwru/kspace-streamer` | MRI |
-| `image_streamer` | Generates synthetic images, POSTs /header+/config+/frame+/close | `cwru/image-streamer` | MRI |
-| `ecg_client` | Generates ISMRMRD waveforms (ECG), POSTs /frame | `cwru/ecg-client` | MRI |
-| `pose_client` | Generates synthetic poses, POSTs /pose | `cwru/pose-client` | MRI |
-| `viz_client` | Polls GET /image/latest, reads file, displays with OpenCV | `cwru/viz-client` | MRI |
-| `mock_recon` | Reconstruction service, accepts /header+/config+/frame+/close, POSTs /image | `cwru/mock-recon` | MRI |
+| `kspace_streamer` | Sends k-space + ECG waveforms via MRD TCP (--ecg flag for waveforms) | `cwru/kspace-streamer` | MRI |
+| `image_streamer` | Sends synthetic images via MRD TCP | `cwru/image-streamer` | MRI |
+| `pose_client` | Sends synthetic poses via HTTP POST /pose | `cwru/pose-client` | MRI |
+| `viz_client` | Polls HTTP GET /image/latest, reads file, displays with OpenCV | `cwru/viz-client` | MRI |
+| `mock_recon` | MRD TCP recon server, receives acquisitions, sends images back | `cwru/mock-recon` | MRI |
 | Robot clients | Simulate catheter, controller, planning, front-end, surface tracking | `cwru/robot-clients` | Robot |
 
 ### Steps to Replace a Mock
@@ -112,27 +115,33 @@ The demo ships with mock clients that generate synthetic data. To integrate real
    cd .worktrees/mri_data_marshal
    ```
 
-2. **Understand the interface.** The k-space streamer sends:
+2. **Understand the interface.** The k-space streamer connects via MRD TCP and sends:
    ```
-   POST /header   (ISMRMRD XML header)
-   POST /config   (recon config name, e.g. "simplefft")
-   POST /frame    (one ISMRMRD acquisition per call, repeated)
-   POST /close    (end of scan)
+   CONFIG_FILE(1)        config name (e.g. "simplefft")
+   METADATA_XML_TEXT(3)  ISMRMRD XML header
+   ACQUISITION(1008)     one k-space line per message (repeated)
+   WAVEFORM(1026)        ECG / physio data (optional, with --ecg)
+   CLOSE(4)              end of scan
    ```
+   See [ARCHITECTURE.md](ARCHITECTURE.md) for the full wire protocol.
 
-3. **Write your real client.** It just needs to make the same HTTP POST requests.
+3. **Write your real client.** Open a raw TCP socket to the marshal's `--mrd-port` and send the same MRD messages. The wire format is identical to what python-ismrmrd-server expects.
 
 4. **Update the Dockerfile** (on `main`, in `docker/`).
 
 5. **Update `docker-compose.demo.yml`** to use your new image.
 
-6. **The marshal server does not change.** It accepts data based on ISMRMRD wire format, not client identity.
+6. **The marshal server does not change.** It accepts MRD TCP connections and archives/forwards based on the ISMRMRD wire format, not client identity.
 
 ---
 
-## HTTP API Quick Reference
+## API Quick Reference
 
-### MRI Marshal (port 8080)
+### MRI Marshal — MRD TCP (port 9100, primary scanner/recon transport)
+
+Scanner and recon clients connect via raw TCP using python-ismrmrd-server's 2-byte message ID framing. See [ARCHITECTURE.md](ARCHITECTURE.md) for the wire protocol.
+
+### MRI Marshal — HTTP (port 8080, query/control + fallback)
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|

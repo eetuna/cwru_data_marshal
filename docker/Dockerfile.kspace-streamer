@@ -37,9 +37,6 @@ RUN cmake -S /opt/mri -B /opt/mri/build \
 
 WORKDIR /opt/mri
 
-# Default connection to MRI marshal (override via environment or command line)
-ENV MRI_MARSHAL_HTTP=http://mri-marshal:8080
-
-# Default: run kspace_streamer with configurable parameters
+# Default: run kspace_streamer via MRD TCP to marshal
 # Override with docker run command or docker-compose command
-CMD ["./build/kspace_streamer", "--http", "http://mri-marshal:8080", "--interval", "0.5", "--slices", "5"]
+CMD ["./build/kspace_streamer", "--host", "mri-marshal", "--port", "9100", "--ecg", "--interval", "0.5", "--slices", "5"]

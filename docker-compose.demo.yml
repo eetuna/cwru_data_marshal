@@ -10,10 +10,14 @@ services:
       - /opt/mri/build/marshal
       - --http
       - "0.0.0.0:8080"
+      - --mrd-port
+      - "9100"
       - --dump-dir
       - /session-data
-      - --recon-url
-      - ${RECON_URL:-http://mock-recon:9002}
+      - --recon-host
+      - mock-recon
+      - --recon-port
+      - "9002"
     volumes:
       - ${SESSION_DATA_DIR:-./session-data}:/session-data
     ports:
@@ -50,22 +54,16 @@ services:
   image-streamer:
     image: cwru/image-streamer:latest
     container_name: cwru-image-streamer
-    command: ["./build/image_streamer", "--http", "http://mri-marshal:8080", "--interval", "${IMAGE_INTERVAL}", "--nx", "${IMAGE_WIDTH}", "--ny", "${IMAGE_HEIGHT}", "--nz", "${IMAGE_SLICES}"]
+    command: ["./build/image_streamer", "--host", "mri-marshal", "--port", "9100", "--interval", "${IMAGE_INTERVAL}", "--nx", "${IMAGE_WIDTH}", "--ny", "${IMAGE_HEIGHT}", "--nz", "${IMAGE_SLICES}"]
     depends_on:
       mri-marshal:
         condition: service_healthy
     networks:
       - cwru-net
 
-  ecg-client:
-    image: cwru/ecg-client:latest
-    container_name: cwru-ecg-client
-    command: ["python3", "-u", "ecg_client.py", "--http", "http://mri-marshal:8080", "--count", "0", "--interval", "${ECG_INTERVAL}"]
-    depends_on:
-      mri-marshal:
-        condition: service_healthy
-    networks:
-      - cwru-net
+  # ecg-client service removed — waveforms (ECG, waveform_id=0) are produced by
+  # kspace-streamer with --ecg flag on the same MRD TCP connection as acquisitions,
+  # matching how a real scanner sends waveforms (python-ismrmrd-server client.py:264).
 
   pose-client:
     image: cwru/pose-client:latest
@@ -80,12 +78,12 @@ services:
   mock-recon:
     image: cwru/mock-recon:latest
     container_name: cwru-mock-recon
-    environment:
-      - MARSHAL_URL=http://mri-marshal:8080
+    # No MARSHAL_URL needed — mock-recon sends images back on the same MRD TCP connection
     ports:
       - "9002:9002"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9002/health"]
+      # TCP-based healthcheck (mock-recon is a TCP server, not HTTP)
+      test: ["CMD", "bash", "-c", "echo | nc -z localhost 9002"]
       interval: 5s
       timeout: 3s
       start_period: 5s
@@ -96,7 +94,7 @@ services:
   kspace-streamer:
     image: cwru/kspace-streamer:latest
     container_name: cwru-kspace-streamer
-    command: ["./build/kspace_streamer", "--http", "http://mri-marshal:8080", "--interval", "${KSPACE_INTERVAL:-0.5}", "--slices", "${KSPACE_SLICES:-5}"]
+    command: ["./build/kspace_streamer", "--host", "mri-marshal", "--port", "9100", "--ecg", "--interval", "${KSPACE_INTERVAL:-0.5}", "--slices", "${KSPACE_SLICES:-5}"]
     depends_on:
       mri-marshal:
         condition: service_healthy

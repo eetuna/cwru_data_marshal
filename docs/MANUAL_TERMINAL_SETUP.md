@@ -46,7 +46,6 @@ Expected images:
 - `cwru/mri-marshal`
 - `cwru/robot-marshal`
 - `cwru/image-streamer`
-- `cwru/ecg-client`
 - `cwru/pose-client`
 - `cwru/kspace-streamer`
 - `cwru/mock-recon`
@@ -157,16 +156,16 @@ This approach gives you maximum visibility - each service runs in its own termin
 
 ### ⚠️ Always pass `--env-file .env.demo`
 
-**Every** `docker compose` command in this guide must include `--env-file .env.demo`. If you drop that flag, compose has no values for `RECON_ENDPOINT`, `IMAGE_INTERVAL`, `IMAGE_WIDTH`, `ECG_*`, `POSE_*`, etc., and you will see warnings like:
+**Every** `docker compose` command in this guide must include `--env-file .env.demo`. If you drop that flag, compose has no values for `RECON_HOST/RECON_PORT`, `IMAGE_INTERVAL`, `IMAGE_WIDTH`, `ECG_*`, `POSE_*`, etc., and you will see warnings like:
 
 ```
-WARN[0000] The "RECON_ENDPOINT" variable is not set. Defaulting to a blank string.
+WARN[0000] The "RECON_HOST/RECON_PORT" variable is not set. Defaulting to a blank string.
 WARN[0000] The "IMAGE_INTERVAL" variable is not set. Defaulting to a blank string.
 ```
 
 When those warnings appear:
 
-- Marshal starts **without** `--recon-endpoint`, so it returns `501 Not Implemented` to every k-space POST and the k-space path will never produce images.
+- Marshal starts **without** `--recon-host`/`--recon-port`, so acquisitions are archived locally but never forwarded to recon. No reconstructed images will be produced.
 - Image-streamer / ECG / pose clients receive empty strings for their flags and will error out or behave unpredictably.
 
 If you do not want to type `--env-file .env.demo -f docker-compose.demo.yml` each time, define an alias once per shell:
@@ -198,7 +197,7 @@ Required terminals, **run in this order**:
 1. Terminal 1 — **mri-marshal** (wait for `healthy`).
 2. Terminal 6 — **mock-recon** (the reconstruction service). Must be up before any k-space arrives, otherwise marshal returns `501 Not Implemented`.
 3. Terminal 9 — **viz-client** (opens an empty "Waiting for data..." window).
-4. Terminal 8 — **kspace-streamer** (starts POSTing raw k-space; images begin appearing in viz a moment later).
+4. Terminal 8 — **kspace-streamer** (connects via MRD TCP, sends raw k-space + ECG waveforms; reconstructed images begin appearing in viz a moment later).
 
 Do NOT run image-streamer in Flow A - it posts pre-reconstructed images to the same stream and will fight with the recon callbacks.
 
@@ -215,8 +214,9 @@ Do NOT run mock-recon or kspace-streamer in Flow B - they are not used.
 **Optional add-ons that work with both flows:**
 
 - Terminal 2 — **robot-marshal** + Terminal 7 — **robot-clients** (robot side of the system, independent of the MRI flow).
-- Terminal 4 — **ecg-client** (posts synthetic ECG samples).
-- Terminal 5 — **pose-client** (posts synthetic tracking poses).
+- Terminal 4 — **pose-client** (posts synthetic tracking poses).
+
+Note: ECG waveforms are sent by kspace-streamer (with `--ecg` flag) on the same MRD TCP connection as acquisitions. No separate ecg-client service.
 
 The per-terminal reference sections below give the exact `docker compose` command, expected output, and configuration for each service, in the original numeric order. Refer back to the flow list above for the run sequence.
 
@@ -250,7 +250,7 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up mri-marshal
 
 The MRI marshal can forward raw k-space data to an external reconstruction service. This is **optional** - the demo works without it since the image streamer sends pre-reconstructed images.
 
-The `cwru/mock-recon` image has historically been a throwaway stand-in for whatever real reconstruction service is wired into production. It is now backed by **python-ismrmrd-server** (vendored) behind a small HTTP server, so it performs real inverse-FFT reconstruction on the k-space it receives. The image tag, service name, port (9002), and HTTP contract are unchanged - swapping it for a real scanner-side recon is still a one-line change (`RECON_ENDPOINT=...`, see below).
+The `cwru/mock-recon` image is an MRD TCP reconstruction server that performs real inverse-FFT reconstruction on k-space data. It speaks the same wire protocol as python-ismrmrd-server (2-byte message ID framing). To swap in a real recon, replace mock-recon with python-ismrmrd-server or any MRD TCP server on the same port. See [RECONSTRUCTION_INTERFACE.md](RECONSTRUCTION_INTERFACE.md).
 
 #### When You Need Reconstruction
 
@@ -262,54 +262,39 @@ The `cwru/mock-recon` image has historically been a throwaway stand-in for whate
 The simulator (`cwru/mock-recon`) is designed to be a drop-in placeholder. To use a real reconstruction service instead:
 
 1. Stop the `mock-recon` container.
-2. Start marshal with `RECON_ENDPOINT=http://<real-recon-host>:<port>` pointing at the real service.
+2. Start a real python-ismrmrd-server (or equivalent MRD TCP recon) on the same port.
+3. Start marshal with `--recon-host <real-host> --recon-port <port>`.
 
-Nothing else changes - marshal, viz-client, kspace-streamer, and the manual terminal commands in this guide all keep working as-is. The contract marshal uses (`POST /frame` out, callback to `POST /image` in) is identical regardless of what service is behind the endpoint.
+Nothing else changes. The MRD TCP wire protocol is the same as python-ismrmrd-server's `connection.py`. See [RECONSTRUCTION_INTERFACE.md](RECONSTRUCTION_INTERFACE.md).
 
-#### Data Flow with Reconstruction (Async/Callback)
+#### Data Flow with Reconstruction (MRD TCP)
 
 ```
 K-Space Streamer                  MRI Marshal                    Recon Service
      │                                 │                              │
-     │ POST /frame              │                              │
-     │ (raw k-space)                   │                              │
+     │ MRD TCP: ACQUISITION(1008)      │                              │
      │────────────────────────────────>│                              │
-     │                                 │ Detects ACQUISITION          │
+     │                                 │ Archive + forward            │
+     │                                 │ MRD TCP: ACQUISITION(1008)   │
+     │                                 │─────────────────────────────>│
      │                                 │                              │
-     │ HTTP 202 Accepted               │                              │
-     │ (immediate response ~7-16ms)    │                              │
+     │                                 │   [Reconstruction]           │
+     │                                 │                              │
+     │                                 │ MRD TCP: IMAGE(1022)         │
+     │                                 │<─────────────────────────────│
+     │                                 │                              │
+     │ MRD TCP: IMAGE(1022)            │ Archive + write              │
+     │ pushed back on same socket      │ latest_image.bin             │
      │<────────────────────────────────│                              │
-     │                                 │                              │
-     │                                 │ [Detached Thread]            │
-     │                                 │ POST /frame            │
-     │                                 │ Content-Type: http://...   │
-     │                                 │ Content-Length: xxx            │
-     │                                 │─────────────────────────────>│
-     │                                 │                              │
-     │                                 │ HTTP 202 Accepted            │
-     │                                 │<─────────────────────────────│
-     │                                 │                              │
-     │                                 │                              │
-     │                                 │   [Background Processing]    │
-     │                                 │   (~0.5s simulated delay)    │
-     │                                 │                              │
-     │                                 │ POST /image        │
-     │                                 │ (reconstructed image)        │
-     │                                 │<─────────────────────────────│
-     │                                 │                              │
-     │                                 │ Store to HDF5                │
-     │                                 │ WebSocket emit "mrd"         │
-     │                                 │ HTTP 200 OK                  │
-     │                                 │─────────────────────────────>│
 ```
 
 **Key Features:**
-- **Non-blocking**: K-space sender gets HTTP 202 immediately (doesn't wait for reconstruction)
-- **Callback-based**: Recon service POSTs result back when done via `/image`
-- **Event-driven**: Viz clients get WebSocket notification when image arrives (no polling needed)
+- **Non-blocking**: Forwarding runs on a background thread. Scanner TCP connection is never blocked.
+- **Bidirectional**: Reconstructed images pushed back to scanner on the same TCP socket.
+- **File-based live view**: Viz client polls `GET /image/latest` for file path, reads from disk.
 - **Concurrent**: Multiple k-space frames can reconstruct simultaneously
 
-**Note:** To test the full reconstruction flow, start the mock-recon service (Terminal 6) and k-space streamer (Terminal 8). The `RECON_ENDPOINT` is already configured in `.env.demo`.
+**Note:** To test the full reconstruction flow, start the mock-recon service (Terminal 6) and k-space streamer (Terminal 8). The `RECON_HOST/RECON_PORT` is already configured in `.env.demo`.
 
 ### Clearing the Latest Frame Cache (Session End)
 
@@ -391,31 +376,9 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up image-streamer
 
 ---
 
-### Terminal 4: ECG Client (Biological Signal Generator)
+### Terminal 4: Pose Client (Tracking Data Generator)
 
-Generates synthetic ECG/biological signals.
-
-```bash
-cd /path/to/cwru_data_marshal
-
-# Run ECG client
-docker compose --env-file .env.demo -f docker-compose.demo.yml up ecg-client
-```
-
-**What you'll see:**
-```
-[ecg-client] ❤️  HR: 72 bpm, ECG: 0.523
-[ecg-client] ❤️  HR: 73 bpm, ECG: 0.612
-...
-```
-
-**Configuration:**
-- Sample rate: `ECG_INTERVAL` (default: 0.5s = 2 Hz)
-- Sends to: http://mri-marshal:8080/frame
-
----
-
-### Terminal 5: Pose Client (Tracking Data Generator)
+> **Note:** ECG waveforms are now sent by kspace-streamer (with `--ecg` flag) on the same MRD TCP connection as acquisitions. There is no separate ecg-client service.
 
 Generates synthetic pose/tracking data.
 
@@ -463,12 +426,12 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up mock-recon
 
 **How it works:**
 1. Receives k-space data with `Content-Type` header on HTTP `/reconstruct`.
-2. Returns HTTP 202 immediately (non-blocking).
+2. Forwarding to recon runs on a background thread (non-blocking).
 3. In a background thread: parses the acquisitions, opens a TCP connection to `python-ismrmrd-server` on port 9004 (inside the container), sends CONFIG + metadata XML + acquisition stream.
 4. `python-ismrmrd-server` runs `simplefft` (real 2D inverse FFT per slice) and streams images back.
 5. The shim strips the attribute envelope, combines multi-slice outputs into a single 3D ImageHeader+pixels, and POSTs it to the callback URL.
 
-**Note:** The `RECON_ENDPOINT` environment variable in `.env.demo` is already configured to point to this service. To use a real scanner-side reconstruction service instead, stop this container and set `RECON_ENDPOINT=http://<real-recon-host>:<port>` when starting marshal (Terminal 1) - nothing else in this guide changes.
+**Note:** The `RECON_HOST/RECON_PORT` environment variable in `.env.demo` is already configured to point to this service. To use a real scanner-side reconstruction service instead, stop this container and set `RECON_HOST/RECON_PORT=http://<real-recon-host>:<port>` when starting marshal (Terminal 1) - nothing else in this guide changes.
 
 ---
 
@@ -521,15 +484,16 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up kspace-streame
 [kspace-streamer] Starting
 [kspace-streamer]   slices/volume: 5
 [kspace-streamer]   interval: 0.1s
-[kspace-streamer] volume 0 (5 slices) -> HTTP 202
-[kspace-streamer] volume 10 (5 slices) -> HTTP 202
+[kspace-streamer] volume 0: 160 acquisitions sent
+[kspace-streamer] received 1 reconstructed image(s) back
+[kspace-streamer] volume 10: 160 acquisitions sent
 ...
 ```
 
 **Configuration:**
 - Frame rate: `KSPACE_INTERVAL` (default: 100ms = 10fps)
 - Slices per volume: `KSPACE_SLICES` (default: 5)
-- Sends multi-slice raw AcquisitionHeader data to: http://mri-marshal:8080/frame
+- Sends multi-slice raw k-space + ECG waveforms via MRD TCP to mri-marshal:9100
 
 **Note:** To test the full reconstruction flow, ensure the mock-recon service (Terminal 6) is running. The marshal will automatically forward k-space data to the reconstruction endpoint.
 
@@ -587,9 +551,7 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up <service>
 IMAGE_WIDTH=128 IMAGE_HEIGHT=128 IMAGE_INTERVAL=0.025 \
   docker compose --env-file .env.demo -f docker-compose.demo.yml up image-streamer
 
-# Run ECG client with faster sampling
-ECG_INTERVAL=0.1 \
-  docker compose --env-file .env.demo -f docker-compose.demo.yml up ecg-client
+# ECG waveforms are included in kspace-streamer with --ecg flag (no separate ecg-client)
 
 # Run indefinitely (no time limit)
 DEMO_DURATION=0 \
@@ -765,7 +727,7 @@ rm -rf session-data/*
 
 # Remove Docker images (optional - you'll need to rebuild)
 docker rmi cwru/mri-marshal cwru/robot-marshal \
-  cwru/image-streamer cwru/ecg-client cwru/pose-client \
+  cwru/image-streamer cwru/kspace-streamer cwru/pose-client \
   cwru/viz-client cwru/robot-clients
 ```
 

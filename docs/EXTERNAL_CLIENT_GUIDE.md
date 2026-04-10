@@ -382,16 +382,8 @@ int main() {
         std::cout << "MRI Marshal: " << res->body << "\n";
     }
 
-    // Send ECG data
-    json ecg = {
-        {"source", "cpp_ecg_client"},
-        {"data", {0.1, 0.2, 0.15, 0.25, 0.18}},
-        {"rate_hz", 250.0}
-    };
-    res = mri.Post("/frame", ecg.dump(), "application/json");
-    if (res && res->status == 200) {
-        std::cout << "ECG sent successfully\n";
-    }
+    // Note: ECG/waveform data is sent via MRD TCP (kspace_streamer --ecg), not HTTP.
+    // See ARCHITECTURE.md for the MRD TCP wire protocol.
 
     // Send pose update
     json pose = {
@@ -680,7 +672,7 @@ Full working client implementations are available:
 
 | Client | Language | Location |
 |--------|----------|----------|
-| ECG Mock | Python | [clients/mocks/ecg_client.py](../clients/mocks/ecg_client.py) |
+| ECG/Waveform | C++ | kspace_streamer with `--ecg` flag (MRD TCP, waveform_id=0) |
 | Pose Mock | Python | [clients/mocks/pose_client.py](../clients/mocks/pose_client.py) |
 | Image Streamer | C++ | `mri_data_marshal_worktree/clients/` |
 | Viz Client | C++ | `mri_data_marshal_worktree/clients/` |

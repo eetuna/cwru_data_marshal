@@ -26,17 +26,16 @@ cdd up mock-recon
 cdd --profile viz up viz-client
 
 # Terminal 5
-cdd up ecg-client
-
-# Terminal 6
 cdd up pose-client
 
-# Terminal 7
+# Terminal 6
 cdd --profile robot-clients up robot-clients
 
-# Terminal 8
+# Terminal 7
 cdd up kspace-streamer
 ```
+
+kspace-streamer sends acquisitions + ECG waveforms (via `--ecg` flag) over MRD TCP.
 
 ## Flow B -- bypass reconstruction (pre-made images)
 
@@ -51,15 +50,12 @@ cdd up robot-marshal
 cdd --profile viz up viz-client
 
 # Terminal 4
-cdd up ecg-client
-
-# Terminal 5
 cdd up pose-client
 
-# Terminal 6
+# Terminal 5
 cdd --profile robot-clients up robot-clients
 
-# Terminal 7
+# Terminal 6
 cdd up image-streamer
 ```
 
@@ -77,9 +73,8 @@ cdd --profile viz --profile robot-clients down
 | `robot-marshal` | -- | Robot data hub (HTTP 8081). |
 | `mock-recon` | -- | Reconstruction service. **Flow A only.** |
 | `image-streamer` | -- | Pre-made image producer. **Flow B only.** |
-| `kspace-streamer` | -- | Raw k-space producer (`POST /frame`). **Flow A only.** |
-| `ecg-client` | -- | Synthetic ECG samples to marshal. Both flows. |
-| `pose-client` | -- | Synthetic pose/tracking data to marshal. Both flows. |
+| `kspace-streamer` | -- | Raw k-space + ECG waveforms via MRD TCP (`--ecg`). **Flow A only.** |
+| `pose-client` | -- | Synthetic pose/tracking data via HTTP POST /pose. Both flows. |
 | `viz-client` | `viz` | OpenCV image viewer. Polls `GET /image/latest`. |
 | `robot-clients` | `robot-clients` | Bundle of catheter-tracking, controller, planning, front-end, surface-tracking. |
 
@@ -87,7 +82,7 @@ Individual robot clients (run separately instead of as the `robot-clients` bundl
 
 ## Rules
 
-- Always use `cdd` (or pass `--env-file .env.demo`). Without it, marshal starts without `--recon-url` and acquisition frames are stored but not forwarded.
+- Always use `cdd` (or pass `--env-file .env.demo`). Without it, marshal starts without `--recon-host`/`--recon-port` and acquisition frames are stored but not forwarded.
 - Flow A and Flow B are mutually exclusive. Do not run `image-streamer` together with `mock-recon`/`kspace-streamer`.
 - `mock-recon` must be up before `kspace-streamer`, otherwise marshal has nowhere to forward acquisitions.
 - `viz-client` and `robot-clients` live behind compose profiles (`viz`, `robot-clients`). They only start when the matching `--profile` flag is on the command.

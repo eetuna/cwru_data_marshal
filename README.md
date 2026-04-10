@@ -49,19 +49,22 @@ Historical docs moved to `archive/docs_old/` for reference.
 
 ```
 Scanner / K-Space Streamer
-    |
-    |  POST /header, /config, /frame, /close
+    │
+    │  MRD TCP (port 9100)
+    │  CONFIG_FILE + METADATA_XML + ACQUISITION×N + WAVEFORM + CLOSE
     v
-+----------------------------+        POST /header, /config, /frame, /close
-|  MRI Marshal (Port 8080)   |  --->  Reconstruction Service (Port 9002)
-|  - Archives to from_scanner/       |
-|  - Forwards to recon               |  POST /image (reconstructed)
-|  - Serves GET /image/latest  <-----+
-|  - Stores poses (POST/GET /pose)   |
-|  - Slice transforms (PUT/GET /transform)
-+----------------------------+
-          |
-          | GET /image/latest (file path)
++--------------------------------------+     MRD TCP
+|  MRI Marshal                         | ──> Reconstruction Service (port 9002)
+|  HTTP :8080 (query/control)          |
+|  MRD TCP :9100 (scanner data)        | <── IMAGE(1022) returned
+|  - Archives to from_scanner/         |
+|  - Forwards to recon via MRD TCP     |
+|  - Pushes IMAGE back to scanner      |
+|  - GET /image/latest (file path)     |
+|  - POST/GET /pose, PUT/GET /transform|
++--------------------------------------+
+          │
+          │ HTTP GET /image/latest (file path)
           v
     Viz Client (reads standalone file, renders with OpenCV)
 
