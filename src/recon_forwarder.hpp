@@ -225,6 +225,12 @@ private:
                 queue_.pop();
             }
 
+            // Connect once, keep the connection for the entire scan.
+            // Only reconnect if not connected at all (first message or after
+            // a previous connection was lost). Do NOT reconnect on write
+            // failure — that would split a scan across multiple TCP sessions
+            // and mock_recon would get CONFIG on one connection, METADATA on
+            // another, etc.
             if (!connected_.load()) {
                 if (!try_connect()) {
                     LOG_WARN("Recon not available, dropping message");
@@ -234,21 +240,21 @@ private:
             }
 
             if (!write_bytes(msg.data(), msg.size())) {
-                LOG_WARN("Write to recon failed, reconnecting");
+                LOG_WARN("Write to recon failed, dropping message");
+                connected_.store(false);
                 if (on_failure_) { try { on_failure_(); } catch (...) {} }
-                if (try_connect()) {
-                    if (!write_bytes(msg.data(), msg.size())) {
-                        LOG_WARN("Resend after reconnect failed, dropping");
-                    }
-                }
+                // Do NOT reconnect here. The next message will see
+                // connected_==false and reconnect then, starting a
+                // fresh TCP session. This ensures CONFIG is always the
+                // first message on a new connection.
             }
         }
 
-        // Drain
+        // Drain remaining messages on current connection
         std::lock_guard<std::mutex> lk(mtx_);
         while (!queue_.empty()) {
             auto& msg = queue_.front();
-            write_bytes(msg.data(), msg.size());
+            if (connected_.load()) write_bytes(msg.data(), msg.size());
             queue_.pop();
         }
     }
