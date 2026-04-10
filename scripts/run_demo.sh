@@ -28,8 +28,7 @@ trap cleanup EXIT
 
 echo "=== Starting mock_recon on port 9002 ==="
 python3 "$PROJECT_DIR/docker/mock-recon/mock_recon.py" \
-    --port 9002 \
-    --marshal-url http://localhost:8080 &
+    --port 9002 &
 RECON_PID=$!
 sleep 1
 
@@ -37,7 +36,8 @@ echo "=== Starting marshal on port 8080 ==="
 "$BUILD_DIR/marshal" \
     --http 0.0.0.0:8080 \
     --dump-dir "$DATA_DIR" \
-    --recon-url http://localhost:9002 &
+    --recon-host localhost \
+    --recon-port 9002 &
 MARSHAL_PID=$!
 sleep 1
 

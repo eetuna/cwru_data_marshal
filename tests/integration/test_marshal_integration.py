@@ -127,13 +127,13 @@ class TestMarshalIntegration(unittest.TestCase):
     def setUpClass(cls):
         cls.dump_dir = tempfile.mkdtemp(prefix='marshal_test_')
 
-    def start_marshal(self, recon_url=None):
+    def start_marshal(self, with_recon=False):
         """Start marshal server."""
         cmd = [MARSHAL_BIN,
                '--http', f'0.0.0.0:{MARSHAL_PORT}',
                '--dump-dir', self.dump_dir]
-        if recon_url:
-            cmd += ['--recon-url', recon_url]
+        if with_recon:
+            cmd += ['--recon-host', 'localhost', '--recon-port', str(RECON_PORT)]
 
         self.marshal_proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -141,11 +141,9 @@ class TestMarshalIntegration(unittest.TestCase):
                         "Marshal did not start")
 
     def start_recon(self):
-        """Start mock_recon server."""
+        """Start mock_recon MRD TCP server."""
         self.recon_proc = subprocess.Popen(
-            [sys.executable, MOCK_RECON,
-             '--port', str(RECON_PORT),
-             '--marshal-url', f'http://localhost:{MARSHAL_PORT}'],
+            [sys.executable, MOCK_RECON, '--port', str(RECON_PORT)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertTrue(wait_for_port(RECON_PORT),
                         "Mock recon did not start")
@@ -197,7 +195,7 @@ class TestMarshalIntegration(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_t2_raw_data_forwarded(self):
         self.start_recon()
-        self.start_marshal(recon_url=f'http://localhost:{RECON_PORT}')
+        self.start_marshal(with_recon=True)
 
         s, _ = http_post(f'{self.base()}/header', XML_HEADER)
         self.assertEqual(s, 200)
@@ -224,7 +222,7 @@ class TestMarshalIntegration(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_t4_recon_kill_marshal_survives(self):
         self.start_recon()
-        self.start_marshal(recon_url=f'http://localhost:{RECON_PORT}')
+        self.start_marshal(with_recon=True)
 
         s, _ = http_post(f'{self.base()}/header', XML_HEADER)
         self.assertEqual(s, 200)
