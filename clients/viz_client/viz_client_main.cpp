@@ -145,7 +145,9 @@ int main(int argc, char** argv) {
                         cv::imshow("viz_client", err);
                     }
                 }
-            } catch (...) {}
+            } catch (const std::exception& e) {
+            std::cerr << "viz error: " << e.what() << "\n";
+        }
         }
 
         // 2. Render current frame (always responsive)
