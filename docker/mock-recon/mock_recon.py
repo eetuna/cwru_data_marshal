@@ -73,29 +73,17 @@ def reconstruct_slice(kspace_lines, nx, ny):
 
 
 def send_image(sock, image_data, image_series):
-    """Send an image back to the client using MRD wire protocol."""
+    """Send an image back to the client using ismrmrd package (no hand-rolled offsets)."""
     ny, nx = image_data.shape
 
-    # Build ImageHeader (198 bytes)
-    hdr = bytearray(198)
-    struct.pack_into('<H', hdr, 0, 1)            # version
-    struct.pack_into('<H', hdr, 2, 5)            # data_type = FLOAT
-    struct.pack_into('<H', hdr, 4, nx)           # matrix_size[0]
-    struct.pack_into('<H', hdr, 6, ny)           # matrix_size[1]
-    struct.pack_into('<H', hdr, 8, 1)            # matrix_size[2]
-    struct.pack_into('<H', hdr, 10, 1)           # channels
-    struct.pack_into('<H', hdr, 128, image_series)  # image_series_index
+    # Use the ismrmrd package to build a proper Image object
+    img = ismrmrd.Image.from_array(image_data.reshape(1, 1, ny, nx), transpose=False)
+    img.image_series_index = image_series
+    img.data_type = ismrmrd.DATATYPE_FLOAT
 
-    attr = b''
-    attr_len = struct.pack('<Q', len(attr))
-    pixel_bytes = image_data.tobytes()
-
-    # Send: uint16(1022) + header + attr_len + attr + pixels
+    # Send MRD_MESSAGE_ISMRMRD_IMAGE tag + serialize via ismrmrd
     sock.sendall(struct.pack('<H', MRD_MESSAGE_ISMRMRD_IMAGE))
-    sock.sendall(bytes(hdr))
-    sock.sendall(attr_len)
-    sock.sendall(attr)
-    sock.sendall(pixel_bytes)
+    img.serialize_into(sock.sendall)
 
     log.info(f"Sent image ({nx}x{ny}) series={image_series}")
 
