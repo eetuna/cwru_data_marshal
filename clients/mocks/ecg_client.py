@@ -1,95 +1,98 @@
 #!/usr/bin/env python3
 """
-Mock ECG Client - Sends simulated ECG signals to MRI Marshal
+ECG Client - ISMRMRD waveform producer via POST /frame
 
-Pure Python implementation (no external dependencies required).
-Sends POST requests to /v1/bio/signal endpoint with synthetic ECG data.
+Sends simulated ECG waveforms as ISMRMRD waveform wire format:
+  40B WaveformHeader + (number_of_samples * channels * 4) bytes of uint32 samples
+
+waveform_id=0 is the ECG convention per ISMRMRD.
 """
 
-import json
-import time
-import math
-import random
 import argparse
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
+import math
+import struct
+import time
+import urllib.request
+
+WAVEFORM_HEADER_BYTES = 40
 
 
-def generate_ecg_sample(t, baseline_hz=1.2):
-    """
-    Generate a synthetic ECG-like waveform using sinusoidal components.
-    """
-    p_wave = 0.15 * math.sin(2 * math.pi * baseline_hz * t)
-    qrs_offset = (t * baseline_hz) % 1.0
-    if 0.15 < qrs_offset < 0.25:
-        qrs_wave = 2.0 * math.sin(2 * math.pi * 10 * (qrs_offset - 0.15))
-    else:
-        qrs_wave = 0.0
-    t_wave = 0.3 * math.sin(2 * math.pi * baseline_hz * t - math.pi / 3)
-    noise = random.gauss(0, 0.05)
-    return p_wave + qrs_wave + t_wave + noise
+def build_waveform(scan_counter: int, nsamples: int = 256,
+                   channels: int = 1, sample_rate_hz: float = 500.0) -> bytes:
+    """Build an ISMRMRD waveform wire-format message."""
+    # WaveformHeader layout (40 bytes, see ismrmrd/waveform.h):
+    #   uint16 version (offset 0)
+    #   6 bytes padding to offset 8
+    #   uint64 flags (offset 8)
+    #   uint32 measurement_uid (offset 16)
+    #   uint32 scan_counter (offset 20)
+    #   uint32 time_stamp (offset 24)
+    #   uint16 number_of_samples (offset 28)
+    #   uint16 channels (offset 30)
+    #   float  sample_time_us (offset 32)
+    #   uint16 waveform_id (offset 36)
+    #   2 bytes padding to 40
 
+    sample_time_us = 1e6 / sample_rate_hz
+    time_stamp = int(time.time() * 1000) & 0xFFFFFFFF
 
-def send_ecg_signal(endpoint, source, data, rate_hz):
-    """Send ECG signal data to the MRI Marshal endpoint."""
-    url = f"{endpoint}/v1/bio/signal"
-    payload = {"source": source, "data": data, "rate_hz": rate_hz}
+    header = bytearray(WAVEFORM_HEADER_BYTES)
+    struct.pack_into('<H', header, 0, 1)                  # version
+    struct.pack_into('<Q', header, 8, 0)                   # flags
+    struct.pack_into('<I', header, 16, 0)                  # measurement_uid
+    struct.pack_into('<I', header, 20, scan_counter)       # scan_counter
+    struct.pack_into('<I', header, 24, time_stamp)         # time_stamp
+    struct.pack_into('<H', header, 28, nsamples)           # number_of_samples
+    struct.pack_into('<H', header, 30, channels)           # channels
+    struct.pack_into('<f', header, 32, sample_time_us)     # sample_time_us
+    struct.pack_into('<H', header, 36, 0)                  # waveform_id = 0 (ECG)
 
-    try:
-        req = Request(
-            url,
-            data=json.dumps(payload).encode('utf-8'),
-            headers={'Content-Type': 'application/json', 'User-Agent': 'mock-ecg-client/1.0'},
-            method='POST'
-        )
-        with urlopen(req, timeout=5.0) as response:
-            return response.status == 200
-    except (HTTPError, URLError) as e:
-        print(f"[ERROR] {e}")
-        return False
+    # Generate synthetic ECG-like signal (sine wave + R-peak spikes)
+    samples = bytearray(nsamples * channels * 4)
+    for ch in range(channels):
+        for s in range(nsamples):
+            t = s / sample_rate_hz
+            # Simple ECG approximation
+            val = int(2000 + 1000 * math.sin(2 * math.pi * 1.2 * t)  # heart rate ~72 bpm
+                      + 3000 * max(0, math.exp(-((t % 0.83 - 0.1) ** 2) / 0.001)))  # R-peak
+            val = max(0, min(val, 0xFFFFFFFF))
+            offset = (ch * nsamples + s) * 4
+            struct.pack_into('<I', samples, offset, val)
+
+    return bytes(header) + bytes(samples)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Mock ECG client', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--endpoint', default='http://localhost:8080', help='MRI Marshal endpoint')
-    parser.add_argument('--source', default='ecg_monitor', help='ECG source identifier')
-    parser.add_argument('--interval', type=float, default=1.0, help='Interval between transmissions (seconds)')
-    parser.add_argument('--count', type=int, default=0, help='Number of signals to send (0 = infinite)')
-    parser.add_argument('--rate-hz', type=float, default=100.0, help='ECG sampling rate in Hz')
-    parser.add_argument('--samples', type=int, default=100, help='Samples per transmission')
-    parser.add_argument('--heart-rate', type=float, default=72.0, help='Simulated heart rate (BPM)')
+    parser = argparse.ArgumentParser(description='ECG waveform producer')
+    parser.add_argument('--http', default='http://localhost:8080')
+    parser.add_argument('--interval', type=float, default=0.5)
+    parser.add_argument('--count', type=int, default=0, help='0=infinite')
+    parser.add_argument('--samples', type=int, default=256)
+    parser.add_argument('--channels', type=int, default=1)
     args = parser.parse_args()
 
-    print(f"[*] Mock ECG Client: {args.endpoint}, HR={args.heart_rate} BPM, Rate={args.rate_hz} Hz")
+    print(f"ecg_client: sending waveforms to {args.http}/frame")
 
-    baseline_hz = args.heart_rate / 60.0
-    t_offset = 0.0
-    sent_count = 0
-    success_count = 0
+    counter = 0
+    while args.count == 0 or counter < args.count:
+        body = build_waveform(counter, args.samples, args.channels)
 
-    try:
-        while True:
-            samples = []
-            dt = 1.0 / args.rate_hz
-            for i in range(args.samples):
-                t = t_offset + i * dt
-                samples.append(round(generate_ecg_sample(t, baseline_hz), 4))
+        req = urllib.request.Request(
+            f"{args.http}/frame",
+            data=body,
+            headers={'Content-Type': 'application/octet-stream'},
+            method='POST'
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if counter % 10 == 0:
+                    print(f"waveform {counter}: HTTP {resp.status}")
+        except Exception as e:
+            print(f"waveform {counter}: error: {e}")
 
-            if send_ecg_signal(args.endpoint, args.source, samples, args.rate_hz):
-                success_count += 1
-            sent_count += 1
-            sample_preview = f"[{samples[0]:.3f}, {samples[1]:.3f}, {samples[2]:.3f}, ..., {samples[-1]:.3f}]"
-            print(f"[{sent_count:04d}] HR={args.heart_rate} BPM | {len(samples)} samples @ {args.rate_hz} Hz | Data: {sample_preview} | Success: {100.0 * success_count / sent_count:.1f}%")
-
-            t_offset += args.samples * dt
-            if args.count > 0 and sent_count >= args.count:
-                break
-            time.sleep(args.interval)
-    except KeyboardInterrupt:
-        print("\n[*] Interrupted")
-
-    print(f"\n[*] Total: {sent_count}, Success: {success_count}")
+        counter += 1
+        time.sleep(args.interval)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
