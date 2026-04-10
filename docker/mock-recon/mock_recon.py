@@ -79,7 +79,7 @@ def send_image(sock, image_data, image_series):
     # Use the ismrmrd package to build a proper Image object
     img = ismrmrd.Image.from_array(image_data.reshape(1, 1, ny, nx), transpose=False)
     img.image_series_index = image_series
-    img.data_type = ismrmrd.DATATYPE_FLOAT
+    # data_type is set automatically by from_array based on dtype (float32 → FLOAT)
 
     # Send MRD_MESSAGE_ISMRMRD_IMAGE tag + serialize via ismrmrd
     sock.sendall(struct.pack('<H', MRD_MESSAGE_ISMRMRD_IMAGE))
