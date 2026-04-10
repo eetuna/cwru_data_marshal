@@ -177,6 +177,18 @@ private:
                         state_.scanner_sink = std::make_unique<MrdSink>(path);
                         state_.scanner_sink->set_header(xml);
                         state_.current_xml_header = xml;
+                        // Close recon sink from previous scan
+                        if (state_.recon_sink) {
+                            state_.recon_sink->close();
+                            state_.recon_sink.reset();
+                        }
+                    }
+                    // Reset standalone viz file for new scan
+                    {
+                        auto standalone = recon_dir(state_.dump_dir) / "latest_image.bin";
+                        std::ofstream(standalone.string(), std::ios::binary | std::ios::trunc);
+                        std::lock_guard<std::mutex> img_lk(state_.latest_image_mtx);
+                        state_.latest_image_count = 0;
                     }
                     state_.header_received.store(true);
                     if (forwarder_) forwarder_->post_header(xml);

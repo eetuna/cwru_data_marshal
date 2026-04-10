@@ -87,7 +87,8 @@ struct MarshalState {
     // Latest image path for GET /image/latest
     std::mutex latest_image_mtx;
     std::string latest_image_path;
-    bool latest_image_error{false}; // true when reconstruction-failed PNG
+    bool latest_image_error{false};
+    uint32_t latest_image_count{0};
 
     // WS emit hook (set by WsServer on init, optional)
     std::function<void(const std::string&)> ws_emit = [](const std::string&) {};

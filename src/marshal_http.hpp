@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <sstream>
 
@@ -281,13 +282,21 @@ inline void handle_recon_image(MarshalState& state, const void* data, size_t siz
         }
     }
 
-    // Write standalone file for viz
+    // Write standalone file for viz — append each slice so viz can scroll
+    // Format: concatenated [4-byte LE image_size][image_wire_bytes] records
+    // Viz client reads the file, counts records, displays selected slice.
     auto standalone = mrd::recon_dir(state.dump_dir) / "latest_image.bin";
     try {
-        mrd::write_standalone_file(standalone, data, size);
+        uint32_t img_size = static_cast<uint32_t>(size);
+        std::ofstream ofs(standalone.string(), std::ios::binary | std::ios::app);
+        ofs.write(reinterpret_cast<const char*>(&img_size), 4);
+        ofs.write(static_cast<const char*>(data), size);
+        ofs.flush();
+
         std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
         state.latest_image_path = standalone.string();
         state.latest_image_error = false;
+        state.latest_image_count++;
     } catch (const std::exception& e) {
         LOG_WARN("Standalone write failed: " << e.what());
     }
@@ -326,6 +335,7 @@ static auto handle_get_image_latest(const http::request<Body>& req, MarshalState
     nlohmann::json j;
     j["path"] = state.latest_image_path;
     j["error"] = state.latest_image_error;
+    j["slices"] = state.latest_image_count;
     return json_response(req, http::status::ok, j);
 }
 
