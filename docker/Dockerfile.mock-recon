@@ -23,11 +23,11 @@ RUN pip install --no-cache-dir \
         requests
 
 # Copy mock recon server
-COPY docker/mock-recon/mock_recon.py /opt/mock-recon/mock_recon.py
+COPY .worktrees/mri_data_marshal/docker/mock-recon/mock_recon.py /opt/mock-recon/mock_recon.py
 
 EXPOSE 9002
 
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
-    CMD curl -sf http://127.0.0.1:9002/health || exit 1
+    CMD bash -c "echo | timeout 2 bash -c 'cat < /dev/tcp/127.0.0.1/9002' 2>/dev/null" || exit 1
 
 CMD ["python3", "/opt/mock-recon/mock_recon.py"]
