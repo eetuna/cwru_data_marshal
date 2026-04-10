@@ -132,7 +132,10 @@ private:
                     std::lock_guard<std::mutex> lk(state_.scan_mtx);
                     state_.current_config = config;
                     state_.config_received.store(true);
-                    if (forwarder_) forwarder_->post_config(config);
+                    if (forwarder_) {
+                        forwarder_->begin_session();
+                        forwarder_->post_config(config);
+                    }
                     break;
                 }
 
@@ -148,7 +151,10 @@ private:
                     std::lock_guard<std::mutex> lk(state_.scan_mtx);
                     state_.current_config = config;
                     state_.config_received.store(true);
-                    if (forwarder_) forwarder_->post_config_text(config);
+                    if (forwarder_) {
+                        forwarder_->begin_session();
+                        forwarder_->post_config_text(config);
+                    }
                     break;
                 }
 
@@ -180,7 +186,10 @@ private:
                 case MRD_MESSAGE_CLOSE: {
                     LOG_INFO("CLOSE");
                     state_.close_scan();
-                    if (forwarder_) forwarder_->post_close();
+                    if (forwarder_) {
+                        forwarder_->post_close();
+                        forwarder_->end_session();
+                    }
                     break;
                 }
 

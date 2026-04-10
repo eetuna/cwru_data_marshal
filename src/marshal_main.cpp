@@ -101,6 +101,7 @@ static void http_session(tcp::socket sock, MarshalState& state,
             if (forwarder && req.method() == http::verb::post) {
                 auto t = req.target();
                 if (t == "/header") {
+                    forwarder->begin_session();
                     forwarder->post_header(std::string(req.body()));
                 } else if (t == "/config") {
                     forwarder->post_config(std::string(req.body()));
@@ -118,6 +119,7 @@ static void http_session(tcp::socket sock, MarshalState& state,
                         forwarder->post_frame(tag, body_str);
                 } else if (t == "/close") {
                     forwarder->post_close();
+                    forwarder->end_session();
                 }
             }
 
