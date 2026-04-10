@@ -1,16 +1,22 @@
 /*
  * File: clients/image_streamer/image_streamer_main.cpp
  * Project: CWRU Data Marshal - MRI Marshal
- * Purpose: Send synthetic ISMRMRD images via POST /header+/config+/frame+/close
+ * Purpose: Send synthetic ISMRMRD images over MRD TCP
  *
- * Wire format per image: 198B ImageHeader + 8B attr_len + attr + pixels
- * Same format as python-ismrmrd-server Connection.send_image.
+ * Protocol: raw TCP to marshal --mrd-port using python-ismrmrd-server's
+ * 2-byte message ID framing.
+ *
+ * Wire sequence:
+ *   CONFIG_FILE(1)   — 2B tag + 1024B null-padded config name
+ *   METADATA_XML(3)  — 2B tag + 4B length + XML bytes
+ *   IMAGE(1022)      — 2B tag + 198B header + 8B attr_len + attr + pixels  (× N)
+ *   CLOSE(4)         — 2B tag only
+ *
+ * Image wire format matches python-ismrmrd-server Connection.send_image.
+ * No HTTP. No X-MRD-* headers. No /v1/* paths.
  */
 
 #include <boost/asio.hpp>
-#include <boost/beast/http.hpp>
-#include <boost/beast/core/flat_buffer.hpp>
-#include <boost/beast/core/tcp_stream.hpp>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -23,13 +29,16 @@
 #include <stdexcept>
 
 #include <ismrmrd/ismrmrd.h>
+#include "mrd_stream_tags.hpp"
 
-namespace http = boost::beast::http;
+namespace net = boost::asio;
+using tcp = net::ip::tcp;
 
 struct Options {
-    std::string base_url{"http://localhost:8080"};
+    std::string host{"localhost"};
+    std::string port{"9100"};         // marshal --mrd-port
     std::string config_name{"simplefft"};
-    std::size_t frames{0};
+    std::size_t frames{0};            // 0 = infinite
     double interval{0.5};
     std::uint16_t nx{32};
     std::uint16_t ny{32};
@@ -45,124 +54,114 @@ Options parse_args(int argc, char** argv) {
             if (i + 1 < argc) return argv[++i];
             throw std::runtime_error("missing value for " + arg);
         };
-        if (arg == "--http")          opt.base_url = next();
-        else if (arg == "--config")   opt.config_name = next();
-        else if (arg == "--frames")   opt.frames = std::stoull(next());
-        else if (arg == "--interval") opt.interval = std::stod(next());
-        else if (arg == "--nx")       opt.nx = static_cast<uint16_t>(std::stoi(next()));
-        else if (arg == "--ny")       opt.ny = static_cast<uint16_t>(std::stoi(next()));
-        else if (arg == "--nz")       opt.nz = static_cast<uint16_t>(std::stoi(next()));
+        if (arg == "--host")           opt.host = next();
+        else if (arg == "--port")      opt.port = next();
+        else if (arg == "--config")    opt.config_name = next();
+        else if (arg == "--frames")    opt.frames = std::stoull(next());
+        else if (arg == "--interval")  opt.interval = std::stod(next());
+        else if (arg == "--nx")        opt.nx = static_cast<uint16_t>(std::stoi(next()));
+        else if (arg == "--ny")        opt.ny = static_cast<uint16_t>(std::stoi(next()));
+        else if (arg == "--nz")        opt.nz = static_cast<uint16_t>(std::stoi(next()));
         else if (arg == "--size") {
             auto v = static_cast<uint16_t>(std::stoi(next()));
             opt.nx = opt.ny = v;
         }
+        else if (arg == "--log-stride") opt.log_stride = std::stoull(next());
     }
     return opt;
 }
 
-struct HttpTarget {
-    std::string host;
-    std::string port;
-};
+// ── MRD TCP helpers ────────────────────────────────────────────
 
-HttpTarget parse_base_url(const std::string& url) {
-    auto rest = url.substr(7);
-    auto slash = rest.find('/');
-    std::string hostport = slash == std::string::npos ? rest : rest.substr(0, slash);
-    auto colon = hostport.find(':');
-    if (colon == std::string::npos) return {hostport, "80"};
-    return {hostport.substr(0, colon), hostport.substr(colon + 1)};
+void write_all(tcp::socket& sock, const void* data, size_t len) {
+    net::write(sock, net::buffer(data, len));
+}
+
+void send_config_file(tcp::socket& sock, const std::string& name) {
+    uint8_t buf[2 + 1024] = {};
+    uint16_t tag = mrd::MRD_MESSAGE_CONFIG_FILE;
+    std::memcpy(buf, &tag, 2);
+    std::memcpy(buf + 2, name.data(), std::min(name.size(), size_t(1024)));
+    write_all(sock, buf, sizeof(buf));
+}
+
+void send_metadata_xml(tcp::socket& sock, const std::string& xml) {
+    std::string with_nul = xml + '\0';
+    uint16_t tag = mrd::MRD_MESSAGE_METADATA_XML_TEXT;
+    uint32_t len = static_cast<uint32_t>(with_nul.size());
+    write_all(sock, &tag, 2);
+    write_all(sock, &len, 4);
+    write_all(sock, with_nul.data(), len);
+}
+
+// Send IMAGE (tag 1022): 2B tag + 198B header + 8B attr_len + attr + pixels
+void send_image(tcp::socket& sock, const ISMRMRD::ImageHeader& hdr,
+                const std::string& attr, const void* pixels, size_t pixel_bytes) {
+    uint16_t tag = mrd::MRD_MESSAGE_ISMRMRD_IMAGE;
+    uint64_t attr_len = attr.size();
+    write_all(sock, &tag, 2);
+    write_all(sock, &hdr, sizeof(hdr));
+    write_all(sock, &attr_len, sizeof(attr_len));
+    if (attr_len > 0)
+        write_all(sock, attr.data(), attr_len);
+    write_all(sock, pixels, pixel_bytes);
+}
+
+void send_close(tcp::socket& sock) {
+    uint16_t tag = mrd::MRD_MESSAGE_CLOSE;
+    write_all(sock, &tag, 2);
 }
 
 std::string make_xml_header(uint16_t nx, uint16_t ny, uint16_t nz) {
     std::ostringstream oss;
     oss << "<?xml version=\"1.0\"?>\n"
         << "<ismrmrdHeader xmlns=\"http://www.ismrmrd.org/ISMRMRD\">\n"
-        << "  <encoding><encodedSpace><matrixSize>"
+        << "  <experimentalConditions>\n"
+        << "    <H1resonanceFrequency_Hz>123000000</H1resonanceFrequency_Hz>\n"
+        << "  </experimentalConditions>\n"
+        << "  <encoding>\n"
+        << "    <encodedSpace><matrixSize>"
         << "<x>" << nx << "</x><y>" << ny << "</y><z>" << nz << "</z>"
-        << "</matrixSize></encodedSpace></encoding>\n"
+        << "</matrixSize><fieldOfView_mm><x>256</x><y>256</y><z>5</z></fieldOfView_mm>"
+        << "</encodedSpace>\n"
+        << "    <reconSpace><matrixSize>"
+        << "<x>" << nx << "</x><y>" << ny << "</y><z>" << nz << "</z>"
+        << "</matrixSize><fieldOfView_mm><x>256</x><y>256</y><z>5</z></fieldOfView_mm>"
+        << "</reconSpace>\n"
+        << "    <trajectory>cartesian</trajectory>\n"
+        << "  </encoding>\n"
         << "</ismrmrdHeader>\n";
     return oss.str();
 }
 
+// ── main ───────────────────────────────────────────────────────
+
 int main(int argc, char** argv) {
     try {
         Options opt = parse_args(argc, argv);
-        auto target = parse_base_url(opt.base_url);
 
-        std::cout << "image_streamer: Starting"
-                  << " nx=" << opt.nx << " ny=" << opt.ny << " nz=" << opt.nz << "\n";
+        std::cout << "image_streamer: MRD TCP image mock\n"
+                  << "  marshal: " << opt.host << ":" << opt.port << "\n"
+                  << "  nx=" << opt.nx << " ny=" << opt.ny << " nz=" << opt.nz << "\n";
 
-        boost::asio::io_context ioc;
-        boost::asio::ip::tcp::resolver resolver{ioc};
-        boost::beast::tcp_stream stream{ioc};
-        boost::beast::flat_buffer read_buffer;
+        net::io_context ioc;
+        tcp::resolver resolver{ioc};
+        tcp::socket sock{ioc};
 
-        auto do_connect = [&](const char* reason) {
-            boost::system::error_code ec;
-            if (stream.socket().is_open()) {
-                stream.socket().shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
-                stream.socket().close(ec);
-            }
-            for (int attempt = 0; attempt < 10; ++attempt) {
-                auto endpoints = resolver.resolve(target.host, target.port);
-                stream.connect(endpoints, ec);
-                if (!ec) {
-                    stream.socket().set_option(boost::asio::ip::tcp::no_delay(true));
-                    stream.expires_never();
-                    read_buffer.consume(read_buffer.size());
-                    if (reason) std::cout << "image_streamer: connected (" << reason << ")\n";
-                    return;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            }
-            throw std::runtime_error("unable to connect to marshal");
-        };
+        auto endpoints = resolver.resolve(opt.host, opt.port);
+        net::connect(sock, endpoints);
+        sock.set_option(tcp::no_delay(true));
+        std::cout << "image_streamer: connected\n";
 
-        auto post = [&](const std::string& path, const std::string& body) -> bool {
-            http::request<http::string_body> req{http::verb::post, path, 11};
-            req.set(http::field::host, target.host);
-            req.set(http::field::content_type, "application/octet-stream");
-            req.keep_alive(true);
-            req.body() = body;
-            req.prepare_payload();
-            boost::system::error_code ec;
-            http::write(stream, req, ec);
-            if (ec) return false;
-            http::response<http::string_body> res;
-            http::read(stream, read_buffer, res, ec);
-            read_buffer.consume(read_buffer.size());
-            return !ec;
-        };
-
-        auto post_binary = [&](const std::string& path, const uint8_t* data, size_t len) -> bool {
-            http::request<http::vector_body<uint8_t>> req{http::verb::post, path, 11};
-            req.set(http::field::host, target.host);
-            req.set(http::field::content_type, "application/octet-stream");
-            req.keep_alive(true);
-            req.body().assign(data, data + len);
-            req.prepare_payload();
-            boost::system::error_code ec;
-            http::write(stream, req, ec);
-            if (ec) return false;
-            http::response<http::string_body> res;
-            http::read(stream, read_buffer, res, ec);
-            read_buffer.consume(read_buffer.size());
-            return !ec;
-        };
-
-        do_connect("startup");
-
-        // POST /header + /config
-        post("/header", make_xml_header(opt.nx, opt.ny, opt.nz));
-        post("/config", opt.config_name);
+        // CONFIG_FILE + METADATA_XML
+        send_config_file(sock, opt.config_name);
+        send_metadata_xml(sock, make_xml_header(opt.nx, opt.ny, opt.nz));
+        std::cout << "image_streamer: config+header sent\n";
 
         const size_t pixel_count = static_cast<size_t>(opt.nx) * opt.ny * opt.nz;
         const size_t pixel_bytes = pixel_count * sizeof(float);
-        std::string attr_str = "";
-        uint64_t attr_len = attr_str.size();
-
         std::vector<float> pixels(pixel_count);
+
         auto next_deadline = std::chrono::steady_clock::now();
 
         for (size_t frame = 0; opt.frames == 0 || frame < opt.frames; ++frame) {
@@ -182,7 +181,7 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // Build wire-format image: 198B header + 8B attr_len + attr + pixels
+            // Build ImageHeader
             ISMRMRD::ImageHeader ihdr;
             std::memset(&ihdr, 0, sizeof(ihdr));
             ihdr.version = 1;
@@ -194,22 +193,8 @@ int main(int argc, char** argv) {
             ihdr.image_series_index = 0;
             ihdr.image_index = static_cast<uint16_t>(frame % 65535);
 
-            size_t total = sizeof(ihdr) + sizeof(uint64_t) + attr_len + pixel_bytes;
-            std::vector<uint8_t> wire(total);
-            size_t off = 0;
-            std::memcpy(wire.data() + off, &ihdr, sizeof(ihdr)); off += sizeof(ihdr);
-            std::memcpy(wire.data() + off, &attr_len, sizeof(attr_len)); off += sizeof(attr_len);
-            if (attr_len > 0) {
-                std::memcpy(wire.data() + off, attr_str.data(), attr_len);
-                off += attr_len;
-            }
-            std::memcpy(wire.data() + off, pixels.data(), pixel_bytes);
-
-            if (!post_binary("/frame", wire.data(), wire.size())) {
-                do_connect("frame error");
-                post("/header", make_xml_header(opt.nx, opt.ny, opt.nz));
-                post("/config", opt.config_name);
-            }
+            // Send over MRD TCP
+            send_image(sock, ihdr, "" /* empty attributes */, pixels.data(), pixel_bytes);
 
             if (frame % opt.log_stride == 0)
                 std::cout << "image " << frame << " sent\n";
@@ -225,7 +210,10 @@ int main(int argc, char** argv) {
             }
         }
 
-        post("/close", "");
+        send_close(sock);
+        boost::system::error_code ec;
+        sock.shutdown(tcp::socket::shutdown_both, ec);
+        sock.close();
         std::cout << "image_streamer: done\n";
 
     } catch (const std::exception& e) {
