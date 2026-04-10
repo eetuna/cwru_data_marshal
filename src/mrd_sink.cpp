@@ -61,7 +61,7 @@ void MrdSink::append_image(const std::string& varname, const ISMRMRD::ImageHeade
 
     // Dispatch on data_type to construct the correctly-typed Image<T>
     switch (hdr.data_type) {
-    case ISMRMRD_USHORT: {
+    case ISMRMRD::ISMRMRD_USHORT: {
         ISMRMRD::Image<uint16_t> img;
         img.setHead(hdr);
         if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
@@ -69,7 +69,7 @@ void MrdSink::append_image(const std::string& varname, const ISMRMRD::ImageHeade
         dataset_->appendImage(varname, img);
         break;
     }
-    case ISMRMRD_SHORT: {
+    case ISMRMRD::ISMRMRD_SHORT: {
         ISMRMRD::Image<int16_t> img;
         img.setHead(hdr);
         if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
@@ -77,7 +77,7 @@ void MrdSink::append_image(const std::string& varname, const ISMRMRD::ImageHeade
         dataset_->appendImage(varname, img);
         break;
     }
-    case ISMRMRD_UINT: {
+    case ISMRMRD::ISMRMRD_UINT: {
         ISMRMRD::Image<uint32_t> img;
         img.setHead(hdr);
         if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
@@ -85,7 +85,7 @@ void MrdSink::append_image(const std::string& varname, const ISMRMRD::ImageHeade
         dataset_->appendImage(varname, img);
         break;
     }
-    case ISMRMRD_INT: {
+    case ISMRMRD::ISMRMRD_INT: {
         ISMRMRD::Image<int32_t> img;
         img.setHead(hdr);
         if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
@@ -93,7 +93,7 @@ void MrdSink::append_image(const std::string& varname, const ISMRMRD::ImageHeade
         dataset_->appendImage(varname, img);
         break;
     }
-    case ISMRMRD_FLOAT: {
+    case ISMRMRD::ISMRMRD_FLOAT: {
         ISMRMRD::Image<float> img;
         img.setHead(hdr);
         if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
@@ -101,7 +101,7 @@ void MrdSink::append_image(const std::string& varname, const ISMRMRD::ImageHeade
         dataset_->appendImage(varname, img);
         break;
     }
-    case ISMRMRD_DOUBLE: {
+    case ISMRMRD::ISMRMRD_DOUBLE: {
         ISMRMRD::Image<double> img;
         img.setHead(hdr);
         if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
@@ -109,7 +109,7 @@ void MrdSink::append_image(const std::string& varname, const ISMRMRD::ImageHeade
         dataset_->appendImage(varname, img);
         break;
     }
-    case ISMRMRD_CXFLOAT: {
+    case ISMRMRD::ISMRMRD_CXFLOAT: {
         ISMRMRD::Image<complex_float_t> img;
         img.setHead(hdr);
         if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
@@ -117,7 +117,7 @@ void MrdSink::append_image(const std::string& varname, const ISMRMRD::ImageHeade
         dataset_->appendImage(varname, img);
         break;
     }
-    case ISMRMRD_CXDOUBLE: {
+    case ISMRMRD::ISMRMRD_CXDOUBLE: {
         ISMRMRD::Image<complex_double_t> img;
         img.setHead(hdr);
         if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
@@ -151,10 +151,13 @@ void MrdSink::append_unknown_bytes(const void* data, size_t len)
     std::lock_guard<std::mutex> lk(mtx_);
     if (!dataset_) return;
 
-    // Store as a 1D NDArray<uint8_t> under "unknown_data"
-    ISMRMRD::NDArray<uint8_t> arr;
-    std::vector<size_t> dims = {len};
+    // Store unknown bytes as a 1D float NDArray (reinterpret, pad to float boundary)
+    // This is a last resort — UNKNOWN data should be rare.
+    size_t nfloats = (len + sizeof(float) - 1) / sizeof(float);
+    ISMRMRD::NDArray<float> arr;
+    std::vector<size_t> dims = {nfloats};
     arr.resize(dims);
+    std::memset(arr.getDataPtr(), 0, nfloats * sizeof(float));
     std::memcpy(arr.getDataPtr(), data, len);
     dataset_->appendNDArray("unknown_data", arr);
 }

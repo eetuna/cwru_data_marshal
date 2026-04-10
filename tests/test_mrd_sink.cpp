@@ -56,10 +56,10 @@ TEST_CASE("MrdSink appends acquisitions and reads them back", "[mrd_sink]") {
 
         for (int i = 0; i < 3; ++i) {
             ISMRMRD::Acquisition acq(nsamples, nchannels);
-            acq.setHead(acq.getHead()); // init
-            auto& h = acq.getHead();
+            ISMRMRD::AcquisitionHeader h = acq.getHead();
             h.version = 1;
             h.scan_counter = static_cast<uint32_t>(i);
+            acq.setHead(h);
             // Fill with recognizable pattern
             for (uint16_t c = 0; c < nchannels; ++c)
                 for (uint16_t s = 0; s < nsamples; ++s)
@@ -94,7 +94,7 @@ TEST_CASE("MrdSink appends float images and reads them back", "[mrd_sink]") {
         ISMRMRD::ImageHeader hdr;
         std::memset(&hdr, 0, sizeof(hdr));
         hdr.version = 1;
-        hdr.data_type = ISMRMRD_FLOAT;
+        hdr.data_type = ISMRMRD::ISMRMRD_FLOAT;
         hdr.matrix_size[0] = nx;
         hdr.matrix_size[1] = ny;
         hdr.matrix_size[2] = nz;
@@ -116,7 +116,7 @@ TEST_CASE("MrdSink appends float images and reads them back", "[mrd_sink]") {
     ISMRMRD::Image<float> img;
     ds.readImage("image_0", 0, img);
     REQUIRE(img.getHead().matrix_size[0] == nx);
-    REQUIRE(img.getHead().data_type == ISMRMRD_FLOAT);
+    REQUIRE(img.getHead().data_type == ISMRMRD::ISMRMRD_FLOAT);
     REQUIRE(img.getDataPtr()[0] == Catch::Approx(42.0f));
     REQUIRE(img.getAttributeString() == std::string("test_attr"));
 }

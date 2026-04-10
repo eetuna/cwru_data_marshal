@@ -89,8 +89,9 @@ inline WsResult handle_ws_message(MarshalState &state, const std::string &text_d
 
     try
     {
-        auto entry = mrd::ingest_payload(state, binary_data.data(), binary_data.size(), "ws");
-        res.response = entry.dump();
+        // Binary WS ingestion removed in v2 — scanner uses HTTP POST /frame
+        nlohmann::json ack = {{"status", "ignored"}, {"reason", "use POST /frame"}};
+        res.response = ack.dump();
     }
     catch (const std::exception &e)
     {
@@ -120,10 +121,7 @@ public:
         {
             this->broadcast(msg);
         };
-        state_.ws_emit_topic = [this](const std::string &msg, const std::string &topic)
-        {
-            this->broadcast_to(msg, topic);
-        };
+        // ws_emit_topic removed in v2 — topic-based emit not needed
 
         boost::system::error_code ec;
         acceptor_.open(ep.protocol(), ec);

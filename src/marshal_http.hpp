@@ -169,7 +169,9 @@ static auto handle_post_frame(const http::request<Body>& req, MarshalState& stat
         const auto* ahdr = static_cast<const ISMRMRD::AcquisitionHeader*>(data);
         ISMRMRD::Acquisition acq(ahdr->number_of_samples, ahdr->active_channels,
                                  ahdr->trajectory_dimensions);
-        std::memcpy(&acq.getHead(), data, mrd::ACQUISITION_HEADER_BYTES);
+        ISMRMRD::AcquisitionHeader hdr_copy;
+        std::memcpy(&hdr_copy, data, mrd::ACQUISITION_HEADER_BYTES);
+        acq.setHead(hdr_copy);
         // Copy trajectory
         size_t traj_bytes = static_cast<size_t>(ahdr->trajectory_dimensions)
                           * ahdr->number_of_samples * sizeof(float);
@@ -358,21 +360,24 @@ static auto handle_put_transform(const http::request<Body>& req, MarshalState& s
 // ---------------------------------------------------------------------------
 template <class Body>
 static auto handle_post_pose(const http::request<Body>& req, MarshalState& state)
+    -> http::response<http::string_body>
 {
     try {
         auto j = nlohmann::json::parse(req.body());
-        Pose p;
-        p.t = std::chrono::system_clock::now();
+        Pose pose;
+        pose.t = std::chrono::system_clock::now();
         if (j.contains("position")) {
             auto& pos = j["position"];
-            p.position = {pos[0].get<double>(), pos[1].get<double>(), pos[2].get<double>()};
+            pose.p[0] = pos[0].template get<double>();
+            pose.p[1] = pos[1].template get<double>();
+            pose.p[2] = pos[2].template get<double>();
         }
         if (j.contains("orientation")) {
             auto& ori = j["orientation"];
             for (size_t i = 0; i < 9 && i < ori.size(); ++i)
-                p.rotation[i] = ori[i].get<double>();
+                pose.R[i] = ori[i].template get<double>();
         }
-        state.poses.set(p);
+        state.poses.set(pose);
     } catch (const std::exception& e) {
         return json_response(req, http::status::bad_request,
                              {{"error", std::string("bad JSON: ") + e.what()}});
