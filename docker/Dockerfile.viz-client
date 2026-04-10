@@ -44,5 +44,5 @@ WORKDIR /opt/mri
 # X11 display forwarding (set DISPLAY env var when running)
 ENV DISPLAY=:0
 
-# Default connection to MRI marshal WebSocket
-CMD ["/opt/mri/build/viz_client", "--ws", "ws://mri-marshal:8090/ws"]
+# Default: poll /image/latest for file path, open standalone file, render
+CMD ["/opt/mri/build/viz_client", "--http", "http://mri-marshal:8080"]

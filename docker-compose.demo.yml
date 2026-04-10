@@ -1,33 +1,23 @@
 # CWRU Data Marshal - Demo (Bridge Network)
 # Run: ./scripts/demo-docker.sh
-# Access: localhost:8080 (MRI), localhost:8081 (Robot), localhost:8090 (WebSocket)
+# Access: localhost:8080 (MRI Marshal)
 
 services:
   mri-marshal:
     image: cwru/mri-marshal:latest
     container_name: cwru-mri-marshal
     command:
-      - sh
-      - -c
-      - |
-        SESSION=/session-data/run_$$(date +%Y%m%d_%H%M%S)
-        mkdir -p $$SESSION/mrd
-        echo "[MRI Marshal] Starting on http://0.0.0.0:8080, ws://0.0.0.0:8090"
-        echo "[MRI Marshal] Data dir: $$SESSION"
-        if [ -n "$$RECON_ENDPOINT" ]; then
-          echo "[MRI Marshal] Reconstruction endpoint: $$RECON_ENDPOINT"
-          exec /opt/mri/build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data $$SESSION --recon-endpoint $$RECON_ENDPOINT
-        else
-          exec /opt/mri/build/marshal --http 0.0.0.0:8080 --ws 0.0.0.0:8090 --data $$SESSION
-        fi
-    environment:
-      - HDF5_USE_FILE_LOCKING=FALSE
-      - RECON_ENDPOINT=${RECON_ENDPOINT:-}
+      - /opt/mri/build/marshal
+      - --http
+      - "0.0.0.0:8080"
+      - --dump-dir
+      - /session-data
+      - --recon-url
+      - ${RECON_URL:-http://mock-recon:9002}
     volumes:
       - ${SESSION_DATA_DIR:-./session-data}:/session-data
     ports:
       - "8080:8080"
-      - "8090:8090"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 5s
@@ -60,7 +50,7 @@ services:
   image-streamer:
     image: cwru/image-streamer:latest
     container_name: cwru-image-streamer
-    command: ["./build/image_streamer", "--http", "http://mri-marshal:8080", "--dt-ms", "${IMAGE_INTERVAL}", "--width", "${IMAGE_WIDTH}", "--height", "${IMAGE_HEIGHT}", "--slices", "${IMAGE_SLICES}", "--log-stride", "${IMAGE_LOG_STRIDE}"]
+    command: ["./build/image_streamer", "--http", "http://mri-marshal:8080", "--interval", "${IMAGE_INTERVAL}", "--nx", "${IMAGE_WIDTH}", "--ny", "${IMAGE_HEIGHT}", "--nz", "${IMAGE_SLICES}"]
     depends_on:
       mri-marshal:
         condition: service_healthy
@@ -70,7 +60,7 @@ services:
   ecg-client:
     image: cwru/ecg-client:latest
     container_name: cwru-ecg-client
-    command: ["sh", "-c", "sleep 1 && python3 ecg_client.py --endpoint http://mri-marshal:8080 --count 0 --interval ${ECG_INTERVAL} --heart-rate ${ECG_HEART_RATE} --samples 1"]
+    command: ["python3", "-u", "ecg_client.py", "--http", "http://mri-marshal:8080", "--count", "0", "--interval", "${ECG_INTERVAL}"]
     depends_on:
       mri-marshal:
         condition: service_healthy
@@ -80,7 +70,7 @@ services:
   pose-client:
     image: cwru/pose-client:latest
     container_name: cwru-pose-client
-    command: ["python3", "pose_client.py", "--endpoint", "http://mri-marshal:8080", "--count", "0", "--interval", "${POSE_INTERVAL}", "--trajectory", "${POSE_TRAJECTORY}"]
+    command: ["python3", "-u", "pose_client.py", "--http", "http://mri-marshal:8080", "--count", "0", "--interval", "${POSE_INTERVAL}"]
     depends_on:
       mri-marshal:
         condition: service_healthy
@@ -90,6 +80,8 @@ services:
   mock-recon:
     image: cwru/mock-recon:latest
     container_name: cwru-mock-recon
+    environment:
+      - MARSHAL_URL=http://mri-marshal:8080
     ports:
       - "9002:9002"
     healthcheck:
@@ -104,7 +96,7 @@ services:
   kspace-streamer:
     image: cwru/kspace-streamer:latest
     container_name: cwru-kspace-streamer
-    command: ["./build/kspace_streamer", "--http", "http://mri-marshal:8080", "--stream", "raw_scan", "--dt-ms", "${KSPACE_INTERVAL:-100}", "--slices", "${KSPACE_SLICES:-5}"]
+    command: ["./build/kspace_streamer", "--http", "http://mri-marshal:8080", "--interval", "${KSPACE_INTERVAL:-0.5}", "--slices", "${KSPACE_SLICES:-5}"]
     depends_on:
       mri-marshal:
         condition: service_healthy
@@ -114,22 +106,11 @@ services:
   viz-client:
     image: cwru/viz-client:latest
     container_name: cwru-viz-client
-    command:
-      - sh
-      - -c
-      - |
-        echo "[Viz Client] Waiting for new frame from image-streamer..."
-        # Record current frame index
-        INITIAL=$$(curl -s http://mri-marshal:8080/v1/mrd/latest | grep -o '"frame_index":[0-9]*' | grep -o '[0-9]*' || echo "-1")
-        # Wait for WebSocket notification (blocks until new frame arrives)
-        echo '{"subscribe":"mrd"}' | timeout 300 websocat -n1 wss://mri-marshal:8090/ws >/dev/null 2>&1 || true
-        echo "[Viz Client] Frame received, starting visualization..."
-        exec ./build/viz_client --http http://mri-marshal:8080/v1/mrd/latest
+    command: ["./build/viz_client", "--http", "http://mri-marshal:8080"]
     environment:
       - DISPLAY=${DISPLAY:-:0}
       - XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir
       - WAYLAND_DISPLAY=wayland-0
-      - HDF5_USE_FILE_LOCKING=FALSE
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /mnt/wslg:/mnt/wslg:rw

@@ -42,4 +42,4 @@ ENV MRI_MARSHAL_HTTP=http://mri-marshal:8080
 
 # Default: run kspace_streamer with configurable parameters
 # Override with docker run command or docker-compose command
-CMD ["./build/kspace_streamer", "--http", "http://mri-marshal:8080", "--stream", "kspace_stream", "--interval", "0.1"]
+CMD ["./build/kspace_streamer", "--http", "http://mri-marshal:8080", "--interval", "0.5", "--slices", "5"]
