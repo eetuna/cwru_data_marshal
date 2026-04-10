@@ -6,6 +6,7 @@ services:
   mri-marshal:
     image: cwru/mri-marshal:latest
     container_name: cwru-mri-marshal
+    restart: unless-stopped
     command:
       - /opt/mri/build/marshal
       - --http
@@ -34,6 +35,7 @@ services:
   robot-marshal:
     image: cwru/robot-marshal:latest
     container_name: cwru-robot-marshal
+    restart: unless-stopped
     command:
       - sh
       - -c
@@ -54,6 +56,7 @@ services:
   image-streamer:
     image: cwru/image-streamer:latest
     container_name: cwru-image-streamer
+    restart: unless-stopped
     command: ["./build/image_streamer", "--host", "mri-marshal", "--port", "9100", "--interval", "${IMAGE_INTERVAL}", "--nx", "${IMAGE_WIDTH}", "--ny", "${IMAGE_HEIGHT}", "--nz", "${IMAGE_SLICES}"]
     depends_on:
       mri-marshal:
@@ -68,6 +71,7 @@ services:
   pose-client:
     image: cwru/pose-client:latest
     container_name: cwru-pose-client
+    restart: unless-stopped
     command: ["python3", "-u", "pose_client.py", "--http", "http://mri-marshal:8080", "--count", "0", "--interval", "${POSE_INTERVAL}"]
     depends_on:
       mri-marshal:
@@ -78,12 +82,13 @@ services:
   mock-recon:
     image: cwru/mock-recon:latest
     container_name: cwru-mock-recon
+    restart: unless-stopped
     # No MARSHAL_URL needed — mock-recon sends images back on the same MRD TCP connection
     ports:
       - "9002:9002"
     healthcheck:
       # TCP-based healthcheck (mock-recon is a TCP server, not HTTP)
-      test: ["CMD", "bash", "-c", "echo | nc -z localhost 9002"]
+      test: ["CMD", "python3", "-c", "import socket; s=socket.create_connection(('localhost',9002),timeout=2); s.close()"]
       interval: 5s
       timeout: 3s
       start_period: 5s
@@ -94,6 +99,7 @@ services:
   kspace-streamer:
     image: cwru/kspace-streamer:latest
     container_name: cwru-kspace-streamer
+    restart: unless-stopped
     command: ["./build/kspace_streamer", "--host", "mri-marshal", "--port", "9100", "--ecg", "--interval", "${KSPACE_INTERVAL:-0.5}", "--slices", "${KSPACE_SLICES:-5}"]
     depends_on:
       mri-marshal:

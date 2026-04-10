@@ -28,6 +28,6 @@ COPY .worktrees/mri_data_marshal/docker/mock-recon/mock_recon.py /opt/mock-recon
 EXPOSE 9002
 
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
-    CMD bash -c "echo | timeout 2 bash -c 'cat < /dev/tcp/127.0.0.1/9002' 2>/dev/null" || exit 1
+    CMD python3 -c "import socket; s=socket.create_connection(('localhost',9002),timeout=2); s.close()" || exit 1
 
 CMD ["python3", "/opt/mock-recon/mock_recon.py"]
