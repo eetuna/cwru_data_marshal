@@ -1,114 +1,107 @@
 /*
  * File: src/marshal_state.hpp
- * Project: CWRU Data Marshal
- * Purpose: Internal support module
- * Notes:
- *  - See docs/PURPOSE.md and docs/ARCHITECTURE.md
- *  - Atomic file writes via include/atomic_write.hpp
- *  - /health returns constant JSON; no shared state
- *  - WebSocket ping/pong keepalive recommended
- * Last updated: 2025-09-15
+ * Project: CWRU Data Marshal - MRI Marshal
+ * Purpose: Global mutable state shared across HTTP handlers
+ *
+ * Two sinks (scanner + recon), transform delta, pose cache,
+ * stored XML + config per scan, optional recon forwarding.
  */
 
 #pragma once
+
 #include <atomic>
-#include <mutex>
-#include <memory>
-#include <string>
 #include <chrono>
-#include <queue>
-#include <thread>
-#include <condition_variable>
-#include <unordered_map>
+#include <cstring>
 #include <filesystem>
-#include <boost/asio.hpp>
-#include <nlohmann/json.hpp>
+#include <memory>
+#include <mutex>
+#include <string>
+
 #include "common/pose.hpp"
+#include "mrd_sink.hpp"
 
-namespace mrd
-{
-class MrdSink;
+struct SliceTransform {
+    double through_plane_mm{0};
+    double readout_mm{0};
+    double phase_mm{0};
+    double rotation_rad{0};
 
-struct FlushPolicy
-{
-    std::size_t max_pending_frames{1};
-    std::chrono::milliseconds max_pending_interval{0};
-};
-}
-enum class SinkMode
-{
-    MRD,
-    DUMPBOX
-};
+    bool is_zero() const {
+        return through_plane_mm == 0 && readout_mm == 0
+            && phase_mm == 0 && rotation_rad == 0;
+    }
 
-struct HubClient
-{
-    std::shared_ptr<void> ws;
-}; // opaque holder
-
-struct IndexEntry
-{
-    std::chrono::system_clock::time_point t;
-    std::string file;
-    uint64_t seq{0};
-    std::string type{"acq"};
+    void clear() {
+        through_plane_mm = 0;
+        readout_mm = 0;
+        phase_mm = 0;
+        rotation_rad = 0;
+    }
 };
 
-struct MarshalState
-{
-    SinkMode sink_mode{SinkMode::MRD};
-    std::string dumpbox_root{"./data/dumpbox"};
-    std::string dumpbox_session{};
-    std::atomic<uint64_t> seq{0};
-    mrd::FlushPolicy flush_policy{1, std::chrono::milliseconds{0}};
+struct MarshalState {
+    // --dump-dir root
+    std::filesystem::path dump_dir{"./data"};
 
+    // --recon-url (empty = archival-only mode)
+    std::string recon_url;
+
+    // --http and --ws-port
+    std::string http_host{"0.0.0.0"};
+    uint16_t http_port{8080};
+    uint16_t ws_port{0}; // 0 = disabled
+
+    // Max request body (128 MiB default)
+    std::size_t max_body_bytes{128ULL * 1024ULL * 1024ULL};
+
+    // Server uptime
+    std::chrono::steady_clock::time_point start{std::chrono::steady_clock::now()};
+
+    // ------ Per-scan state (reset by POST /close) ------
+
+    // True after POST /header, cleared by POST /close
+    std::atomic<bool> header_received{false};
+    // True after POST /config, cleared by POST /close
+    std::atomic<bool> config_received{false};
+
+    // Stored XML header and config name for current scan
+    std::mutex scan_mtx;
+    std::string current_xml_header;
+    std::string current_config;
+
+    // Scanner-side HDF5 sink (from_scanner/)
+    std::unique_ptr<mrd::MrdSink> scanner_sink;
+
+    // Recon-side HDF5 sink (from_reconstruction/), opened lazily on first POST /image
+    std::unique_ptr<mrd::MrdSink> recon_sink;
+
+    // ------ Persistent state (survives across scans) ------
+
+    // Slice transform delta (GET zeros after returning)
+    std::mutex transform_mtx;
+    SliceTransform transform;
+
+    // Pose cache
     PoseStore poses;
-    std::string data_dir{"./data"};
-    std::mutex session_mtx; // Protects dumpbox_session initialization
-    std::size_t max_body_bytes{128ULL * 1024ULL * 1024ULL}; // Default 128 MiB
-    boost::asio::io_context *io = nullptr;
-    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
 
-    // WS emit hook (set by WsServer on init). Safe to call from HTTP handlers.
-    std::function<void(const std::string &)> ws_emit = [](const std::string &) {};
+    // Latest image path for GET /image/latest
+    std::mutex latest_image_mtx;
+    std::string latest_image_path;
+    bool latest_image_error{false}; // true when reconstruction-failed PNG
 
-    // Optional topic-based emit hook (set by WsServer on init).
-    std::function<void(const std::string &, const std::string &topic)> ws_emit_topic =
-        [](const std::string &, const std::string &) {};
+    // WS emit hook (set by WsServer on init, optional)
+    std::function<void(const std::string&)> ws_emit = [](const std::string&) {};
 
-    std::shared_ptr<mrd::MrdSink> mrd_sink;
+    // ------ Methods ------
 
-    // JSON write queue (non-blocking) - for async disk I/O
-    enum class WriteType { MRD, BIO, POSE };
-    struct WriteRequest {
-        WriteType type;
-        std::string data;
-    };
-    std::queue<WriteRequest> json_write_queue;
-    std::mutex json_queue_mutex;
-    std::condition_variable json_queue_cv;
-    std::atomic<bool> json_writer_running{true};
-    std::thread json_writer_thread;
-    std::filesystem::path json_index_path;   // MRD index.jsonl
-    std::filesystem::path json_latest_path;  // MRD latest.json
-    std::filesystem::path json_bio_path;     // bio.jsonl
-    std::filesystem::path json_pose_path;    // poses.jsonl
-
-    // In-memory latest (for fast endpoint reads)
-    std::mutex latest_mrd_mutex;
-    std::string latest_mrd_json;
-
-    std::mutex latest_bio_mutex;
-    std::string latest_bio_json;
-
-    std::mutex latest_pose_mutex;
-    std::string latest_pose_json;
-
-    // Reconstruction service configuration (Phase 2)
-    std::string recon_endpoint;    // e.g., "http://localhost:9002"
-    bool recon_enabled{false};     // True if --recon-endpoint provided
-
-    // Reply-to mapping: job_id -> URL to POST reconstructed images back to
-    std::mutex reply_to_mutex;
-    std::unordered_map<std::string, std::string> reply_to_urls;
+    // Close both sinks and clear per-scan state. Ready for next POST /header.
+    void close_scan() {
+        std::lock_guard<std::mutex> lk(scan_mtx);
+        if (scanner_sink) { scanner_sink->close(); scanner_sink.reset(); }
+        if (recon_sink)   { recon_sink->close();   recon_sink.reset(); }
+        current_xml_header.clear();
+        current_config.clear();
+        header_received.store(false);
+        config_received.store(false);
+    }
 };
