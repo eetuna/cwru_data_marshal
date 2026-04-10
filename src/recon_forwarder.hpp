@@ -183,8 +183,7 @@ private:
                 if (msg_id == MRD_MESSAGE_ISMRMRD_IMAGE) {
                     read_image_from_recon();
                 } else if (msg_id == MRD_MESSAGE_CLOSE) {
-                    LOG_INFO("Recon sent CLOSE");
-                    break;
+                    LOG_INFO("Recon sent CLOSE (batch done)");
                 } else if (msg_id == MRD_MESSAGE_TEXT) {
                     // Read and log text message
                     uint32_t len = 0;

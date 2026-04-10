@@ -140,9 +140,10 @@ def handle_connection(conn, addr):
                         send_image(conn, img, image_series)
                         image_series += 1
                 kspace_buffer = {}
-                # Send CLOSE back
+                acq_count = 0
+                # Send CLOSE back but keep connection open for next volume
                 conn.sendall(struct.pack('<H', MRD_MESSAGE_CLOSE))
-                break
+                # Don't break — loop back and wait for next CONFIG/data on same connection
 
             elif msg_id == MRD_MESSAGE_TEXT:
                 length = struct.unpack('<I', read_exact(conn, 4))[0]
