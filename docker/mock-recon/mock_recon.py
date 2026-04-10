@@ -179,8 +179,8 @@ def handle_connection(conn, addr):
                     kspace_buffer[slice_idx] = []
                 kspace_buffer[slice_idx].append((line_idx, samples))
 
-                # Check LAST_IN_SLICE flag (bit index 3, i.e. ISMRMRD_ACQ_LAST_IN_SLICE=4)
-                if h.flags & (1 << 3):
+                # Check LAST_IN_SLICE flag (ISMRMRD_ACQ_LAST_IN_SLICE=8, bit index 7)
+                if h.flags & (1 << 7):
                     lines = kspace_buffer.pop(slice_idx, [])
                     if lines:
                         img = reconstruct_slice(lines, enc_nx, enc_ny)
