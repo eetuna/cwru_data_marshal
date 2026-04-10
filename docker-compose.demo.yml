@@ -78,16 +78,9 @@ services:
   mock-recon:
     image: cwru/mock-recon:latest
     container_name: cwru-mock-recon
-    # No MARSHAL_URL needed — mock-recon sends images back on the same MRD TCP connection
+    # MRD TCP server — no healthcheck (TCP probe connections interfere with the protocol)
     ports:
       - "9002:9002"
-    healthcheck:
-      # TCP-based healthcheck (mock-recon is a TCP server, not HTTP)
-      test: ["CMD", "python3", "-c", "import socket; s=socket.create_connection(('localhost',9002),timeout=2); s.close()"]
-      interval: 5s
-      timeout: 3s
-      start_period: 5s
-      retries: 3
     networks:
       - cwru-net
 
