@@ -59,7 +59,6 @@ fi
 
 echo "[1/3] Building MRI Marshal and Clients..."
 echo "  - cwru/mri-marshal"
-echo "  - cwru/ecg-client"
 echo "  - cwru/pose-client"
 echo "  - cwru/image-streamer"
 echo "  - cwru/viz-client"
@@ -72,10 +71,6 @@ cd "$MRI_WORKTREE"
 # Build MRI Marshal
 echo "Building cwru/mri-marshal..."
 docker build -f "$PROJECT_ROOT/docker/Dockerfile.mri" -t cwru/mri-marshal:latest .
-
-# Build ECG Client
-echo "Building cwru/ecg-client..."
-docker build -f "$PROJECT_ROOT/docker/Dockerfile.ecg-client" -t cwru/ecg-client:latest .
 
 # Build Pose Client
 echo "Building cwru/pose-client..."
@@ -119,7 +114,6 @@ REQUIRED_IMAGES=(
     "cwru/mri-marshal"
     "cwru/robot-marshal"
     "cwru/image-streamer"
-    "cwru/ecg-client"
     "cwru/pose-client"
     "cwru/kspace-streamer"
     "cwru/mock-recon"
@@ -141,7 +135,7 @@ done
 echo ""
 if [ "$ALL_GOOD" = true ]; then
     echo "============================================"
-    echo "  Build complete! All 9 images ready."
+    echo "  Build complete! All 8 images ready."
     echo "============================================"
     echo ""
     echo "Next steps:"

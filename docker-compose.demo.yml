@@ -109,7 +109,6 @@ services:
     depends_on:
       mri-marshal:
         condition: service_healthy
-    restart: on-failure
     networks:
       - cwru-net
     profiles:

@@ -1,8 +1,9 @@
 # cwru/mock-recon:latest
 #
 # Mock reconstruction service for the v2 marshal.
-# Accepts /header + /config + /frame + /close from marshal,
-# performs reconstruction, and POSTs /image back to marshal.
+# MRD TCP server on port 9002 (python-ismrmrd-server wire protocol).
+# Accepts CONFIG, METADATA_XML, ACQUISITION, WAVEFORM, IMAGE, CLOSE.
+# Sends reconstructed IMAGE(1022) back on same TCP connection.
 #
 # Listens on port 9002.
 
@@ -19,11 +20,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 # Python deps
 RUN pip install --no-cache-dir \
         ismrmrd \
-        numpy \
-        requests
+        numpy
 
 # Copy mock recon server
-COPY .worktrees/mri_data_marshal/docker/mock-recon/mock_recon.py /opt/mock-recon/mock_recon.py
+COPY docker/mock-recon/mock_recon.py /opt/mock-recon/mock_recon.py
 
 EXPOSE 9002
 
