@@ -180,6 +180,7 @@ ${dump_dir}/
 
 - Scanner MRD TCP messages -> scanner archive
 - Recon MRD TCP image messages -> recon archive + standalone file
+- Recon failure -> scanner MRD `IMAGE(1022)` failure image + HTTP/viz `latest_error.png`
 - HDF5 files are readable only after `/close`
 - `latest_image.bin` is updated atomically during the scan for live viewing
 

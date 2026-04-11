@@ -59,5 +59,7 @@ HTTP is only for non-scanner clients:
 
 The marshal process must remain up if recon fails. Scanner data should continue to be accepted and archived. Recon connection state must be reset so a later scan can reconnect.
 
-For non-scanner clients, recon failure is exposed through `GET /image/latest` with `error: true` and a failure image path. If scanner-visible failure indication is required, it must be sent as a valid MRD return message on the scanner TCP connection.
+Recon failure is exposed in two ways:
 
+- scanner clients receive a valid MRD `IMAGE(1022)` failure image on the existing scanner TCP connection
+- non-scanner clients see `GET /image/latest` return `error: true` and a failure PNG path

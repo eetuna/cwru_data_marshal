@@ -140,6 +140,7 @@ The marshal stays running regardless of recon failure:
 
 - Recon return reading runs on a background thread.
 - If recon is unreachable, scanner-side archival continues and recon connection state is reset for a later reconnect.
+- A scanner-visible MRD `IMAGE(1022)` failure image is pushed on the active scanner TCP connection.
 - `latest_error.png` is written so the viz client visually shows "reconstruction failed"
 - T4 test: kill recon mid-scan, assert marshal still accepts MRD TCP connections and GET /health returns 200
 

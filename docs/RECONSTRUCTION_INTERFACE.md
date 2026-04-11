@@ -105,6 +105,7 @@ If the recon service is unreachable or crashes mid-scan:
 
 - The marshal's recon forwarder marks the recon connection disconnected and logs a warning
 - The marshal continues accepting scanner data (archival continues)
+- A scanner-visible MRD `IMAGE(1022)` failure image is pushed on the active scanner TCP connection
 - A "reconstruction failed" PNG is written to `latest_error.png`
 - `GET /image/latest` returns `{"path": "...latest_error.png", "error": true}`
 - The viz client displays the failure visually

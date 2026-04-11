@@ -42,6 +42,9 @@ When reconstruction has failed:
 {"path": "/session-data/from_reconstruction/latest_error.png", "error": true}
 ```
 
+If a scanner MRD TCP connection is active when recon fails, the scanner also
+receives a valid MRD `IMAGE(1022)` failure image on that same connection.
+
 #### GET /transform
 
 Returns the current slice transform delta and atomically zeros it (consume-on-read):
