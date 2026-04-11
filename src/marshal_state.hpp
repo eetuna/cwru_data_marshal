@@ -91,6 +91,7 @@ struct MarshalState {
     std::string latest_image_path;
     bool latest_image_error{false};
     uint32_t latest_image_count{0};
+    std::atomic<bool> recon_failure_reported{false};
 
     // Multi-slice buffering: collect all spatial slices before writing to file
     uint16_t expected_slices{0};  // From METADATA_XML <z> field; 0 = unknown
@@ -114,6 +115,7 @@ struct MarshalState {
         current_config.clear();
         header_received.store(false);
         config_received.store(false);
+        recon_failure_reported.store(false);
         expected_slices = 0;
         slice_buffer.clear();
     }

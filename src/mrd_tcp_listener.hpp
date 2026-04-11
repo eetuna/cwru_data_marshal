@@ -203,6 +203,7 @@ private:
                         state_.scanner_sink->set_header(xml);
                         state_.current_xml_header = xml;
                         state_.expected_slices = nz;
+                        state_.recon_failure_reported.store(false);
                         state_.slice_buffer.clear();
                         // Close recon sink from previous scan
                         if (state_.recon_sink) {

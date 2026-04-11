@@ -11,12 +11,14 @@
 #include "logging.hpp"
 
 #include <atomic>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <limits>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <boost/asio.hpp>
 
@@ -44,6 +46,56 @@ static void write_error_png(const fs::path& dump_dir)
     };
     auto path = mrd::recon_dir(dump_dir) / "latest_error.png";
     mrd::write_standalone_file(path, png, sizeof(png));
+}
+
+static std::vector<uint8_t> build_recon_failure_image_body()
+{
+    constexpr uint16_t nx = 128;
+    constexpr uint16_t ny = 128;
+
+    ISMRMRD::ImageHeader hdr;
+    std::memset(&hdr, 0, sizeof(hdr));
+    hdr.version = 1;
+    hdr.data_type = ISMRMRD::ISMRMRD_FLOAT;
+    hdr.matrix_size[0] = nx;
+    hdr.matrix_size[1] = ny;
+    hdr.matrix_size[2] = 1;
+    hdr.channels = 1;
+    hdr.field_of_view[0] = static_cast<float>(nx);
+    hdr.field_of_view[1] = static_cast<float>(ny);
+    hdr.field_of_view[2] = 1.0f;
+    hdr.image_type = ISMRMRD::ISMRMRD_IMTYPE_MAGNITUDE;
+    hdr.image_series_index = 9999;
+
+    const std::string attr =
+        "<ismrmrdMeta><meta><name>DataRole</name><value>ReconFailure</value></meta>"
+        "<meta><name>ErrorMessage</name><value>RECON FAILED</value></meta></ismrmrdMeta>\0";
+    const uint64_t attr_len = static_cast<uint64_t>(attr.size());
+
+    std::vector<float> pixels(static_cast<size_t>(nx) * ny, 0.05f);
+    for (uint16_t y = 0; y < ny; ++y) {
+        for (uint16_t x = 0; x < nx; ++x) {
+            const bool border = x < 4 || y < 4 || x >= nx - 4 || y >= ny - 4;
+            const bool diag = (x > y ? x - y : y - x) < 3;
+            const bool anti = (x + y > nx - 3) && (x + y < nx + 3);
+            if (border || diag || anti) {
+                pixels[static_cast<size_t>(y) * nx + x] = 1.0f;
+            }
+        }
+    }
+
+    const size_t pixel_bytes = pixels.size() * sizeof(float);
+    std::vector<uint8_t> body(mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t) +
+                              attr_len + pixel_bytes);
+    size_t off = 0;
+    std::memcpy(body.data() + off, &hdr, mrd::IMAGE_HEADER_BYTES);
+    off += mrd::IMAGE_HEADER_BYTES;
+    std::memcpy(body.data() + off, &attr_len, sizeof(uint64_t));
+    off += sizeof(uint64_t);
+    std::memcpy(body.data() + off, attr.data(), attr_len);
+    off += attr_len;
+    std::memcpy(body.data() + off, pixels.data(), pixel_bytes);
+    return body;
 }
 
 namespace {
@@ -159,9 +211,19 @@ int main(int argc, char** argv)
         auto on_failure = [&state]() {
             write_error_png(state.dump_dir);
             auto png_path = mrd::recon_dir(state.dump_dir) / "latest_error.png";
-            std::lock_guard<std::mutex> lk(state.latest_image_mtx);
-            state.latest_image_path = png_path.string();
-            state.latest_image_error = true;
+            {
+                std::lock_guard<std::mutex> lk(state.latest_image_mtx);
+                state.latest_image_path = png_path.string();
+                state.latest_image_error = true;
+            }
+
+            if (state.recon_failure_reported.exchange(true) == false) {
+                auto body = build_recon_failure_image_body();
+                try {
+                    state.mrd_push_message(mrd::MRD_MESSAGE_ISMRMRD_IMAGE,
+                                           body.data(), body.size());
+                } catch (...) {}
+            }
         };
 
         // Recon return callback: archive IMAGE messages for non-scanner clients,

@@ -8,6 +8,7 @@ for health and latest-file query/control checks.
 
 import json
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -88,19 +89,37 @@ class TestMarshalIntegration(unittest.TestCase):
         return subprocess.run(cmd, text=True, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, timeout=timeout)
 
+    def start_kspace_async(self):
+        cmd = [
+            KSPACE_STREAMER,
+            "--host", "localhost",
+            "--port", str(MARSHAL_MRD_PORT),
+            "--volumes", "0",
+            "--interval", "0.02",
+            "--samples", "32",
+            "--lines", "32",
+            "--slices", "5",
+            "--log-stride", "1",
+        ]
+        return subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+
+    def stop_proc(self, proc):
+        if proc and proc.poll() is None:
+            proc.send_signal(signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        if proc:
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
+
     def stop_all(self):
         for proc in [self.marshal_proc, self.recon_proc]:
-            if proc and proc.poll() is None:
-                proc.send_signal(signal.SIGTERM)
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-            if proc:
-                if proc.stdout:
-                    proc.stdout.close()
-                if proc.stderr:
-                    proc.stderr.close()
+            self.stop_proc(proc)
         self.marshal_proc = None
         self.recon_proc = None
 
@@ -157,6 +176,52 @@ class TestMarshalIntegration(unittest.TestCase):
         second = self.run_kspace(volumes=1)
         self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
         self.assertIn("received", second.stdout)
+
+    def test_t5_recon_failure_pushes_mrd_error_image_to_scanner(self):
+        self.start_recon()
+        self.start_marshal(with_recon=True)
+        scanner = self.start_kspace_async()
+        try:
+            saw_normal_image = False
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                ready, _, _ = select.select([scanner.stdout], [], [], 0.2)
+                if not ready:
+                    continue
+                line = scanner.stdout.readline()
+                if "received 1 reconstructed image" in line:
+                    saw_normal_image = True
+                    break
+            self.assertTrue(saw_normal_image, "Scanner did not receive initial recon image")
+
+            self.recon_proc.kill()
+            self.recon_proc.wait(timeout=5)
+            self.stop_proc(self.recon_proc)
+            self.recon_proc = None
+
+            saw_failure_image = False
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                ready, _, _ = select.select([scanner.stdout], [], [], 0.2)
+                if not ready:
+                    if scanner.poll() is not None:
+                        break
+                    continue
+                line = scanner.stdout.readline()
+                if "received recon failure image" in line:
+                    saw_failure_image = True
+                    break
+                if scanner.poll() is not None:
+                    break
+            self.assertTrue(saw_failure_image, "Scanner did not receive MRD failure image")
+
+            status, body = http_get(f"{self.base()}/image/latest")
+            self.assertEqual(status, 200)
+            latest = json.loads(body)
+            self.assertTrue(latest["error"])
+            self.assertTrue(os.path.exists(latest["path"]))
+        finally:
+            self.stop_proc(scanner)
 
 
 if __name__ == "__main__":

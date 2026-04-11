@@ -199,8 +199,9 @@ void reader_thread(tcp::socket& sock, std::atomic<bool>& running,
                 if (ec) break;
 
                 // Read attribute string
+                std::vector<char> attr;
                 if (attr_len > 0) {
-                    std::vector<char> attr(attr_len);
+                    attr.resize(attr_len);
                     net::read(sock, net::buffer(attr.data(), attr_len), ec);
                     if (ec) break;
                 }
@@ -232,6 +233,12 @@ void reader_thread(tcp::socket& sock, std::atomic<bool>& running,
                 size_t n = images_received.load();
                 if (n == 1 || n % 10 == 0)
                     std::cout << "kspace_streamer: received " << n << " reconstructed image(s) back\n";
+                if (!attr.empty()) {
+                    std::string attr_text(attr.begin(), attr.end());
+                    if (attr_text.find("ReconFailure") != std::string::npos) {
+                        std::cout << "kspace_streamer: received recon failure image\n";
+                    }
+                }
             }
             else if (tag == mrd::MRD_MESSAGE_CLOSE) {
                 std::cout << "kspace_streamer: received CLOSE from marshal\n";
