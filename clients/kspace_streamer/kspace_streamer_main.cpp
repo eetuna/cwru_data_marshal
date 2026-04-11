@@ -266,6 +266,9 @@ int main(int argc, char** argv) {
     try {
         Options opt = parse_args(argc, argv);
 
+        std::cout << std::unitbuf;
+        std::cerr << std::unitbuf;
+
         std::cout << "kspace_streamer: MRD TCP scanner mock\n"
                   << "  marshal: " << opt.host << ":" << opt.port << "\n"
                   << "  config: " << opt.config_name << "\n"
@@ -285,9 +288,15 @@ int main(int argc, char** argv) {
         sock.set_option(tcp::no_delay(true));
         std::cout << "kspace_streamer: connected to " << opt.host << ":" << opt.port << "\n";
 
-        // Start reader thread for returned images
         std::atomic<bool> reader_running{true};
         std::atomic<size_t> images_received{0};
+
+        // Start reader thread BEFORE sending data. It MUST run during the scan
+        // to drain IMAGE(1022) pushed back by the marshal. Without it, TCP
+        // buffers fill and the entire pipeline deadlocks.
+        // Concurrent sync read+write on the same TCP fd is safe on Linux
+        // (same pattern as python-ismrmrd-server client.py: separate process
+        // for reading, main thread for writing, same socket).
         std::thread reader([&]() {
             reader_thread(sock, reader_running, images_received);
         });
@@ -409,7 +418,7 @@ int main(int argc, char** argv) {
         send_close(sock);
         std::cout << "kspace_streamer: CLOSE sent, " << volume_index << " volumes\n";
 
-        // Wait for reader to finish (marshal may push final images)
+        // Wait for reader to finish (marshal may push final images after CLOSE)
         std::this_thread::sleep_for(std::chrono::seconds(2));
         reader_running.store(false);
 

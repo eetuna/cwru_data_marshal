@@ -34,18 +34,13 @@ namespace fs = std::filesystem;
 // For now, we generate a placeholder at runtime.
 static void write_error_png(const fs::path& dump_dir)
 {
-    // Minimal valid PNG: 1x1 red pixel
+    // Valid 8x8 red PNG (75 bytes) — generated with correct CRC and zlib checksums
     static const uint8_t png[] = {
-        0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A, // PNG signature
-        0x00,0x00,0x00,0x0D,0x49,0x48,0x44,0x52, // IHDR chunk
-        0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,
-        0x08,0x02,0x00,0x00,0x00,0x90,0x77,0x53,
-        0xDE,
-        0x00,0x00,0x00,0x0C,0x49,0x44,0x41,0x54, // IDAT chunk
-        0x08,0xD7,0x63,0xF8,0xCF,0xC0,0x00,0x00,
-        0x00,0x02,0x00,0x01,0xE2,0x21,0xBC,0x33,
-        0x00,0x00,0x00,0x00,0x49,0x45,0x4E,0x44, // IEND chunk
-        0xAE,0x42,0x60,0x82
+        0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,0x00,0x00,0x00,0x0D,0x49,0x48,0x44,0x52,
+        0x00,0x00,0x00,0x08,0x00,0x00,0x00,0x08,0x08,0x02,0x00,0x00,0x00,0x4B,0x6D,0x29,
+        0xDC,0x00,0x00,0x00,0x12,0x49,0x44,0x41,0x54,0x78,0x9C,0x63,0xF8,0xCF,0xC0,0x80,
+        0x15,0x61,0x17,0x1D,0xB4,0x12,0x00,0x28,0xFF,0x3F,0xC1,0x6E,0xEC,0xDF,0x61,0x00,
+        0x00,0x00,0x00,0x49,0x45,0x4E,0x44,0xAE,0x42,0x60,0x82
     };
     auto path = mrd::recon_dir(dump_dir) / "latest_error.png";
     mrd::write_standalone_file(path, png, sizeof(png));
@@ -80,8 +75,7 @@ namespace http  = beast::http;
 namespace net   = boost::asio;
 using tcp = net::ip::tcp;
 
-static void http_session(tcp::socket sock, MarshalState& state,
-                         mrd::ReconForwarder* forwarder)
+static void http_session(tcp::socket sock, MarshalState& state)
 {
     try {
         beast::flat_buffer buffer;
@@ -96,32 +90,6 @@ static void http_session(tcp::socket sock, MarshalState& state,
                 res = std::move(r);
                 got_response = true;
             });
-
-            // Forward to recon via MRD TCP if forwarder exists
-            if (forwarder && req.method() == http::verb::post) {
-                auto t = req.target();
-                if (t == "/header") {
-                    forwarder->begin_session();
-                    forwarder->post_header(std::string(req.body()));
-                } else if (t == "/config") {
-                    forwarder->post_config(std::string(req.body()));
-                } else if (t == "/frame") {
-                    auto body_str = std::string(req.body());
-                    auto mrd_type = mrd::detect_mrd_type(body_str.data(), body_str.size());
-                    uint16_t tag = 0;
-                    switch (mrd_type) {
-                    case mrd::MrdDataType::ACQUISITION: tag = mrd::MRD_MESSAGE_ISMRMRD_ACQUISITION; break;
-                    case mrd::MrdDataType::IMAGE:       tag = mrd::MRD_MESSAGE_ISMRMRD_IMAGE; break;
-                    case mrd::MrdDataType::WAVEFORM:    tag = mrd::MRD_MESSAGE_ISMRMRD_WAVEFORM; break;
-                    default: break;
-                    }
-                    if (tag != 0)
-                        forwarder->post_frame(tag, body_str);
-                } else if (t == "/close") {
-                    forwarder->post_close();
-                    forwarder->end_session();
-                }
-            }
 
             if (got_response) {
                 http::write(sock, res);
@@ -246,8 +214,8 @@ int main(int argc, char** argv)
     do_accept = [&]() {
         acceptor.async_accept([&](beast::error_code ec, tcp::socket sock) {
             if (!ec) {
-                std::thread([s = std::move(sock), &state, fwd = forwarder.get()]() mutable {
-                    http_session(std::move(s), state, fwd);
+                std::thread([s = std::move(sock), &state]() mutable {
+                    http_session(std::move(s), state);
                 }).detach();
             }
             do_accept();

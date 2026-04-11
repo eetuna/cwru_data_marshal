@@ -138,6 +138,9 @@ std::string make_xml_header(uint16_t nx, uint16_t ny, uint16_t nz) {
 
 int main(int argc, char** argv) {
     try {
+        std::cout << std::unitbuf;
+        std::cerr << std::unitbuf;
+
         Options opt = parse_args(argc, argv);
 
         std::cout << "image_streamer: MRD TCP image mock\n"

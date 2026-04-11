@@ -13,9 +13,11 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "common/pose.hpp"
 #include "mrd_sink.hpp"
@@ -90,6 +92,10 @@ struct MarshalState {
     bool latest_image_error{false};
     uint32_t latest_image_count{0};
 
+    // Multi-slice buffering: collect all spatial slices before writing to file
+    uint16_t expected_slices{0};  // From METADATA_XML <z> field; 0 = unknown
+    std::map<uint16_t, std::vector<uint8_t>> slice_buffer;  // slice_idx → wire-format image bytes
+
     // WS emit hook (set by WsServer on init, optional)
     std::function<void(const std::string&)> ws_emit = [](const std::string&) {};
 
@@ -107,5 +113,7 @@ struct MarshalState {
         current_config.clear();
         header_received.store(false);
         config_received.store(false);
+        expected_slices = 0;
+        slice_buffer.clear();
     }
 };

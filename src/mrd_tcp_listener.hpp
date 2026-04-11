@@ -23,6 +23,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <regex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -68,7 +69,7 @@ public:
             uint16_t tag = MRD_MESSAGE_ISMRMRD_IMAGE;
             net::write(*scanner_socket_, net::buffer(&tag, sizeof(tag)));
             net::write(*scanner_socket_, net::buffer(data, len));
-            LOG_INFO("Pushed image to scanner (" << len << " bytes)");
+            LOG_DEBUG("Pushed image to scanner (" << len << " bytes)");
         } catch (const std::exception& e) {
             LOG_WARN("Failed to push image to scanner: " << e.what());
         }
@@ -85,6 +86,7 @@ private:
     ReconForwarder* forwarder_;
     mutable std::mutex scanner_mtx_;
     std::shared_ptr<tcp::socket> scanner_socket_;
+    std::atomic<bool> session_active_{false};
 
     void do_accept() {
         acceptor_.async_accept([this](boost::system::error_code ec, tcp::socket sock) {
@@ -133,7 +135,10 @@ private:
                     state_.current_config = config;
                     state_.config_received.store(true);
                     if (forwarder_) {
-                        forwarder_->begin_session();
+                        if (!session_active_.load()) {
+                            forwarder_->begin_session();
+                            session_active_.store(true);
+                        }
                         forwarder_->post_config(config);
                     }
                     break;
@@ -152,7 +157,10 @@ private:
                     state_.current_config = config;
                     state_.config_received.store(true);
                     if (forwarder_) {
-                        forwarder_->begin_session();
+                        if (!session_active_.load()) {
+                            forwarder_->begin_session();
+                            session_active_.store(true);
+                        }
                         forwarder_->post_config_text(config);
                     }
                     break;
@@ -167,6 +175,24 @@ private:
                     auto nul = xml.find('\0');
                     if (nul != std::string::npos) xml.resize(nul);
                     LOG_INFO("METADATA_XML: " << xml.size() << " bytes");
+                    // Parse <z> from encoding limits (slice count)
+                    uint16_t nz = 1;
+                    {
+                        // Look for <slice><maximum>N</maximum> in encodingLimits
+                        std::regex re_slice(R"(<slice>\s*<minimum>\d+</minimum>\s*<maximum>(\d+)</maximum>)");
+                        std::smatch m;
+                        if (std::regex_search(xml, m, re_slice)) {
+                            nz = static_cast<uint16_t>(std::stoi(m[1].str()) + 1);
+                        } else {
+                            // Fallback: look for <z> in matrixSize
+                            std::regex re_z(R"(<z>(\d+)</z>)");
+                            if (std::regex_search(xml, m, re_z)) {
+                                nz = static_cast<uint16_t>(std::stoi(m[1].str()));
+                            }
+                        }
+                        if (nz == 0) nz = 1;
+                    }
+
                     {
                         std::lock_guard<std::mutex> lk(state_.scan_mtx);
                         if (state_.scanner_sink) {
@@ -177,6 +203,8 @@ private:
                         state_.scanner_sink = std::make_unique<MrdSink>(path);
                         state_.scanner_sink->set_header(xml);
                         state_.current_xml_header = xml;
+                        state_.expected_slices = nz;
+                        state_.slice_buffer.clear();
                         // Close recon sink from previous scan
                         if (state_.recon_sink) {
                             state_.recon_sink->close();
@@ -190,6 +218,7 @@ private:
                         std::lock_guard<std::mutex> img_lk(state_.latest_image_mtx);
                         state_.latest_image_count = 0;
                     }
+                    LOG_INFO("Expected slices (nz): " << nz);
                     state_.header_received.store(true);
                     if (forwarder_) forwarder_->post_header(xml);
                     break;
@@ -202,6 +231,7 @@ private:
                         forwarder_->post_close();
                         forwarder_->end_session();
                     }
+                    session_active_.store(false);
                     break;
                 }
 
@@ -271,8 +301,8 @@ private:
                     std::vector<uint8_t> pixels(pixel_bytes);
                     if (!read_exact(*sock, pixels.data(), pixel_bytes)) goto done;
 
-                    LOG_INFO("IMAGE from scanner: "
-                             << ihdr->matrix_size[0] << "x" << ihdr->matrix_size[1]);
+                    LOG_DEBUG("IMAGE from scanner: "
+                              << ihdr->matrix_size[0] << "x" << ihdr->matrix_size[1]);
                     {
                         std::lock_guard<std::mutex> lk(state_.scan_mtx);
                         if (state_.scanner_sink) {
@@ -332,6 +362,7 @@ private:
 
     done:
         LOG_INFO("MRD session ended");
+        session_active_.store(false);
         {
             std::lock_guard<std::mutex> lk(scanner_mtx_);
             scanner_socket_.reset();

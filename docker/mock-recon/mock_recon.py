@@ -72,20 +72,21 @@ def reconstruct_slice(kspace_lines, nx, ny):
     return np.abs(image).astype(np.float32)
 
 
-def send_image(sock, image_data, image_series):
+def send_image(sock, image_data, image_series, slice_idx=0):
     """Send an image back to the client using ismrmrd package (no hand-rolled offsets)."""
     ny, nx = image_data.shape
 
     # Use the ismrmrd package to build a proper Image object
     img = ismrmrd.Image.from_array(image_data.reshape(1, 1, ny, nx), transpose=False)
     img.image_series_index = image_series
+    img.slice = slice_idx  # Spatial slice index (per mrdhelper.update_img_header_from_raw)
     # data_type is set automatically by from_array based on dtype (float32 → FLOAT)
 
     # Send MRD_MESSAGE_ISMRMRD_IMAGE tag + serialize via ismrmrd
     sock.sendall(struct.pack('<H', MRD_MESSAGE_ISMRMRD_IMAGE))
     img.serialize_into(sock.sendall)
 
-    log.info(f"Sent image ({nx}x{ny}) series={image_series}")
+    log.info(f"Sent image ({nx}x{ny}) series={image_series} slice={slice_idx}")
 
 
 def handle_connection(conn, addr):
@@ -134,10 +135,10 @@ def handle_connection(conn, addr):
             elif msg_id == MRD_MESSAGE_CLOSE:
                 log.info(f"CLOSE (received {acq_count} acquisitions)")
                 # Flush remaining slices
-                for slice_idx, lines in kspace_buffer.items():
+                for flush_slice_idx, lines in kspace_buffer.items():
                     if lines:
                         img = reconstruct_slice(lines, enc_nx, enc_ny)
-                        send_image(conn, img, image_series)
+                        send_image(conn, img, image_series, flush_slice_idx)
                         image_series += 1
                 kspace_buffer = {}
                 acq_count = 0
@@ -173,7 +174,7 @@ def handle_connection(conn, addr):
                     lines = kspace_buffer.pop(slice_idx, [])
                     if lines:
                         img = reconstruct_slice(lines, enc_nx, enc_ny)
-                        send_image(conn, img, image_series)
+                        send_image(conn, img, image_series, slice_idx)
                         image_series += 1
 
                 if acq_count % 100 == 0:

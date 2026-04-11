@@ -1,14 +1,15 @@
 /*
  * File: src/marshal_http.hpp
  * Project: CWRU Data Marshal - MRI Marshal
- * Purpose: HTTP routing — new API per v2 spec
+ * Purpose: HTTP routing — query/control endpoints only
  *
- * Scanner-facing: POST /header, /config, /frame, /close
- * Recon-facing: POST /image
- * Query: GET /image/latest, /transform, /pose, /health, /dump/scanner, /dump/recon
- * Control: PUT /transform, POST /pose
+ * Scanner data arrives via MRD TCP (mrd_tcp_listener.hpp), NOT HTTP.
+ * Recon images arrive via MRD TCP (recon_forwarder.hpp reader thread), NOT HTTP.
  *
- * No /v1/* routes. No X-MRD-* or X-Recon-* headers.
+ * HTTP endpoints (for non-scanner clients: viz, pose, tracker):
+ *   GET  /image/latest, /transform, /pose, /health, /dump/scanner, /dump/recon
+ *   PUT  /transform
+ *   POST /pose
  */
 
 #pragma once
@@ -29,13 +30,11 @@
 #include <nlohmann/json.hpp>
 
 #include <ismrmrd/ismrmrd.h>
-#include <ismrmrd/waveform.h>
 
 #include "marshal_state.hpp"
 #include "mrd_io.hpp"
 #include "mrd_sink.hpp"
 #include "mrd_stream_tags.hpp"
-#include "mrd_type_detector.hpp"
 
 namespace beast = boost::beast;
 namespace http  = beast::http;
@@ -71,187 +70,8 @@ static auto text_response(const http::request<Body>& req,
 }
 
 // ---------------------------------------------------------------------------
-// POST /header
-// ---------------------------------------------------------------------------
-template <class Body>
-static auto handle_post_header(const http::request<Body>& req, MarshalState& state)
-{
-    namespace fs = std::filesystem;
-
-    const std::string xml(req.body());
-    if (xml.empty())
-        return json_response(req, http::status::bad_request, {{"error", "empty header body"}});
-
-    std::lock_guard<std::mutex> lk(state.scan_mtx);
-
-    // Close any open scan
-    if (state.scanner_sink) {
-        state.scanner_sink->close();
-        state.scanner_sink.reset();
-    }
-    if (state.recon_sink) {
-        state.recon_sink->close();
-        state.recon_sink.reset();
-    }
-
-    // Open new scanner sink
-    auto scanner_path = mrd::scanner_dir(state.dump_dir) / mrd::scan_filename();
-    state.scanner_sink = std::make_unique<mrd::MrdSink>(scanner_path);
-    try {
-        state.scanner_sink->set_header(xml);
-    } catch (const std::exception& e) {
-        state.scanner_sink.reset();
-        return json_response(req, http::status::bad_request,
-                             {{"error", std::string("writeHeader failed: ") + e.what()}});
-    }
-
-    state.current_xml_header = xml;
-    state.current_config.clear();
-    state.header_received.store(true);
-    state.config_received.store(false);
-
-    LOG_INFO("POST /header: new scan " << scanner_path.filename().string());
-
-    // Forward to recon if configured
-    // (forwarder is accessed from marshal_main, not here — it's triggered there)
-
-    return json_response(req, http::status::ok, {{"status", "ok"}});
-}
-
-// ---------------------------------------------------------------------------
-// POST /config
-// ---------------------------------------------------------------------------
-template <class Body>
-static auto handle_post_config(const http::request<Body>& req, MarshalState& state)
-{
-    if (!state.header_received.load())
-        return json_response(req, http::status::conflict,
-                             {{"error", "no /header received"}});
-
-    std::string config(req.body());
-    {
-        std::lock_guard<std::mutex> lk(state.scan_mtx);
-        state.current_config = config;
-    }
-    state.config_received.store(true);
-
-    LOG_INFO("POST /config: " << config);
-    return json_response(req, http::status::ok, {{"status", "ok"}});
-}
-
-// ---------------------------------------------------------------------------
-// POST /frame — scanner-side, archive + forward
-// ---------------------------------------------------------------------------
-template <class Body>
-static auto handle_post_frame(const http::request<Body>& req, MarshalState& state)
-{
-    if (!state.header_received.load())
-        return json_response(req, http::status::conflict,
-                             {{"error", "no /header received"}});
-    if (!state.config_received.load())
-        return json_response(req, http::status::conflict,
-                             {{"error", "no /config received (D8)"}});
-
-    const auto& body = req.body();
-    const void* data = body.data();
-    size_t size = body.size();
-
-    auto type = mrd::detect_mrd_type(data, size);
-
-    std::lock_guard<std::mutex> lk(state.scan_mtx);
-    if (!state.scanner_sink) {
-        return json_response(req, http::status::internal_server_error,
-                             {{"error", "scanner sink not open"}});
-    }
-
-    switch (type) {
-    case mrd::MrdDataType::ACQUISITION: {
-        // Deserialize via libismrmrd
-        const auto* ahdr = static_cast<const ISMRMRD::AcquisitionHeader*>(data);
-        ISMRMRD::Acquisition acq(ahdr->number_of_samples, ahdr->active_channels,
-                                 ahdr->trajectory_dimensions);
-        ISMRMRD::AcquisitionHeader hdr_copy;
-        std::memcpy(&hdr_copy, data, mrd::ACQUISITION_HEADER_BYTES);
-        acq.setHead(hdr_copy);
-        // Copy trajectory
-        size_t traj_bytes = static_cast<size_t>(ahdr->trajectory_dimensions)
-                          * ahdr->number_of_samples * sizeof(float);
-        if (traj_bytes > 0)
-            std::memcpy(acq.getTrajPtr(),
-                        static_cast<const char*>(data) + mrd::ACQUISITION_HEADER_BYTES,
-                        traj_bytes);
-        // Copy samples
-        size_t sample_bytes = static_cast<size_t>(ahdr->number_of_samples)
-                            * ahdr->active_channels * sizeof(complex_float_t);
-        std::memcpy(acq.getDataPtr(),
-                    static_cast<const char*>(data) + mrd::ACQUISITION_HEADER_BYTES + traj_bytes,
-                    sample_bytes);
-        state.scanner_sink->append_acquisition(acq);
-        break;
-    }
-    case mrd::MrdDataType::IMAGE: {
-        const auto* ihdr = static_cast<const ISMRMRD::ImageHeader*>(data);
-        const char* after_hdr = static_cast<const char*>(data) + mrd::IMAGE_HEADER_BYTES;
-        uint64_t attr_len = 0;
-        std::memcpy(&attr_len, after_hdr, sizeof(uint64_t));
-        const char* attr_str = after_hdr + sizeof(uint64_t);
-        const char* pixel_data = attr_str + attr_len;
-        size_t pixel_bytes = size - mrd::IMAGE_HEADER_BYTES - sizeof(uint64_t) - attr_len;
-
-        std::string varname = "image_" + std::to_string(ihdr->image_series_index);
-        state.scanner_sink->append_image(varname, *ihdr,
-                                         attr_str, static_cast<size_t>(attr_len),
-                                         pixel_data, pixel_bytes);
-
-        // Update standalone file for live viz
-        auto standalone = mrd::recon_dir(state.dump_dir) / "latest_image.bin";
-        try {
-            mrd::write_standalone_file(standalone, data, size);
-            std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
-            state.latest_image_path = standalone.string();
-            state.latest_image_error = false;
-        } catch (const std::exception& e) {
-            LOG_WARN("Standalone write failed: " << e.what());
-        }
-        break;
-    }
-    case mrd::MrdDataType::WAVEFORM: {
-        const auto* whdr = static_cast<const ISMRMRD::WaveformHeader*>(data);
-        ISMRMRD::Waveform wf(whdr->number_of_samples, whdr->channels);
-        std::memcpy(&wf.head, data, mrd::WAVEFORM_HEADER_BYTES);
-        size_t wf_data_bytes = static_cast<size_t>(whdr->number_of_samples)
-                             * whdr->channels * sizeof(uint32_t);
-        std::memcpy(wf.data,
-                    static_cast<const char*>(data) + mrd::WAVEFORM_HEADER_BYTES,
-                    wf_data_bytes);
-        state.scanner_sink->append_waveform(wf);
-        break;
-    }
-    case mrd::MrdDataType::UNKNOWN:
-        state.scanner_sink->append_unknown_bytes(data, size);
-        LOG_WARN("UNKNOWN MRD type, " << size << " bytes archived");
-        break;
-    }
-
-    // Forwarding to recon is handled by marshal_main (reads forwarder pointer)
-    // Return 202 regardless
-    return json_response(req, http::status::accepted, {{"status", "accepted"}});
-}
-
-// ---------------------------------------------------------------------------
-// POST /close — end of scan
-// ---------------------------------------------------------------------------
-template <class Body>
-static auto handle_post_close(const http::request<Body>& req, MarshalState& state)
-{
-    state.close_scan();
-    LOG_INFO("POST /close: scan finalized");
-    return json_response(req, http::status::ok, {{"status", "ok"}});
-}
-
-// ---------------------------------------------------------------------------
-// Shared: archive recon image + write standalone + push to scanner
-// Called from both POST /image handler and ReconForwarder on_image callback.
+// handle_recon_image: archive recon image + write standalone + push to scanner
+// Called from ReconForwarder on_image callback (MRD TCP path).
 // ---------------------------------------------------------------------------
 inline void handle_recon_image(MarshalState& state, const void* data, size_t size)
 {
@@ -265,7 +85,7 @@ inline void handle_recon_image(MarshalState& state, const void* data, size_t siz
     const char* pixel_data = attr_str + attr_len;
     size_t pixel_bytes = size - mrd::IMAGE_HEADER_BYTES - sizeof(uint64_t) - attr_len;
 
-    // Open recon sink lazily
+    // Archive to recon HDF5 sink
     {
         std::lock_guard<std::mutex> lk(state.scan_mtx);
         if (!state.recon_sink && state.header_received.load()) {
@@ -282,41 +102,69 @@ inline void handle_recon_image(MarshalState& state, const void* data, size_t siz
         }
     }
 
-    // Write standalone file for viz — overwrite with latest image
-    // Simple: one image per file, viz reads and displays every poll cycle
-    auto standalone = mrd::recon_dir(state.dump_dir) / "latest_image.bin";
-    try {
-        mrd::write_standalone_file(standalone, data, size);
-        std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
-        state.latest_image_path = standalone.string();
-        state.latest_image_error = false;
-        state.latest_image_count++;
-    } catch (const std::exception& e) {
-        LOG_WARN("Standalone write failed: " << e.what());
-    }
-
-    // Push to scanner via MRD TCP
+    // Push to scanner via MRD TCP (immediately, per python-ismrmrd-server pattern)
     try { state.mrd_push_image(data, size); } catch (...) {}
-}
 
-// ---------------------------------------------------------------------------
-// POST /image — recon-facing (archive to from_reconstruction/)
-// ---------------------------------------------------------------------------
-template <class Body>
-static auto handle_post_image(const http::request<Body>& req, MarshalState& state)
-{
-    const auto& body = req.body();
-    if (body.size() < mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t))
-        return json_response(req, http::status::bad_request,
-                             {{"error", "body too small for image"}});
+    // Multi-slice buffering for viz standalone file.
+    // Collect all spatial slices for one volume, then write atomically.
+    // File format: uint16_t nz + nz × (wire-format image: 198B hdr + 8B attr_len + attr + pixels)
+    uint16_t nz = state.expected_slices;
+    uint16_t slice_idx = ihdr->slice;
 
-    if (!state.header_received.load()) {
-        LOG_WARN("POST /image after /close — dropping late image");
-        return json_response(req, http::status::ok, {{"status", "ok_late"}});
+    if (nz <= 1) {
+        // Single-slice or unknown: write immediately (no buffering)
+        auto standalone = mrd::recon_dir(state.dump_dir) / "latest_image.bin";
+        try {
+            // Write: uint16_t nz=1, then the single image
+            uint16_t one = 1;
+            std::vector<uint8_t> buf(sizeof(uint16_t) + size);
+            std::memcpy(buf.data(), &one, sizeof(uint16_t));
+            std::memcpy(buf.data() + sizeof(uint16_t), data, size);
+            mrd::write_standalone_file(standalone, buf.data(), buf.size());
+            std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
+            state.latest_image_path = standalone.string();
+            state.latest_image_error = false;
+            state.latest_image_count++;
+        } catch (const std::exception& e) {
+            LOG_WARN("Standalone write failed: " << e.what());
+        }
+    } else {
+        // Multi-slice: buffer by slice index
+        std::lock_guard<std::mutex> lk(state.scan_mtx);
+        state.slice_buffer[slice_idx].assign(
+            static_cast<const uint8_t*>(data),
+            static_cast<const uint8_t*>(data) + size);
+
+        if (static_cast<uint16_t>(state.slice_buffer.size()) >= nz) {
+            // All slices collected — write atomically
+            // Compute total size: uint16_t nz + sum of all slice sizes
+            size_t total = sizeof(uint16_t);
+            for (auto& [idx, bytes] : state.slice_buffer)
+                total += bytes.size();
+
+            std::vector<uint8_t> buf(total);
+            size_t off = 0;
+            std::memcpy(buf.data() + off, &nz, sizeof(uint16_t));
+            off += sizeof(uint16_t);
+            // Write slices in order of slice index (map is sorted)
+            for (auto& [idx, bytes] : state.slice_buffer) {
+                std::memcpy(buf.data() + off, bytes.data(), bytes.size());
+                off += bytes.size();
+            }
+
+            auto standalone = mrd::recon_dir(state.dump_dir) / "latest_image.bin";
+            try {
+                mrd::write_standalone_file(standalone, buf.data(), buf.size());
+                std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
+                state.latest_image_path = standalone.string();
+                state.latest_image_error = false;
+                state.latest_image_count++;
+            } catch (const std::exception& e) {
+                LOG_WARN("Standalone write failed: " << e.what());
+            }
+            state.slice_buffer.clear();
+        }
     }
-
-    handle_recon_image(state, body.data(), body.size());
-    return json_response(req, http::status::ok, {{"status", "ok"}});
 }
 
 // ---------------------------------------------------------------------------
@@ -472,31 +320,7 @@ void handle_http_request(http::request<Body>&& req, MarshalState& state, Send&& 
         return;
     }
 
-    // Scanner-facing
-    if (method == http::verb::post && target == "/header") {
-        send(handle_post_header(req, state));
-        return;
-    }
-    if (method == http::verb::post && target == "/config") {
-        send(handle_post_config(req, state));
-        return;
-    }
-    if (method == http::verb::post && target == "/frame") {
-        send(handle_post_frame(req, state));
-        return;
-    }
-    if (method == http::verb::post && target == "/close") {
-        send(handle_post_close(req, state));
-        return;
-    }
-
-    // Recon-facing
-    if (method == http::verb::post && target == "/image") {
-        send(handle_post_image(req, state));
-        return;
-    }
-
-    // Query
+    // Query/control endpoints (scanner data arrives via MRD TCP, not HTTP)
     if (method == http::verb::get && target == "/image/latest") {
         send(handle_get_image_latest(req, state));
         return;

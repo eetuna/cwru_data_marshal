@@ -50,6 +50,7 @@ public:
     // Connect to recon, start reader thread. Call ONCE per scan, before any send().
     bool begin_session() {
         end_session();  // clean up any previous session
+        drop_logged_.store(false);
 
         try {
             tcp::resolver resolver(ioc_);
@@ -156,11 +157,14 @@ private:
     std::unique_ptr<tcp::socket> socket_;
     std::atomic<bool> connected_{false};
     std::atomic<bool> reader_running_{false};
+    std::atomic<bool> drop_logged_{false};
     std::thread reader_;
 
     void write_all(const void* data, size_t len) {
         if (!connected_.load() || !socket_ || !socket_->is_open()) {
-            LOG_WARN("Not connected to recon, dropping message");
+            // Only log once to avoid spam during shutdown
+            if (drop_logged_.exchange(true) == false)
+                LOG_WARN("Not connected to recon, dropping messages");
             return;
         }
         try {
@@ -245,8 +249,8 @@ private:
         std::vector<uint8_t> pixels(pixel_bytes);
         if (!read_exact(pixels.data(), pixel_bytes)) return;
 
-        LOG_INFO("Received image from recon: "
-                 << ihdr->matrix_size[0] << "x" << ihdr->matrix_size[1]);
+        LOG_DEBUG("Received image from recon: "
+                  << ihdr->matrix_size[0] << "x" << ihdr->matrix_size[1]);
 
         // Assemble full wire-format body for the callback
         size_t total = IMAGE_HEADER_BYTES + 8 + attr_len + pixel_bytes;
