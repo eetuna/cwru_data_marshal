@@ -164,13 +164,17 @@ int main(int argc, char** argv)
             state.latest_image_error = true;
         };
 
-        // Image callback: reuses handle_recon_image from marshal_http.hpp
-        auto on_image = [&state](const void* data, size_t len) {
-            handle_recon_image(state, data, len);
+        // Recon return callback: archive IMAGE messages for non-scanner clients,
+        // and push every MRD return message back to the scanner.
+        auto on_message = [&state](uint16_t tag, const void* data, size_t len) {
+            if (tag == mrd::MRD_MESSAGE_ISMRMRD_IMAGE) {
+                handle_recon_image(state, data, len);
+            }
+            try { state.mrd_push_message(tag, data, len); } catch (...) {}
         };
 
         forwarder = std::make_unique<mrd::ReconForwarder>(
-            recon_host, recon_port, on_image, on_failure);
+            recon_host, recon_port, on_message, on_failure);
     }
 
     // Log config
@@ -195,9 +199,9 @@ int main(int argc, char** argv)
     if (mrd_port > 0) {
         mrd_listener = std::make_unique<mrd::MrdTcpListener>(
             ioc, mrd_port, state, forwarder.get());
-        // Hook: when recon POSTs /image, push it to scanner via MRD TCP
-        state.mrd_push_image = [&mrd_listener](const void* data, size_t len) {
-            if (mrd_listener) mrd_listener->push_image_to_scanner(data, len);
+        // Hook: recon MRD return messages are pushed to the scanner via MRD TCP.
+        state.mrd_push_message = [&mrd_listener](uint16_t tag, const void* data, size_t len) {
+            if (mrd_listener) mrd_listener->push_message_to_scanner(tag, data, len);
         };
     }
 

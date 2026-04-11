@@ -18,6 +18,7 @@
 #include "logging.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -58,20 +59,20 @@ public:
         do_accept();
     }
 
-    // Push a reconstructed image back to the scanner (called from POST /image handler)
-    void push_image_to_scanner(const void* data, size_t len) {
+    // Push a recon MRD message back to the scanner over the existing scan socket.
+    void push_message_to_scanner(uint16_t tag, const void* data, size_t len) {
         std::lock_guard<std::mutex> lk(scanner_mtx_);
         if (!scanner_socket_ || !scanner_socket_->is_open()) {
-            LOG_WARN("No scanner connected, cannot push image");
+            LOG_WARN("No scanner connected, cannot push MRD message");
             return;
         }
         try {
-            uint16_t tag = MRD_MESSAGE_ISMRMRD_IMAGE;
             net::write(*scanner_socket_, net::buffer(&tag, sizeof(tag)));
-            net::write(*scanner_socket_, net::buffer(data, len));
-            LOG_DEBUG("Pushed image to scanner (" << len << " bytes)");
+            if (len > 0) net::write(*scanner_socket_, net::buffer(data, len));
+            LOG_DEBUG("Pushed MRD message to scanner tag=" << tag
+                      << " (" << len << " bytes)");
         } catch (const std::exception& e) {
-            LOG_WARN("Failed to push image to scanner: " << e.what());
+            LOG_WARN("Failed to push MRD message to scanner: " << e.what());
         }
     }
 
@@ -135,9 +136,8 @@ private:
                     state_.current_config = config;
                     state_.config_received.store(true);
                     if (forwarder_) {
-                        if (!session_active_.load()) {
-                            forwarder_->begin_session();
-                            session_active_.store(true);
+                        if (!session_active_.load() || !forwarder_->is_connected()) {
+                            session_active_.store(forwarder_->begin_session());
                         }
                         forwarder_->post_config(config);
                     }
@@ -157,9 +157,8 @@ private:
                     state_.current_config = config;
                     state_.config_received.store(true);
                     if (forwarder_) {
-                        if (!session_active_.load()) {
-                            forwarder_->begin_session();
-                            session_active_.store(true);
+                        if (!session_active_.load() || !forwarder_->is_connected()) {
+                            session_active_.store(forwarder_->begin_session());
                         }
                         forwarder_->post_config_text(config);
                     }
@@ -226,11 +225,12 @@ private:
 
                 case MRD_MESSAGE_CLOSE: {
                     LOG_INFO("CLOSE");
-                    state_.close_scan();
                     if (forwarder_) {
                         forwarder_->post_close();
+                        forwarder_->wait_for_close(std::chrono::milliseconds(2000));
                         forwarder_->end_session();
                     }
+                    state_.close_scan();
                     session_active_.store(false);
                     break;
                 }
@@ -241,6 +241,12 @@ private:
                     std::vector<uint8_t> buf;
                     if (!read_exact(*sock, buf, len)) goto done;
                     LOG_INFO("TEXT: " << std::string(buf.begin(), buf.end()));
+                    if (forwarder_) {
+                        std::string body(4 + len, '\0');
+                        std::memcpy(body.data(), &len, 4);
+                        if (len > 0) std::memcpy(body.data() + 4, buf.data(), len);
+                        forwarder_->post_frame(MRD_MESSAGE_TEXT, body);
+                    }
                     break;
                 }
 

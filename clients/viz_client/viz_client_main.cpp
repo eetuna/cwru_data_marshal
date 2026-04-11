@@ -218,6 +218,8 @@ int main(int argc, char** argv) {
     uint64_t total_frames = 0;
 
     while (true) {
+        bool showing_error = false;
+
         // 1. Poll GET /image/latest
         std::string resp = http_get(curl, http_url + "/image/latest");
 
@@ -263,6 +265,7 @@ int main(int argc, char** argv) {
                         cv::putText(err_img, "RECON FAILED", {10, 30},
                                     cv::FONT_HERSHEY_SIMPLEX, 0.8, {0, 0, 255}, 2);
                         cv::imshow("viz_client", err_img);
+                        showing_error = true;
                     }
                 }
             } catch (const std::exception& e) {
@@ -271,7 +274,8 @@ int main(int argc, char** argv) {
         }
 
         // 2. Render selected spatial slice
-        if (!current_volume.empty() && selected_slice < static_cast<int>(current_volume.size())) {
+        if (!showing_error && !current_volume.empty() &&
+            selected_slice < static_cast<int>(current_volume.size())) {
             const auto& si = current_volume[selected_slice];
             if (!si.pixels.empty() && si.nx > 0 && si.ny > 0) {
                 float min_val = *std::min_element(si.pixels.begin(), si.pixels.end());
@@ -308,7 +312,7 @@ int main(int argc, char** argv) {
 
                 cv::imshow("viz_client", display);
             }
-        } else {
+        } else if (!showing_error) {
             cv::Mat waiting = cv::Mat::zeros(240, 320, CV_8UC3);
             cv::putText(waiting, "Waiting for data...", cv::Point(20, 120),
                         cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 1);

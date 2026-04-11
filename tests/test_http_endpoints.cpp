@@ -1,6 +1,6 @@
 /*
  * Tests for HTTP endpoint body-size limits.
- * Retargeted from /v1/mrd/ingest to POST /frame.
+ * Scanner/recon data uses MRD TCP; HTTP is query/control only.
  */
 
 #include <catch2/catch_all.hpp>
@@ -20,14 +20,10 @@ TEST_CASE("Body larger than max_body_bytes is rejected", "[http][limits]") {
     state.dump_dir = "/tmp/test_http_limits";
     state.max_body_bytes = 1024; // 1 KB limit for test
 
-    // Set up scan state so /frame doesn't return 409
-    state.header_received.store(true);
-    state.config_received.store(true);
-
     // Create a body larger than the limit
     std::string big_body(2048, 'X');
 
-    http::request<http::string_body> req{http::verb::post, "/frame", 11};
+    http::request<http::string_body> req{http::verb::post, "/pose", 11};
     req.body() = big_body;
     req.prepare_payload();
 

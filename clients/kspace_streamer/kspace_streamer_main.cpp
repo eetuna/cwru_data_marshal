@@ -237,6 +237,31 @@ void reader_thread(tcp::socket& sock, std::atomic<bool>& running,
                 std::cout << "kspace_streamer: received CLOSE from marshal\n";
                 break;
             }
+            else if (tag == mrd::MRD_MESSAGE_TEXT ||
+                     tag == mrd::MRD_MESSAGE_CONFIG_TEXT ||
+                     tag == mrd::MRD_MESSAGE_METADATA_XML_TEXT) {
+                uint32_t len = 0;
+                net::read(sock, net::buffer(&len, 4), ec);
+                if (ec) break;
+                std::vector<char> payload(len);
+                if (len > 0) net::read(sock, net::buffer(payload.data(), payload.size()), ec);
+                if (ec) break;
+            }
+            else if (tag == mrd::MRD_MESSAGE_CONFIG_FILE) {
+                std::vector<char> payload(1024);
+                net::read(sock, net::buffer(payload.data(), payload.size()), ec);
+                if (ec) break;
+            }
+            else if (tag == mrd::MRD_MESSAGE_ISMRMRD_WAVEFORM) {
+                ISMRMRD::WaveformHeader whdr;
+                net::read(sock, net::buffer(&whdr, mrd::WAVEFORM_HEADER_BYTES), ec);
+                if (ec) break;
+                size_t data_bytes = size_t(whdr.number_of_samples) * whdr.channels * sizeof(uint32_t);
+                std::vector<uint8_t> payload(data_bytes);
+                if (data_bytes > 0)
+                    net::read(sock, net::buffer(payload.data(), payload.size()), ec);
+                if (ec) break;
+            }
             else {
                 // Unknown tag on return path — skip by disconnecting
                 std::cout << "kspace_streamer: unknown return tag " << tag << ", stopping reader\n";
@@ -245,8 +270,21 @@ void reader_thread(tcp::socket& sock, std::atomic<bool>& running,
         }
     } catch (...) {}
     std::cout << "kspace_streamer: reader thread exited (total images: "
-              << images_received.load() << ")\n";
+	              << images_received.load() << ")\n";
 }
+
+struct ReaderGuard {
+    tcp::socket& sock;
+    std::atomic<bool>& running;
+    std::thread& reader;
+
+    ~ReaderGuard() {
+        running.store(false);
+        boost::system::error_code ec;
+        sock.shutdown(tcp::socket::shutdown_both, ec);
+        if (reader.joinable()) reader.join();
+    }
+};
 
 // ── Synthetic ECG generation ───────────────────────────────────
 
@@ -300,6 +338,7 @@ int main(int argc, char** argv) {
         std::thread reader([&]() {
             reader_thread(sock, reader_running, images_received);
         });
+        ReaderGuard reader_guard{sock, reader_running, reader};
 
         // Send CONFIG_FILE + METADATA_XML
         send_config_file(sock, opt.config_name);
@@ -425,7 +464,7 @@ int main(int argc, char** argv) {
         // Shutdown write side to unblock reader
         boost::system::error_code ec;
         sock.shutdown(tcp::socket::shutdown_send, ec);
-        reader.join();
+        if (reader.joinable()) reader.join();
 
         sock.close();
         std::cout << "kspace_streamer: done. Received " << images_received.load()

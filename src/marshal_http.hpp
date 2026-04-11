@@ -102,9 +102,6 @@ inline void handle_recon_image(MarshalState& state, const void* data, size_t siz
         }
     }
 
-    // Push to scanner via MRD TCP (immediately, per python-ismrmrd-server pattern)
-    try { state.mrd_push_image(data, size); } catch (...) {}
-
     // Multi-slice buffering for viz standalone file.
     // Collect all spatial slices for one volume, then write atomically.
     // File format: uint16_t nz + nz × (wire-format image: 198B hdr + 8B attr_len + attr + pixels)
@@ -136,7 +133,9 @@ inline void handle_recon_image(MarshalState& state, const void* data, size_t siz
             static_cast<const uint8_t*>(data) + size);
 
         if (static_cast<uint16_t>(state.slice_buffer.size()) >= nz) {
-            // All slices collected — write atomically
+            // Once all slices have been seen at least once, write the latest
+            // slice set after every incoming image. This keeps the file-based
+            // viz path live at image rate while still providing all slices.
             // Compute total size: uint16_t nz + sum of all slice sizes
             size_t total = sizeof(uint16_t);
             for (auto& [idx, bytes] : state.slice_buffer)
@@ -162,7 +161,6 @@ inline void handle_recon_image(MarshalState& state, const void* data, size_t siz
             } catch (const std::exception& e) {
                 LOG_WARN("Standalone write failed: " << e.what());
             }
-            state.slice_buffer.clear();
         }
     }
 }
