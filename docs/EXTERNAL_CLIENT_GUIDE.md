@@ -99,22 +99,20 @@ docker run -d --name robot-marshal \
 
 ## MRI Marshal API Reference
 
-**Base URL:** `http://localhost:8080`
+**HTTP Base URL:** `http://localhost:8080`
+
+Scanner and reconstruction data do not use HTTP. They use the MRD TCP protocol on the marshal `--mrd-port` and the recon service port. HTTP is only for query/control clients.
 
 ### Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health check |
-| `/frame` | POST | Submit ECG/physiological data |
-| `/health` | GET | Get latest biosignal |
 | `/pose` | POST | Submit position/orientation data |
 | `/pose` | GET | Get current pose |
-| `/frame` | POST | Stream MRI frame (HDF5 mode) |
-| `/frame` | POST | Batch ingest MRD file |
-| `/image/latest` | GET | Get latest MRI frame metadata |
-| `/dump/scanner` | GET | Get frames after timestamp |
-| `/health` | GET | Server configuration |
+| `/image/latest` | GET | Get latest reconstructed image file path |
+| `/dump/scanner` | GET | List scanner archive files |
+| `/dump/recon` | GET | List reconstruction archive files |
 
 ### WebSocket (Real-time Streaming)
 
@@ -240,15 +238,6 @@ def get_json(url):
     except (HTTPError, URLError) as e:
         return {"error": str(e)}
 
-# Send ECG data
-ecg_data = {
-    "source": "my_ecg_monitor",
-    "data": [0.1, 0.2, 0.15, 0.25, 0.18],
-    "rate_hz": 250.0
-}
-ok, resp = post_json(f"{MRI_MARSHAL}/frame", ecg_data)
-print(f"ECG sent: {ok}")
-
 # Send pose update
 pose_data = {
     "p": [10.0, 20.0, 30.0],
@@ -287,16 +276,6 @@ ROBOT_MARSHAL = "http://localhost:8081"
 # Health checks
 print("MRI Marshal:", requests.get(f"{MRI_MARSHAL}/health").json())
 print("Robot Marshal:", requests.get(f"{ROBOT_MARSHAL}/").text[:50])
-
-# Send ECG stream
-for i in range(10):
-    resp = requests.post(f"{MRI_MARSHAL}/frame", json={
-        "source": "ecg_monitor",
-        "data": [0.1 + i*0.01] * 100,  # 100 samples
-        "rate_hz": 100.0
-    })
-    print(f"ECG {i+1}: {resp.status_code}")
-    time.sleep(1.0)
 
 # Send continuous pose updates
 import math
@@ -481,18 +460,10 @@ int main() {
 # Health check
 curl http://localhost:8080/health
 
-# Send ECG data
-curl -X POST http://localhost:8080/frame \
-  -H "Content-Type: application/json" \
-  -d '{"source": "test", "data": [0.1, 0.2, 0.3], "rate_hz": 100}'
-
 # Send pose
 curl -X POST http://localhost:8080/pose \
   -H "Content-Type: application/json" \
   -d '{"p": [10, 20, 30], "R": [1,0,0,0,1,0,0,0,1], "frame": "scanner"}'
-
-# Get latest biosignal
-curl http://localhost:8080/health
 
 # Get current pose
 curl http://localhost:8080/pose

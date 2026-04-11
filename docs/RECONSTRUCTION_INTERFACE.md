@@ -19,7 +19,7 @@ MRI Marshal                         Recon Service
     │── WAVEFORM(1026) × M (optional) ──>│  ECG / physio data
     │── CLOSE(4) ────────────────────────>│  end of scan
     │                                     │
-    │<── IMAGE(1022) × K ─────────────────│  reconstructed images
+    │<── IMAGE/TEXT/etc. ─────────────────│  recon return messages
     │<── CLOSE(4) ────────────────────────│  recon done
     │                                     │
 ```
@@ -37,8 +37,10 @@ The recon service is a TCP server that:
    - WAVEFORM(1026) — physio data (40B header + uint32 samples), used for cardiac gating
    - CLOSE(4) — end of input
 4. **Processes** the acquisitions (e.g. 2D IFFT, GRAPPA).
-5. **Writes** reconstructed images back on the SAME TCP connection:
+5. **Writes** return messages back on the SAME TCP connection:
    - IMAGE(1022) — 198B ImageHeader + 8B uint64 attribute_len + attribute string + pixel data
+   - TEXT(5) — status/feedback text
+   - Other known MRD message types when needed by the recon workflow
    - CLOSE(4) — end of output
 
 This is identical to python-ismrmrd-server's `Connection` class in `connection.py`.
@@ -101,11 +103,12 @@ def handle_client(conn):
 
 If the recon service is unreachable or crashes mid-scan:
 
-- The marshal's recon forwarder drops queued messages and logs a warning
+- The marshal's recon forwarder marks the recon connection disconnected and logs a warning
 - The marshal continues accepting scanner data (archival continues)
 - A "reconstruction failed" PNG is written to `latest_error.png`
 - `GET /image/latest` returns `{"path": "...latest_error.png", "error": true}`
 - The viz client displays the failure visually
+- Later scanner sessions can reconnect to recon when it is available again
 
 No special error handling is needed on the recon side — TCP disconnection is sufficient.
 

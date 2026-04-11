@@ -2,7 +2,7 @@
 
 ## Overview
 
-The CWRU Data Marshal is a persistent intermediary between the MRI scanner and the reconstruction service. It archives all data, forwards acquisitions to recon, receives reconstructed images back, and serves query endpoints for visualization and control clients.
+The CWRU Data Marshal is a persistent intermediary between the MRI scanner and the reconstruction service. It archives all data, forwards scanner MRD messages to recon, receives recon MRD return messages back, pushes scanner-relevant return messages to the scanner, and serves query endpoints for visualization and control clients.
 
 ## Transport Map
 
@@ -12,8 +12,8 @@ The CWRU Data Marshal is a persistent intermediary between the MRI scanner and t
     │ Scanner │ ═══════════════════════════════════>│                 │═════════════>┌──────────┐
     │ (client)│                                    │   MRI Marshal   │              │  Recon   │
     │         │<═══════════════════════════════════ │                 │<═════════════│ Service  │
-    └─────────┘   IMAGE(1022) pushed back          │                 │  IMAGE(1022) └──────────┘
-                  on same socket                   │                 │  returned
+    └─────────┘   MRD return messages              │                 │  MRD return └──────────┘
+                  on same socket                   │                 │  messages
                                                    │   ┌─────────┐  │
                                                    │   │  HDF5   │  │
                                                    │   │ Archive │  │
@@ -35,9 +35,9 @@ The CWRU Data Marshal is a persistent intermediary between the MRI scanner and t
 
 **Scanner → Marshal:** MRD TCP on `--mrd-port` (default 9100). The scanner opens a persistent TCP connection and sends MRD messages using python-ismrmrd-server's 2-byte message ID framing.
 
-**Marshal → Recon:** MRD TCP to `--recon-host:--recon-port`. The marshal opens a TCP connection to the recon service and forwards scanner messages using the same framing. Recon sends reconstructed images back on this connection.
+**Marshal → Recon:** MRD TCP to `--recon-host:--recon-port`. The marshal opens a TCP connection to the recon service and forwards scanner messages using the same framing. Recon sends return messages back on this connection.
 
-**Marshal → Scanner (return path):** Reconstructed images are pushed back to the scanner on the SAME TCP socket the scanner connected on, using IMAGE(1022) messages. This satisfies the requirement: "Marshall needs to push, and it must come over the existing connection that was established for the scan."
+**Marshal → Scanner (return path):** Recon return messages are pushed back to the scanner on the SAME TCP socket the scanner connected on. This satisfies the requirement: "Marshall needs to push, and it must come over the existing connection that was established for the scan."
 
 **Query/Control clients → Marshal:** HTTP on `--http` (default 0.0.0.0:8080). The viz client, pose client, tracker, and any external consumer use HTTP GET/POST for querying images, transforms, poses, and health.
 
@@ -96,7 +96,7 @@ Scanner connects to marshal MRD TCP port
   → ACQUISITION(1008) × N               k-space lines
   → WAVEFORM(1026) × M (optional)       ECG / physio (waveform_id=0 = ECG)
   → CLOSE(4)                            end of scan
-  ← IMAGE(1022) × K                     reconstructed images pushed back
+  ← IMAGE/TEXT/etc.                     recon return messages pushed back
   ← CLOSE(4)                            recon done
 ```
 
@@ -128,7 +128,7 @@ ${dump_dir}/
 ```
 
 - `from_scanner/*.h5` — everything received from the scanner via MRD TCP
-- `from_reconstruction/*.h5` — everything received from the recon service
+- `from_reconstruction/*.h5` — reconstructed images received from the recon service
 - HDF5 files use canonical libismrmrd layout (`appendAcquisition`, `appendImage`, `appendWaveform`)
 - HDF5 files are readable only after `/close` (no concurrent access mode)
 - `latest_image.bin` is updated atomically (write-to-temp + rename) during the scan for live viewing
@@ -138,8 +138,8 @@ ${dump_dir}/
 
 The marshal stays running regardless of recon failure:
 
-- Recon forwarding runs on a background thread with a bounded drop-oldest queue
-- If recon is unreachable, messages are dropped and logged — scanner-side archival continues
+- Recon return reading runs on a background thread.
+- If recon is unreachable, scanner-side archival continues and recon connection state is reset for a later reconnect.
 - `latest_error.png` is written so the viz client visually shows "reconstruction failed"
 - T4 test: kill recon mid-scan, assert marshal still accepts MRD TCP connections and GET /health returns 200
 

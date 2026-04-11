@@ -48,7 +48,7 @@ EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
-# Default command (v2 flags: --http, --dump-dir, --recon-url passed via compose)
+# Default command. Compose supplies --mrd-port and recon MRD TCP settings.
 CMD ["/opt/mri/build/marshal", \
      "--http", "0.0.0.0:8080", \
      "--dump-dir", "/data/mri_data"]

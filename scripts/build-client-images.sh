@@ -19,8 +19,8 @@ git worktree prune
 #MRI_BRANCH="mri-data-marhsal"
 #MRI_BRANCH="fix/swmr-realtime-optimization"
 #MRI_BRANCH="fix/async-json-writer"
-MRI_BRANCH="feature/mri-marshal-rewrite-v2-inner"
-ROBOT_BRANCH="robot_data_marshal_with_catheter_system_components"
+MRI_BRANCH="${MRI_BRANCH:-feature/mri-marshal-rewrite-v2-inner}"
+ROBOT_BRANCH="${ROBOT_BRANCH:-robot_data_marshal_with_catheter_system_components}"
 UPSTREAM_REPO="https://github.com/cwru-mercis/cwru_data_marshal.git"
 
 echo "Checking required branches..."

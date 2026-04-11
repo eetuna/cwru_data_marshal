@@ -141,16 +141,11 @@ The demo ships with mock clients that generate synthetic data. To integrate real
 
 Scanner and recon clients connect via raw TCP using python-ismrmrd-server's 2-byte message ID framing. See [ARCHITECTURE.md](ARCHITECTURE.md) for the wire protocol.
 
-### MRI Marshal — HTTP (port 8080, query/control + fallback)
+### MRI Marshal — HTTP (port 8080, query/control only)
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/health` | GET | Health check |
-| `/header` | POST | Start scan (ISMRMRD XML header) |
-| `/config` | POST | Set recon config name |
-| `/frame` | POST | Submit ISMRMRD message (acquisition/image/waveform) |
-| `/close` | POST | End scan |
-| `/image` | POST | Receive reconstructed image from recon |
 | `/image/latest` | GET | Path to latest reconstructed image |
 | `/transform` | GET | Read slice transform delta (consume-on-read) |
 | `/transform` | PUT | Write slice transform delta |
@@ -183,8 +178,8 @@ ${dump_dir}/
 │   └── latest_error.png         <- Reconstruction-failed indicator (if applicable)
 ```
 
-- `/header` + `/config` + `/frame` + `/close` -> scanner archive
-- `/image` (from recon) -> recon archive + standalone file
+- Scanner MRD TCP messages -> scanner archive
+- Recon MRD TCP image messages -> recon archive + standalone file
 - HDF5 files are readable only after `/close`
 - `latest_image.bin` is updated atomically during the scan for live viewing
 

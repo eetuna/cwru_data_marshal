@@ -20,45 +20,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full wire protocol reference (mes
 
 **Base URL:** `http://localhost:8080`
 
-### Scanner-facing endpoints (HTTP fallback)
-
-These endpoints accept ISMRMRD data over HTTP as a fallback for clients that don't use MRD TCP. If `--recon-host`/`--recon-port` are configured, data is also forwarded to the reconstruction service via MRD TCP.
-
-#### POST /header
-
-Start a new scan. Body: ISMRMRD XML header as raw bytes.
-
-Marshal opens a new HDF5 archive at `from_scanner/scan_<timestamp>.h5`, writes the XML header, and forwards to recon. Returns 200 on success, 400 if XML is malformed.
-
-#### POST /config
-
-Set reconstruction config. Body: config name as plain text (e.g. `simplefft`).
-
-Required after `/header`, before `/frame`. Forwarded to recon.
-
-#### POST /frame
-
-Submit one ISMRMRD message. Body: raw ISMRMRD wire bytes.
-
-Marshal classifies the message type (ACQUISITION, IMAGE, WAVEFORM, or UNKNOWN) and archives it to the scanner HDF5 file. All types are forwarded to recon. Returns 202.
-
-Rejected with 409 if no `/header` has been received. Rejected with 409 if no `/config` has been received.
-
-#### POST /close
-
-End the current scan. Empty body.
-
-Closes both scanner and recon HDF5 archives. Forwards to recon. Clears state for the next scan.
-
----
-
-### Recon-facing endpoint
-
-#### POST /image
-
-Receive a reconstructed image from the reconstruction service. Body: ISMRMRD image wire format (198-byte ImageHeader + uint64 attribute_string_len + attribute string + pixel data).
-
-Marshal archives to `from_reconstruction/` HDF5 and writes a standalone file (`latest_image.bin`) for live viewing via `GET /image/latest`.
+HTTP is not a scanner or recon data transport. Scanner data and recon return data use MRD TCP only. The HTTP API below is for non-scanner query/control clients.
 
 ---
 
@@ -262,11 +224,11 @@ MRI Marshal (archives to from_scanner/*.h5)
     v
 Reconstruction Service (MRD TCP server)
     │
-    │ MRD TCP IMAGE(1022) returned on same connection
+    │ MRD TCP return messages on same connection
     v
 MRI Marshal (archives to from_reconstruction/*.h5, writes latest_image.bin)
     │                              │
-    │ MRD TCP IMAGE(1022)          │ HTTP GET /image/latest -> {"path": "..."}
+    │ MRD TCP return messages      │ HTTP GET /image/latest -> {"path": "..."}
     │ pushed back to scanner       │
     v                              v
 Scanner                        Viz Client (opens file, renders with OpenCV)

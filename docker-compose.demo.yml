@@ -22,6 +22,7 @@ services:
       - ${SESSION_DATA_DIR:-./session-data}:/session-data
     ports:
       - "8080:8080"
+      - "9100:9100"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 5s

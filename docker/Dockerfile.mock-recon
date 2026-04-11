@@ -3,7 +3,7 @@
 # Mock reconstruction service for the v2 marshal.
 # MRD TCP server on port 9002 (python-ismrmrd-server wire protocol).
 # Accepts CONFIG, METADATA_XML, ACQUISITION, WAVEFORM, IMAGE, CLOSE.
-# Sends reconstructed IMAGE(1022) back on same TCP connection.
+# Sends MRD return messages, including IMAGE(1022), back on same TCP connection.
 #
 # Listens on port 9002.
 
