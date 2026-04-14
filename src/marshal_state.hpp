@@ -92,13 +92,16 @@ struct MarshalState {
     std::string latest_image_path;
     bool latest_image_error{false};
     uint32_t latest_image_count{0};
+    // Highest image_series_index seen this scan. Viz opens image_<this> directly.
+    uint32_t latest_series_index{0};
     std::atomic<uint64_t> latest_image_generation{0};
     std::atomic<bool> recon_failure_reported{false};
-    std::unique_ptr<mrd::LatestImageWriter> latest_writer;
 
-    // Multi-slice buffering: collect all spatial slices before writing to file
-    uint16_t expected_slices{0};  // From METADATA_XML <z> field; 0 = unknown
-    std::map<uint16_t, std::vector<uint8_t>> slice_buffer;  // slice_idx → wire-format image bytes
+    // Per-scan live appenders. One per side so a slow scanner-side write does
+    // not block the recon side (and vice versa). Opened on scan start,
+    // closed on scan close.
+    std::unique_ptr<mrd::LatestImageWriter> live_scanner_writer;
+    std::unique_ptr<mrd::LatestImageWriter> live_recon_writer;
 
     // WS emit hook (set by WsServer on init, optional)
     std::function<void(const std::string&)> ws_emit = [](const std::string&) {};
@@ -111,6 +114,8 @@ struct MarshalState {
 
     // Close both sinks and clear per-scan state. Ready for next POST /header.
     void close_scan() {
+        if (live_scanner_writer) live_scanner_writer->close_scan();
+        if (live_recon_writer) live_recon_writer->close_scan();
         std::lock_guard<std::mutex> lk(scan_mtx);
         if (dump_recorder) dump_recorder->close_scan();
         current_xml_header.clear();
@@ -119,7 +124,5 @@ struct MarshalState {
         header_received.store(false);
         config_received.store(false);
         recon_failure_reported.store(false);
-        expected_slices = 0;
-        slice_buffer.clear();
     }
 };

@@ -129,7 +129,7 @@ static std::vector<uint8_t> build_error_png()
 static void write_error_png(const fs::path& dump_dir)
 {
     auto png = build_error_png();
-    auto path = mrd::recon_dir(dump_dir) / "latest_error.png";
+    auto path = mrd::live_recon_dir(dump_dir) / "latest_error.png";
     mrd::write_standalone_file(path, png.data(), png.size());
 }
 
@@ -291,18 +291,21 @@ int main(int argc, char** argv)
         state.dump_recorder = std::make_unique<mrd::DumpRecorder>(state.dump_dir);
     state.recon_url = recon_host.empty() ? "" : recon_host + ":" + std::to_string(recon_port);
     state.max_body_bytes = max_body_size;
-    state.latest_writer = std::make_unique<mrd::LatestImageWriter>();
+    state.live_scanner_writer = std::make_unique<mrd::LatestImageWriter>();
+    state.live_recon_writer = std::make_unique<mrd::LatestImageWriter>();
 
-    // Ensure file directories used by dump and live latest-image output.
-    mrd::scanner_dir(state.dump_dir);
-    mrd::recon_dir(state.dump_dir);
+    // Ensure umbrella layout exists on disk at startup.
+    mrd::live_scanner_dir(state.dump_dir);
+    mrd::live_recon_dir(state.dump_dir);
+    mrd::dump_scanner_dir(state.dump_dir);
+    mrd::dump_recon_dir(state.dump_dir);
 
     // Recon forwarder via MRD TCP (optional)
     std::unique_ptr<mrd::ReconForwarder> forwarder;
     if (!recon_host.empty()) {
         auto on_failure = [&state]() {
             write_error_png(state.dump_dir);
-            auto png_path = mrd::recon_dir(state.dump_dir) / "latest_error.png";
+            auto png_path = mrd::live_recon_dir(state.dump_dir) / "latest_error.png";
             {
                 std::lock_guard<std::mutex> lk(state.latest_image_mtx);
                 state.latest_image_path = png_path.string();

@@ -51,56 +51,30 @@ using tcp = net::ip::tcp;
 
 namespace mrd {
 
-inline void write_scanner_latest_image_h5(MarshalState& state, const uint8_t* body, size_t size)
+// Append one scanner-side IMAGE to the live per-scan file. The live scan file
+// was opened by begin_session (METADATA_XML_TEXT handler) on the scanner
+// writer thread; this call is non-blocking.
+inline void append_scanner_live_image(MarshalState& state,
+                                      const uint8_t* body, size_t size)
 {
     if (size < IMAGE_HEADER_BYTES + sizeof(uint64_t)) return;
+    if (!state.live_scanner_writer) return;
 
     const auto* hdr = reinterpret_cast<const ISMRMRD::ImageHeader*>(body);
-    uint64_t attr_len = 0;
-    std::memcpy(&attr_len, body + IMAGE_HEADER_BYTES, sizeof(uint64_t));
-    const size_t attr_off = IMAGE_HEADER_BYTES + sizeof(uint64_t);
-    if (size < attr_off + attr_len) return;
-    const size_t pixel_off = attr_off + static_cast<size_t>(attr_len);
+    const uint32_t series = hdr->image_series_index;
 
-    std::string xml;
-    {
-        std::lock_guard<std::mutex> lk(state.scan_mtx);
-        xml = state.current_xml_header;
-    }
-
-    auto dest = scanner_dir(state.dump_dir) / "latest_image.h5";
-    auto tmp = dest;
-    tmp += ".tmp";
-
-    std::error_code ec;
-    std::filesystem::remove(tmp, ec);
-
-    {
-        MrdSink sink(tmp);
-        if (!xml.empty()) sink.set_header(xml);
-        sink.append_image("image_0", *hdr,
-                          reinterpret_cast<const char*>(body + attr_off),
-                          static_cast<size_t>(attr_len),
-                          body + pixel_off,
-                          size - pixel_off);
-        sink.close();
-    }
-
-    std::filesystem::rename(tmp, dest, ec);
-    if (ec) {
-        std::filesystem::remove(dest, ec);
-        ec.clear();
-        std::filesystem::rename(tmp, dest, ec);
-        if (ec) {
-            LOG_WARN("Scanner latest H5 rename failed: " << ec.message());
-            return;
-        }
-    }
-
-    std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
-    state.latest_image_path = dest.string();
-    state.latest_image_error = false;
-    state.latest_image_count++;
+    std::vector<uint8_t> owned(body, body + size);
+    const auto generation = state.latest_image_generation.load();
+    state.live_scanner_writer->append_image(
+        std::move(owned),
+        [&state, generation, series](const std::filesystem::path& path) {
+            if (state.latest_image_generation.load() != generation) return;
+            std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
+            state.latest_image_path = path.string();
+            state.latest_image_error = false;
+            state.latest_image_count++;
+            if (series > state.latest_series_index) state.latest_series_index = series;
+        });
 }
 
 class MrdTcpListener {
@@ -304,24 +278,29 @@ private:
                             state_.current_scan_filename = scan_filename();
                         scan_file = state_.current_scan_filename;
                         state_.current_xml_header = xml;
-                        state_.expected_slices = nz;
                         state_.recon_failure_reported.store(false);
                         state_.latest_image_generation.fetch_add(1);
-                        state_.slice_buffer.clear();
                     }
                     if (state_.dump_enabled && state_.dump_recorder) {
                         state_.dump_recorder->start_scan(scan_file, xml);
                     }
-                    // Reset latest image pointer for new scan. The latest live-client
-                    // file is a canonical ISMRMRD H5 written by handle_recon_image().
+                    // Open both live per-scan files (scanner + recon sides). The
+                    // filename matches the dump side so pairs line up by name.
+                    if (state_.live_scanner_writer) {
+                        state_.live_scanner_writer->open_scan(
+                            live_scanner_dir(state_.dump_dir) / scan_file, xml);
+                    }
+                    if (state_.live_recon_writer) {
+                        state_.live_recon_writer->open_scan(
+                            live_recon_dir(state_.dump_dir) / scan_file, xml);
+                    }
+                    // Reset latest image pointer for new scan.
                     {
-                        auto standalone = recon_dir(state_.dump_dir) / "latest_image.h5";
-                        std::error_code ec;
-                        std::filesystem::remove(standalone, ec);
                         std::lock_guard<std::mutex> img_lk(state_.latest_image_mtx);
                         state_.latest_image_path.clear();
                         state_.latest_image_error = false;
                         state_.latest_image_count = 0;
+                        state_.latest_series_index = 0;
                     }
                     LOG_INFO("Expected slices (nz): " << nz);
                     state_.header_received.store(true);
@@ -425,7 +404,7 @@ private:
                     // Scanner-origin IMAGE is already reconstructed image data.
                     // Save/expose it for file-reading clients; do not send it to
                     // the k-space reconstruction service.
-                    write_scanner_latest_image_h5(state_, body.data(), body.size());
+                    append_scanner_live_image(state_, body.data(), body.size());
                     break;
                 }
 

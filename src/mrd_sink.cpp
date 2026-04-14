@@ -30,7 +30,9 @@ MrdSink::MrdSink(const std::filesystem::path& path, const std::string& groupname
     namespace fs = std::filesystem;
     fs::create_directories(path.parent_path());
     dataset_ = std::make_unique<ISMRMRD::Dataset>(path.c_str(), groupname.c_str(), true);
-    if (path.filename().string().rfind("latest_image.h5", 0) == 0)
+    // Live scan files open frequently; log at DEBUG to avoid flooding. Dump
+    // files open once per scan; keep them at INFO.
+    if (path.string().find("/live/") != std::string::npos)
         LOG_DEBUG("Opened HDF5 sink: " << path.string());
     else
         LOG_INFO("Opened HDF5 sink: " << path.string());
@@ -218,7 +220,7 @@ void MrdSink::close()
     std::lock_guard<std::mutex> lk(mtx_);
     if (dataset_) {
         dataset_.reset(); // ISMRMRD::Dataset destructor closes HDF5
-        if (path_.filename().string().rfind("latest_image.h5", 0) == 0) {
+        if (path_.string().find("/live/") != std::string::npos) {
             LOG_DEBUG("Closed HDF5 sink: " << path_.string()
                       << " (acq=" << acq_count_
                       << " img=" << img_count_

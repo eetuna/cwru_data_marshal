@@ -86,58 +86,28 @@ inline void handle_recon_image(MarshalState& state, const void* data, size_t siz
     std::memcpy(&attr_len, after_hdr, sizeof(uint64_t));
     if (size < mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t) + attr_len) return;
 
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    const uint32_t series = ihdr->image_series_index;
+
     if (state.dump_enabled && state.dump_recorder) {
-        const auto* bytes = static_cast<const uint8_t*>(data);
         state.dump_recorder->append_recon_image(std::vector<uint8_t>(bytes, bytes + size));
     }
 
-    uint16_t nz = state.expected_slices;
-    uint16_t slice_idx = ihdr->slice;
-    std::string xml;
-    std::vector<std::vector<uint8_t>> latest_images;
+    if (!state.live_recon_writer) return;
 
-    if (nz <= 1) {
-        std::lock_guard<std::mutex> lk(state.scan_mtx);
-        xml = state.current_xml_header;
-        latest_images.emplace_back(static_cast<const uint8_t*>(data),
-                                   static_cast<const uint8_t*>(data) + size);
-    } else {
-        std::lock_guard<std::mutex> lk(state.scan_mtx);
-        xml = state.current_xml_header;
-        state.slice_buffer[slice_idx].assign(
-            static_cast<const uint8_t*>(data),
-            static_cast<const uint8_t*>(data) + size);
-
-        if (static_cast<uint16_t>(state.slice_buffer.size()) < nz)
-            return;
-
-        latest_images.reserve(state.slice_buffer.size());
-        for (auto& [idx, bytes] : state.slice_buffer)
-            latest_images.push_back(bytes);
-    }
-
-    auto dest = mrd::recon_dir(state.dump_dir) / "latest_image.h5";
+    // One-in-one-out append. Matches python-ismrmrd-server connection.py:390.
+    // Grouping into volumes happens via image_<image_series_index> varname.
     const auto generation = state.latest_image_generation.load();
-    auto on_complete = [&state, generation](const std::filesystem::path& path) {
-        if (state.latest_image_generation.load() != generation) return;
-        std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
-        state.latest_image_path = path.string();
-        state.latest_image_error = false;
-        state.latest_image_count++;
-    };
-
-    if (state.latest_writer) {
-        state.latest_writer->enqueue(dest, std::move(xml), std::move(latest_images),
-                                     std::move(on_complete));
-        return;
-    }
-
-    try {
-        mrd::write_latest_image_h5_file(dest, xml, latest_images);
-        on_complete(dest);
-    } catch (const std::exception& e) {
-        LOG_WARN("Latest H5 write failed: " << e.what());
-    }
+    state.live_recon_writer->append_image(
+        std::vector<uint8_t>(bytes, bytes + size),
+        [&state, generation, series](const std::filesystem::path& path) {
+            if (state.latest_image_generation.load() != generation) return;
+            std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
+            state.latest_image_path = path.string();
+            state.latest_image_error = false;
+            state.latest_image_count++;
+            if (series > state.latest_series_index) state.latest_series_index = series;
+        });
 }
 
 inline void handle_recon_waveform(MarshalState& state, const void* data, size_t size)
@@ -163,6 +133,7 @@ static auto handle_get_image_latest(const http::request<Body>& req, MarshalState
     j["path"] = state.latest_image_path;
     j["error"] = state.latest_image_error;
     j["slices"] = state.latest_image_count;
+    j["newest_series"] = state.latest_series_index;
     return json_response(req, http::status::ok, j);
 }
 
@@ -271,14 +242,14 @@ template <class Body>
 static auto handle_get_dump_scanner(const http::request<Body>& req, MarshalState& state)
 {
     return json_response(req, http::status::ok,
-                         list_dump_files(mrd::scanner_dir(state.dump_dir)));
+                         list_dump_files(mrd::dump_scanner_dir(state.dump_dir)));
 }
 
 template <class Body>
 static auto handle_get_dump_recon(const http::request<Body>& req, MarshalState& state)
 {
     return json_response(req, http::status::ok,
-                         list_dump_files(mrd::recon_dir(state.dump_dir)));
+                         list_dump_files(mrd::dump_recon_dir(state.dump_dir)));
 }
 
 // ---------------------------------------------------------------------------

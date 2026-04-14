@@ -169,9 +169,9 @@ class TestMarshalIntegration(unittest.TestCase):
         res = self.run_kspace(volumes=1)
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
 
-        scanner_dir = os.path.join(self.dump_dir, "from_scanner")
+        scanner_dir = os.path.join(self.dump_dir, "dump", "from_scanner")
         h5_files = [f for f in os.listdir(scanner_dir) if f.endswith(".h5")]
-        self.assertGreater(len(h5_files), 0, "No HDF5 file in from_scanner/")
+        self.assertGreater(len(h5_files), 0, "No HDF5 file in dump/from_scanner/")
 
         status, body = http_get(f"{self.base()}/dump/scanner")
         self.assertEqual(status, 200)
@@ -179,7 +179,7 @@ class TestMarshalIntegration(unittest.TestCase):
         paths = "\n".join(item["path"] for item in dump)
         self.assertIn(".h5", paths)
 
-        recon_dir = os.path.join(self.dump_dir, "from_reconstruction")
+        recon_dir = os.path.join(self.dump_dir, "dump", "from_reconstruction")
         if os.path.exists(recon_dir):
             recon_h5 = [f for f in os.listdir(recon_dir) if f.endswith(".h5")]
             self.assertEqual(recon_h5, [], "Recon HDF5 should not exist in scanner-only dump")
@@ -196,8 +196,8 @@ class TestMarshalIntegration(unittest.TestCase):
         self.assertFalse(latest["error"])
         self.assertTrue(os.path.exists(latest["path"]), latest)
 
-        scanner_dir = os.path.join(self.dump_dir, "from_scanner")
-        recon_dir = os.path.join(self.dump_dir, "from_reconstruction")
+        scanner_dir = os.path.join(self.dump_dir, "dump", "from_scanner")
+        recon_dir = os.path.join(self.dump_dir, "dump", "from_reconstruction")
         self.assertGreater(len([f for f in os.listdir(scanner_dir) if f.endswith(".h5")]), 0)
         self.assertGreater(len([f for f in os.listdir(recon_dir) if f.endswith(".h5")]), 0)
 
@@ -210,13 +210,15 @@ class TestMarshalIntegration(unittest.TestCase):
         self.assertIsNotNone(latest)
         self.assertFalse(latest["error"])
         self.assertTrue(os.path.exists(latest["path"]), latest)
-        self.assertIn("from_scanner", latest["path"])
+        # Live path — under <dump_dir>/live/from_scanner/
+        self.assertIn(os.path.join("live", "from_scanner"), latest["path"])
 
-        scanner_dir = os.path.join(self.dump_dir, "from_scanner")
-        recon_dir = os.path.join(self.dump_dir, "from_reconstruction")
-        self.assertGreater(len([f for f in os.listdir(scanner_dir)
+        # Dump (dump/) — scanner side should have the scan, recon side must not.
+        dump_scanner = os.path.join(self.dump_dir, "dump", "from_scanner")
+        dump_recon = os.path.join(self.dump_dir, "dump", "from_reconstruction")
+        self.assertGreater(len([f for f in os.listdir(dump_scanner)
                                 if f.startswith("scan_") and f.endswith(".h5")]), 0)
-        self.assertEqual([f for f in os.listdir(recon_dir)
+        self.assertEqual([f for f in os.listdir(dump_recon)
                           if f.startswith("scan_") and f.endswith(".h5")], [])
 
     def test_t3_dump_off_still_proxies_without_h5_archives(self):
@@ -232,11 +234,13 @@ class TestMarshalIntegration(unittest.TestCase):
         self.assertTrue(os.path.exists(latest["path"]))
 
         for subdir in ("from_scanner", "from_reconstruction"):
-            path = os.path.join(self.dump_dir, subdir)
+            path = os.path.join(self.dump_dir, "dump", subdir)
+            if not os.path.exists(path):
+                continue  # dump/ subtree may not exist when --dump is off
             dump_h5_files = [f for f in os.listdir(path)
                              if f.startswith("scan_") and f.endswith(".h5")]
             self.assertEqual(dump_h5_files, [],
-                             f"{subdir} should not contain dump H5 files with dump off")
+                             f"dump/{subdir} should not contain dump H5 files with dump off")
 
     def test_t4_recon_kill_marshal_survives_and_reconnects(self):
         self.start_recon()

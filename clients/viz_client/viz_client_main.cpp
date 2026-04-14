@@ -1,9 +1,11 @@
 /*
  * viz_client — polls GET /image/latest, reads canonical ISMRMRD H5, renders with OpenCV.
  *
- * The marshal writes latest_image.h5 using libismrmrd Dataset::appendImage,
- * matching python-ismrmrd-server's saved-image pattern. Images for the latest
- * live view are stored in group image_0.
+ * The marshal writes one live scan file per scan (scan_<ts>.h5) using
+ * libismrmrd Dataset::appendImage, matching python-ismrmrd-server's
+ * saved-image pattern. Images are grouped by image_series_index into
+ * "image_<N>" HDF5 groups. /image/latest tells viz which group is newest
+ * via the "newest_series" field, so viz reads it directly without probing.
  *
  * UP/DOWN arrows scroll through spatial slices (like a DICOM viewer).
  * Selection persists across time updates.
@@ -123,16 +125,22 @@ struct SliceImage {
     std::vector<float> pixels;
 };
 
-static bool read_latest_h5(const std::string& path, std::vector<SliceImage>& slices_out) {
+// Read a specific image_<series> group from the per-scan live file. The marshal
+// tells us which group is newest via /image/latest's newest_series field — no
+// probing needed.
+static bool read_latest_h5(const std::string& path, uint32_t series,
+                           std::vector<SliceImage>& slices_out) {
     slices_out.clear();
     try {
         ISMRMRD::Dataset ds(path.c_str(), "/dataset", false);
-        uint32_t n = ds.getNumberOfImages("image_0");
+        const std::string var = "image_" + std::to_string(series);
+        uint32_t n = 0;
+        try { n = ds.getNumberOfImages(var); } catch (...) { return false; }
         if (n == 0 || n > 256) return false;
 
         for (uint32_t i = 0; i < n; ++i) {
             ISMRMRD::Image<float> img;
-            ds.readImage("image_0", i, img);
+            ds.readImage(var, i, img);
             const auto& hdr = img.getHead();
             uint16_t w = hdr.matrix_size[0];
             uint16_t h = hdr.matrix_size[1];
@@ -201,6 +209,7 @@ int main(int argc, char** argv) {
                 auto j = nlohmann::json::parse(resp);
                 std::string path = j.value("path", "");
                 bool is_error = j.value("error", false);
+                uint32_t newest_series = j.value("newest_series", 0u);
 
                 if (!path.empty() && !is_error) {
                     // Detect changes via file mtime (atomic rename changes mtime reliably)
@@ -208,7 +217,7 @@ int main(int argc, char** argv) {
                     auto mtime = std::filesystem::last_write_time(path, ec);
                     if (!ec && (path != last_path || mtime != last_mtime)) {
                         std::vector<SliceImage> new_volume;
-                        if (read_latest_h5(path, new_volume)) {
+                        if (read_latest_h5(path, newest_series, new_volume)) {
                             current_volume = std::move(new_volume);
                             // Update tracking ONLY after successful parse
                             last_path = path;

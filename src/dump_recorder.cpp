@@ -86,7 +86,7 @@ void DumpRecorder::start_scan(std::string filename, std::string xml)
         close_scan_on_worker();
         current_filename_ = filename;
         current_xml_ = xml;
-        auto path = scanner_dir(dump_dir_) / current_filename_;
+        auto path = dump_scanner_dir(dump_dir_) / current_filename_;
         scanner_sink_ = std::make_unique<MrdSink>(path);
         scanner_sink_->set_header(current_xml_);
         scanner_text_count_ = 0;
@@ -149,7 +149,7 @@ void DumpRecorder::ensure_recon_sink_on_worker()
     if (recon_sink_ || current_filename_.empty())
         return;
 
-    auto path = recon_dir(dump_dir_) / current_filename_;
+    auto path = dump_recon_dir(dump_dir_) / current_filename_;
         recon_sink_ = std::make_unique<MrdSink>(path);
     if (!current_xml_.empty())
         recon_sink_->set_header(current_xml_);

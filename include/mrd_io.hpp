@@ -59,18 +59,46 @@ inline std::string scan_filename()
     return "scan_" + iso8601_now_ms() + ".h5";
 }
 
-// Resolve the from_scanner/ directory under dump_dir
-inline std::filesystem::path scanner_dir(const std::filesystem::path& dump_dir)
+// Live subtree (always populated): one file per scan, images appended.
+inline std::filesystem::path live_root(const std::filesystem::path& dump_dir)
 {
-    auto p = dump_dir / "from_scanner";
+    auto p = dump_dir / "live";
     ensure_dir(p);
     return p;
 }
 
-// Resolve the from_reconstruction/ directory under dump_dir
-inline std::filesystem::path recon_dir(const std::filesystem::path& dump_dir)
+inline std::filesystem::path live_scanner_dir(const std::filesystem::path& dump_dir)
 {
-    auto p = dump_dir / "from_reconstruction";
+    auto p = live_root(dump_dir) / "from_scanner";
+    ensure_dir(p);
+    return p;
+}
+
+inline std::filesystem::path live_recon_dir(const std::filesystem::path& dump_dir)
+{
+    auto p = live_root(dump_dir) / "from_reconstruction";
+    ensure_dir(p);
+    return p;
+}
+
+// Dump subtree (only populated when --dump is on): canonical archival per scan.
+inline std::filesystem::path dump_root(const std::filesystem::path& dump_dir)
+{
+    auto p = dump_dir / "dump";
+    ensure_dir(p);
+    return p;
+}
+
+inline std::filesystem::path dump_scanner_dir(const std::filesystem::path& dump_dir)
+{
+    auto p = dump_root(dump_dir) / "from_scanner";
+    ensure_dir(p);
+    return p;
+}
+
+inline std::filesystem::path dump_recon_dir(const std::filesystem::path& dump_dir)
+{
+    auto p = dump_root(dump_dir) / "from_reconstruction";
     ensure_dir(p);
     return p;
 }
