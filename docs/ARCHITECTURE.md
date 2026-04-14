@@ -118,21 +118,26 @@ docker-compose.demo.yml services:
 ## Storage Layout
 
 ```
-${dump_dir}/
-├── from_scanner/
-│   └── scan_<timestamp>.h5          canonical ISMRMRD HDF5 (acquisitions, images, waveforms)
-├── from_reconstruction/
-│   ├── scan_<timestamp>.h5          canonical ISMRMRD HDF5 (reconstructed images)
-│   ├── latest_image.h5             canonical latest-image H5 file for live viz (raw ISMRMRD image wire bytes)
-│   └── latest_error.png             reconstruction-failed indicator (if applicable)
+${dump_dir}/                          session-data umbrella (--dump-dir flag)
+├── live/                             always populated — one file per scan, appended in-place
+│   ├── from_scanner/
+│   │   └── scan_<ts>.h5              canonical ISMRMRD HDF5 (scanner-origin acquisitions/images/waveforms)
+│   └── from_reconstruction/
+│       ├── scan_<ts>.h5              canonical ISMRMRD HDF5 (recon-returned images/waveforms)
+│       └── latest_error.png          single overwritten recon-failure indicator
+└── dump/                             populated only when --dump is on
+    ├── from_scanner/
+    │   └── scan_<ts>.h5              mirror of live scanner file, for retrospective analysis
+    └── from_reconstruction/
+        └── scan_<ts>.h5              mirror of live recon file, for retrospective analysis
 ```
 
-- `from_scanner/*.h5` — scanner-side standard ISMRMRD objects recorded when `--dump` is enabled
-- `from_reconstruction/*.h5` — recon-side standard ISMRMRD objects recorded when `--dump` is enabled
-- HDF5 files use canonical libismrmrd layout (`appendAcquisition`, `appendImage`, `appendWaveform`)
-- HDF5 files are readable only after `/close` (no concurrent access mode)
-- `latest_image.h5` is updated atomically (write-to-temp + rename) during the scan for live viewing
-- `latest_error.png` is a pre-made failure image written when the recon forwarder detects recon is down
+- Each scan produces `scan_<ts>.h5`; `<ts>` is shared between the live and dump file of the same scan.
+- Images are appended with varname `image_<image_series_index>`, one HDF5 group per volume, matching python-ismrmrd-server's on-disk convention.
+- Old scans stay on disk. `latest_error.png` is the only overwritten file.
+- HDF5 files use canonical libismrmrd layout (`appendAcquisition`, `appendImage`, `appendWaveform`).
+- Live files are written concurrently with a scan; readers should tolerate partial volumes mid-scan (a volume may have fewer slices than its final count until all slices arrive).
+- `GET /image/latest` returns the current scan's live recon path plus `newest_series` so clients can open `image_<newest_series>` without enumerating groups.
 
 ## Fault Tolerance
 

@@ -4,10 +4,11 @@ Use this to validate the MRI marshal's retrospective dump evidence trails.
 
 Dump is not the live viz path. Dump means the marshal records the MRD traffic it receives on each side of the proxy so the two sides can be compared after an experiment.
 
-- Scanner-side records go under `session-data/from_scanner/`.
-- Reconstruction-side records go under `session-data/from_reconstruction/`.
-- Standard ISMRMRD objects are written to canonical `.h5` files.
-- `/image/latest` is only a live client file pointer. It is not the dump.
+- Scanner-side records go under `session-data/dump/from_scanner/`.
+- Reconstruction-side records go under `session-data/dump/from_reconstruction/`.
+- Standard ISMRMRD objects are written to canonical per-scan `scan_<ts>.h5` files.
+- The `live/` subtree (always populated) holds the same kind of per-scan files for live viewing. Dump is the extra mirror you opt into with `--dump`.
+- `/image/latest` points at the current scan's live file. It is not the dump.
 
 ## Case 1 -- scanner-side dump only
 
@@ -25,14 +26,15 @@ Check scanner-side evidence:
 
 ```bash
 curl -s http://localhost:8080/dump/scanner | jq
-ls -lh session-data/from_scanner/
-ls -lh session-data/from_reconstruction/
+ls -lh session-data/dump/from_scanner/
+ls -lh session-data/dump/from_reconstruction/
 ```
 
 Expected:
 
-- `from_scanner/scan_*.h5` exists and contains standard scanner ISMRMRD objects.
-- `from_reconstruction/` should not contain a recon `.h5` for this run.
+- `dump/from_scanner/scan_*.h5` exists and contains standard scanner ISMRMRD objects.
+- `dump/from_reconstruction/` should not contain a recon `.h5` for this run.
+- `live/from_scanner/scan_*.h5` exists and mirrors the scanner data (live side is always populated).
 
 Do not run `mri-marshal` and `mri-marshal-dump` at the same time; they both bind ports `8080` and `9100`.
 
@@ -56,14 +58,17 @@ Check both evidence trails:
 ```bash
 curl -s http://localhost:8080/dump/scanner | jq
 curl -s http://localhost:8080/dump/recon | jq
-ls -lh session-data/from_scanner/
-ls -lh session-data/from_reconstruction/
+ls -lh session-data/dump/from_scanner/
+ls -lh session-data/dump/from_reconstruction/
+ls -lh session-data/live/from_scanner/
+ls -lh session-data/live/from_reconstruction/
 ```
 
 Expected:
 
-- `from_scanner/scan_*.h5` contains scanner-side acquisitions/images/waveforms.
-- `from_reconstruction/scan_*.h5` contains recon-side standard ISMRMRD objects, currently images and any waveforms returned by recon.
+- `dump/from_scanner/scan_*.h5` contains scanner-side acquisitions/images/waveforms.
+- `dump/from_reconstruction/scan_*.h5` contains recon-side standard ISMRMRD objects — images grouped by `image_<image_series_index>` and any waveforms returned by recon.
+- The matching `live/from_scanner/scan_*.h5` and `live/from_reconstruction/scan_*.h5` files have the same timestamps (live and dump pair up per scan).
 - The scanner client logs reconstructed images received back over MRD TCP.
 
 ## Case 3 -- scanner-origin images
@@ -81,7 +86,7 @@ cdd --profile dump run --rm --no-deps image-streamer \
 
 Expected:
 
-- `from_scanner/scan_*.h5` contains images sent by `image-streamer`.
+- `dump/from_scanner/scan_*.h5` contains images sent by `image-streamer` (and `live/from_scanner/scan_*.h5` mirrors them).
 - Recon-side output appears only in full proxy mode when a recon service actually returns messages.
 
 ## Latest File Pointer Is Separate
@@ -95,13 +100,15 @@ curl -s http://localhost:8080/image/latest | jq
 Example live image response:
 
 ```json
-{"path":"/session-data/from_reconstruction/latest_image.h5","error":false,"slices":12}
+{"path":"/session-data/live/from_reconstruction/scan_2026-04-14T16:30:00.123Z.h5","error":false,"slices":12,"newest_series":3}
 ```
+
+`newest_series` is the highest `image_series_index` seen this scan. Clients open group `image_3` in the HDF5 file to render the newest volume; no HDF5 group enumeration is needed.
 
 Example recon failure response:
 
 ```json
-{"path":"/session-data/from_reconstruction/latest_error.png","error":true,"slices":12}
+{"path":"/session-data/live/from_reconstruction/latest_error.png","error":true,"slices":12,"newest_series":0}
 ```
 
 The scanner does not use this endpoint. Scanner-visible recon output and failure images are MRD messages pushed on the scanner's existing TCP connection.

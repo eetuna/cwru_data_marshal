@@ -283,9 +283,9 @@ K-Space Streamer                  MRI Marshal                    Recon Service
      │                                 │ MRD TCP: IMAGE(1022)         │
      │                                 │<─────────────────────────────│
      │                                 │                              │
-     │ MRD TCP: IMAGE(1022)            │ Push + write                 │
-     │ pushed back on same socket      │ latest_image.h5             │
-     │<────────────────────────────────│                              │
+     │ MRD TCP: IMAGE(1022)            │ Push + append to             │
+     │ pushed back on same socket      │ live/from_reconstruction/   │
+     │<────────────────────────────────│ scan_<ts>.h5                 │
 ```
 
 **Key Features:**
@@ -313,11 +313,12 @@ cdd --profile dump up kspace-streamer-dump
 
 # Verify
 curl -s http://localhost:8080/dump/scanner | jq
-ls -lh session-data/from_scanner/
-ls -lh session-data/from_reconstruction/
+ls -lh session-data/dump/from_scanner/
+ls -lh session-data/dump/from_reconstruction/
+ls -lh session-data/live/from_scanner/
 ```
 
-Expected: `from_scanner/scan_*.h5` exists. `from_reconstruction/` has no recon H5 for that run because no recon service was started.
+Expected: `dump/from_scanner/scan_*.h5` exists (and `live/from_scanner/scan_*.h5` mirrors it with the same timestamp). `dump/from_reconstruction/` has no recon H5 for that run because no recon service was started.
 
 **Full proxy dump**:
 
@@ -334,11 +335,13 @@ cdd --profile dump up kspace-streamer-dump
 # Verify
 curl -s http://localhost:8080/dump/scanner | jq
 curl -s http://localhost:8080/dump/recon | jq
-ls -lh session-data/from_scanner/
-ls -lh session-data/from_reconstruction/
+ls -lh session-data/dump/from_scanner/
+ls -lh session-data/dump/from_reconstruction/
+ls -lh session-data/live/from_scanner/
+ls -lh session-data/live/from_reconstruction/
 ```
 
-Expected: scanner-side H5 appears under `from_scanner/`; recon-side H5 appears under `from_reconstruction/`.
+Expected: scanner-side H5 appears under `dump/from_scanner/` and `live/from_scanner/` (same `<ts>`); recon-side H5 appears under `dump/from_reconstruction/` and `live/from_reconstruction/` (same `<ts>`).
 
 For more dump cases, including image-input dump and failure behavior, see [DUMP_QUICK_START.md](DUMP_QUICK_START.md).
 

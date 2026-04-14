@@ -115,6 +115,7 @@ No special error handling is needed on the recon side — TCP disconnection is s
 
 ## Storage
 
-- With `--dump`, scanner data: `${dump_dir}/from_scanner/*.h5` (canonical ISMRMRD HDF5)
-- With `--dump`, reconstructed images: `${dump_dir}/from_reconstruction/*.h5` (canonical ISMRMRD HDF5)
-- Live view: `${dump_dir}/from_reconstruction/latest_image.h5` (canonical ISMRMRD images, updated atomically)
+- Live scanner data (always): `${dump_dir}/live/from_scanner/scan_<ts>.h5` (canonical ISMRMRD HDF5, appended).
+- Live recon data (always): `${dump_dir}/live/from_reconstruction/scan_<ts>.h5` (canonical ISMRMRD HDF5, appended; images grouped by `image_<image_series_index>`).
+- Dump mirrors (with `--dump`): `${dump_dir}/dump/from_scanner/scan_<ts>.h5` and `${dump_dir}/dump/from_reconstruction/scan_<ts>.h5`.
+- Live clients read the recon-side live file at the path returned by `GET /image/latest`, using the `newest_series` field to pick the current volume's image group.

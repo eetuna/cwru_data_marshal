@@ -32,14 +32,29 @@ Health check. Returns `{"status": "ok"}`.
 
 #### GET /image/latest
 
-Returns path to the latest reconstructed image file:
+Returns a pointer to the current scan's live reconstructed-image file plus a hint for which image group to read:
 ```json
-{"path": "/session-data/from_reconstruction/latest_image.h5", "error": false}
+{
+  "path": "/session-data/live/from_reconstruction/scan_2026-04-14T16:30:00.123Z.h5",
+  "error": false,
+  "slices": 42,
+  "newest_series": 3
+}
 ```
+
+- `path` — current scan's live HDF5 file. Opened with the standard ISMRMRD `Dataset` reader.
+- `error` — true if reconstruction is currently failing.
+- `slices` — count of images appended to this scan so far.
+- `newest_series` — highest `image_series_index` (volume number) seen this scan. Clients open group `image_<newest_series>` to read the newest volume's slices without probing.
 
 When reconstruction has failed:
 ```json
-{"path": "/session-data/from_reconstruction/latest_error.png", "error": true}
+{
+  "path": "/session-data/live/from_reconstruction/latest_error.png",
+  "error": true,
+  "slices": 0,
+  "newest_series": 0
+}
 ```
 
 If a scanner MRD TCP connection is active when recon fails, the scanner also
@@ -75,14 +90,14 @@ Returns the latest cached pose:
 
 #### GET /dump/scanner
 
-List archived scanner HDF5 files:
+List archived scanner HDF5 files under `dump/from_scanner/` (populated only when `--dump` is on):
 ```json
-[{"path": "from_scanner/scan_2026...h5", "size": 1234567, "modified": "2026-04-10T..."}]
+[{"path": "dump/from_scanner/scan_2026-04-14T16:30:00.123Z.h5", "size": 1234567, "modified": "2026-04-14T..."}]
 ```
 
 #### GET /dump/recon
 
-List archived reconstruction HDF5 files (same format as `/dump/scanner`).
+List archived reconstruction HDF5 files under `dump/from_reconstruction/` (same format as `/dump/scanner`).
 
 ---
 
@@ -92,7 +107,7 @@ List archived reconstruction HDF5 files (same format as `/dump/scanner`).
 |------|---------|-------------|
 | `--http host:port` | `0.0.0.0:8080` | HTTP listen address (query/control endpoints) |
 | `--mrd-port N` | `9100` | MRD TCP listen port (scanner connections) |
-| `--dump-dir path` | `./data` | Root for `from_scanner/` and `from_reconstruction/` |
+| `--dump-dir path` | `./data` | Session-data root. Holds `live/from_scanner/`, `live/from_reconstruction/`, and — when `--dump` is on — `dump/from_scanner/`, `dump/from_reconstruction/`. |
 | `--dump` | off | Enable retrospective canonical ISMRMRD H5 dump writing |
 | `--recon-host host` | (none) | Recon service hostname for MRD TCP forwarding |
 | `--recon-port N` | `9002` | Recon service port. Used only when `--recon-host` is set. |
@@ -221,7 +236,7 @@ Scanner/K-Space Streamer
     │ MRD TCP (port 9100)
     │ CONFIG_FILE + METADATA_XML + ACQUISITION×N + WAVEFORM + CLOSE
     v
-MRI Marshal (with `--dump`, archives standard ISMRMRD objects to from_scanner/*.h5)
+MRI Marshal (appends to live/from_scanner/scan_<ts>.h5; with `--dump`, also dump/from_scanner/scan_<ts>.h5)
     │
     │ MRD TCP (to recon-host:recon-port)
     │ same messages forwarded
@@ -230,14 +245,14 @@ Reconstruction Service (MRD TCP server)
     │
     │ MRD TCP return messages on same connection
     v
-MRI Marshal (with `--dump`, archives standard ISMRMRD objects to from_reconstruction/*.h5; always writes latest_image.h5 for live clients)
+MRI Marshal (appends to live/from_reconstruction/scan_<ts>.h5; with `--dump`, also dump/from_reconstruction/scan_<ts>.h5)
     │                              │
-    │ MRD TCP return messages      │ HTTP GET /image/latest -> {"path": "..."}
+    │ MRD TCP return messages      │ HTTP GET /image/latest -> {"path", "error", "slices", "newest_series"}
     │ pushed back to scanner       │
     v                              v
-Scanner                        Viz Client (opens file, renders with OpenCV)
+Scanner                        Viz Client (opens file, reads image_<newest_series>, renders with OpenCV)
 ```
 
-Scanner data transport is MRD TCP. Query/control is HTTP. Archived HDF5 files are readable after `/close`. The canonical latest-image H5 file (`latest_image.h5`) provides live view during the scan.
+Scanner data transport is MRD TCP. Query/control is HTTP. Each scan produces a new `scan_<ts>.h5` file under `live/` (and, with `--dump`, under `dump/`); per-scan files are appended while the scan is running and remain on disk afterwards. Live clients read the file at the path returned by `/image/latest` during and after the scan; `newest_series` tells them which image group is current.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system diagram and wire protocol reference.

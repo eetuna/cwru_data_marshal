@@ -159,9 +159,11 @@ Scanner sends CONFIG + METADATA_XML + ACQUISITION/IMAGE/WAVEFORM + CLOSE over
 MRD TCP. Marshal forwards to recon over MRD TCP when `--recon-host` is set.
 Recon returns IMAGE/WAVEFORM/TEXT/CLOSE over MRD TCP; marshal pushes those
 messages back to the scanner on the original scanner socket. With `--dump`,
-standard ISMRMRD objects are recorded as canonical H5 under `from_scanner/` and
-`from_reconstruction/`. Live clients use `GET /image/latest` to obtain the
-standalone latest-image file path.
+standard ISMRMRD objects are always recorded as canonical per-scan H5 under
+`live/from_scanner/` and `live/from_reconstruction/`, and — with `--dump` —
+mirrored under `dump/from_scanner/` and `dump/from_reconstruction/`. Live
+clients use `GET /image/latest` to obtain the current scan's file path and
+`newest_series` hint.
 
 ## Robot Marshal API (Port 8081)
 
@@ -306,8 +308,10 @@ cwru/robot-clients      latest
 ls -lh session-data/mrd/
 
 # Expected directories:
-# - from_scanner/        (scanner HDF5 files when --dump is enabled)
-# - from_reconstruction/ (recon HDF5 files when --dump is enabled, plus latest_image.h5)
+# - live/from_scanner/        (always: per-scan scanner HDF5, scan_<ts>.h5)
+# - live/from_reconstruction/ (always: per-scan recon HDF5, scan_<ts>.h5, plus latest_error.png on failure)
+# - dump/from_scanner/        (with --dump: per-scan scanner HDF5 mirror)
+# - dump/from_reconstruction/ (with --dump: per-scan recon HDF5 mirror)
 ```
 
 **Note:** By default, `CLEANUP_DATA=true` clears this directory after each demo run. To keep data between runs, edit `.env.demo` and set `CLEANUP_DATA=false`.

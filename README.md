@@ -57,7 +57,7 @@ Scanner / K-Space Streamer
 |  MRI Marshal                         | ──> Reconstruction Service (port 9002)
 |  HTTP :8080 (query/control)          |
 |  MRD TCP :9100 (scanner data)        | <── IMAGE(1022) returned
-|  - Optional dump to from_scanner/    |
+|  - Live/dump per-scan H5 archives    |
 |  - Forwards to recon via MRD TCP     |
 |  - Pushes IMAGE back to scanner      |
 |  - GET /image/latest (file path)     |

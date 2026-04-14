@@ -26,7 +26,7 @@ Required message IDs:
 - `1022` ISMRMRD IMAGE
 - `1026` ISMRMRD WAVEFORM
 
-The marshal forwards scanner MRD messages to recon over MRD TCP. With `--dump`, it archives scanner-side standard ISMRMRD data under `from_scanner/`.
+The marshal forwards scanner MRD messages to recon over MRD TCP. It always archives scanner-side standard ISMRMRD data into a per-scan file under `live/from_scanner/scan_<ts>.h5`. With `--dump`, the same scanner data is also archived to `dump/from_scanner/scan_<ts>.h5` for retrospective analysis.
 
 ## Marshal to Recon
 
@@ -40,7 +40,7 @@ Recon return messages arrive on the recon MRD TCP connection. The marshal pushes
 
 This return path is not optional for scanner operation. It is how reconstructed images, text/feedback, close notifications, and future MRD feedback messages reach the scanner.
 
-With `--dump`, recon-side standard ISMRMRD objects are also archived under `from_reconstruction/`.
+Recon-side standard ISMRMRD objects are always archived per-scan under `live/from_reconstruction/scan_<ts>.h5`. With `--dump`, the same recon data is additionally archived to `dump/from_reconstruction/scan_<ts>.h5`. Live and dump files for a given scan share the same `<ts>`.
 
 ## HTTP Side Channel
 

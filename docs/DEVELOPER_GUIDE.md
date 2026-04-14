@@ -78,14 +78,14 @@ Reconstruction Service (:9002)   Viz Client, Pose Client, etc.
     │
     │ MRD TCP IMAGE(1022) back
     v
-MRI Marshal → from_reconstruction/*.h5 + latest_image.h5
+MRI Marshal → live/from_reconstruction/scan_<ts>.h5 (and dump/… with --dump)
     │
     │ MRD TCP IMAGE(1022) pushed to scanner
     v
 Scanner
 ```
 
-The marshal has two interfaces: **MRD TCP** for scanner data transport (the same wire protocol as python-ismrmrd-server) and **HTTP** for query/control endpoints. Scanner clients connect via MRD TCP and send ISMRMRD messages. Marshal forwards to recon via MRD TCP and, when `--dump` is enabled, archives standard ISMRMRD objects to canonical HDF5. Recon sends images back on the same TCP connection. The viz client polls HTTP `GET /image/latest` for the file path and reads the canonical ISMRMRD H5 latest-image file directly.
+The marshal has two interfaces: **MRD TCP** for scanner data transport (the same wire protocol as python-ismrmrd-server) and **HTTP** for query/control endpoints. Scanner clients connect via MRD TCP and send ISMRMRD messages. Marshal forwards to recon via MRD TCP and always appends scanner- and recon-side standard ISMRMRD objects to per-scan HDF5 files under `live/from_scanner/` and `live/from_reconstruction/`. With `--dump`, it additionally mirrors both sides under `dump/from_scanner/` and `dump/from_reconstruction/` for retrospective analysis. Recon sends images back on the same TCP connection. The viz client polls HTTP `GET /image/latest`, reads the returned `path` and `newest_series`, and opens image group `image_<newest_series>` in the per-scan HDF5 file.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full wire protocol reference and compose topology.
 
@@ -166,23 +166,26 @@ Scanner and recon clients connect via raw TCP using python-ismrmrd-server's 2-by
 
 ## Storage
 
-When `--dump` is enabled, data is archived to disk as canonical ISMRMRD HDF5 files:
+Every scan produces per-scan HDF5 files under the session-data umbrella. The live subtree is always populated; the dump subtree is populated only with `--dump`:
 
 ```
 ${dump_dir}/
-├── from_scanner/
-│   └── scan_<timestamp>.h5      <- Scanner data (acquisitions, images, waveforms)
-├── from_reconstruction/
-│   ├── scan_<timestamp>.h5      <- Reconstructed images
-│   ├── latest_image.h5         <- Canonical latest-image H5 for live viz (canonical ISMRMRD images)
-│   └── latest_error.png         <- Reconstruction-failed indicator (if applicable)
+├── live/
+│   ├── from_scanner/
+│   │   └── scan_<ts>.h5         <- Scanner-origin ISMRMRD data (acquisitions, images, waveforms), appended
+│   └── from_reconstruction/
+│       ├── scan_<ts>.h5         <- Recon-returned images, appended; image groups by image_series_index
+│       └── latest_error.png     <- Reconstruction-failed indicator (single overwritten file)
+└── dump/                         <- only when --dump is on
+    ├── from_scanner/scan_<ts>.h5
+    └── from_reconstruction/scan_<ts>.h5
 ```
 
-- Scanner MRD TCP standard ISMRMRD objects -> scanner archive
-- Recon MRD TCP standard ISMRMRD objects -> recon archive; recon images also update the standalone live file
-- Recon failure -> scanner MRD `IMAGE(1022)` failure image + HTTP/viz `latest_error.png`
-- HDF5 files are readable only after `/close`
-- `latest_image.h5` is updated atomically during the scan for live viewing
+- Scanner MRD TCP standard ISMRMRD objects → live (always) and dump (if `--dump`) scanner archives.
+- Recon MRD TCP standard ISMRMRD objects → live (always) and dump (if `--dump`) recon archives.
+- Recon failure → scanner MRD `IMAGE(1022)` failure image + HTTP `GET /image/latest` points at `latest_error.png`.
+- HDF5 files are readable while being written (per-scan append). Viz uses `/image/latest`'s `newest_series` field to know which `image_<N>` group is the newest volume.
+- `<ts>` is shared between a scan's live and dump files.
 
 ---
 
