@@ -24,12 +24,14 @@
 #include <fstream>
 #include <string>
 #include <sstream>
+#include <vector>
 
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <nlohmann/json.hpp>
 
 #include <ismrmrd/ismrmrd.h>
+#include <ismrmrd/waveform.h>
 
 #include "marshal_state.hpp"
 #include "mrd_io.hpp"
@@ -70,8 +72,9 @@ static auto text_response(const http::request<Body>& req,
 }
 
 // ---------------------------------------------------------------------------
-// handle_recon_image: archive recon image + write standalone + push to scanner
-// Called from ReconForwarder on_image callback (MRD TCP path).
+// handle_recon_image: archive recon image + update latest-file side channel.
+// Called from ReconForwarder callback (MRD TCP path). Scanner return is handled
+// by the callback in marshal_main.cpp and must not wait on latest-file HDF5 I/O.
 // ---------------------------------------------------------------------------
 inline void handle_recon_image(MarshalState& state, const void* data, size_t size)
 {
@@ -81,87 +84,71 @@ inline void handle_recon_image(MarshalState& state, const void* data, size_t siz
     const char* after_hdr = static_cast<const char*>(data) + mrd::IMAGE_HEADER_BYTES;
     uint64_t attr_len = 0;
     std::memcpy(&attr_len, after_hdr, sizeof(uint64_t));
-    const char* attr_str = after_hdr + sizeof(uint64_t);
-    const char* pixel_data = attr_str + attr_len;
-    size_t pixel_bytes = size - mrd::IMAGE_HEADER_BYTES - sizeof(uint64_t) - attr_len;
+    if (size < mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t) + attr_len) return;
 
-    // Archive to recon HDF5 sink
-    {
-        std::lock_guard<std::mutex> lk(state.scan_mtx);
-        if (!state.recon_sink && state.header_received.load()) {
-            auto recon_path = mrd::recon_dir(state.dump_dir) / mrd::scan_filename();
-            state.recon_sink = std::make_unique<mrd::MrdSink>(recon_path);
-            if (!state.current_xml_header.empty())
-                state.recon_sink->set_header(state.current_xml_header);
-        }
-        if (state.recon_sink) {
-            std::string varname = "image_" + std::to_string(ihdr->image_series_index);
-            state.recon_sink->append_image(varname, *ihdr,
-                                           attr_str, static_cast<size_t>(attr_len),
-                                           pixel_data, pixel_bytes);
-        }
+    if (state.dump_enabled && state.dump_recorder) {
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        state.dump_recorder->append_recon_image(std::vector<uint8_t>(bytes, bytes + size));
     }
 
-    // Multi-slice buffering for viz standalone file.
-    // Collect all spatial slices for one volume, then write atomically.
-    // File format: uint16_t nz + nz × (wire-format image: 198B hdr + 8B attr_len + attr + pixels)
     uint16_t nz = state.expected_slices;
     uint16_t slice_idx = ihdr->slice;
+    std::string xml;
+    std::vector<std::vector<uint8_t>> latest_images;
 
     if (nz <= 1) {
-        // Single-slice or unknown: write immediately (no buffering)
-        auto standalone = mrd::recon_dir(state.dump_dir) / "latest_image.bin";
-        try {
-            // Write: uint16_t nz=1, then the single image
-            uint16_t one = 1;
-            std::vector<uint8_t> buf(sizeof(uint16_t) + size);
-            std::memcpy(buf.data(), &one, sizeof(uint16_t));
-            std::memcpy(buf.data() + sizeof(uint16_t), data, size);
-            mrd::write_standalone_file(standalone, buf.data(), buf.size());
-            std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
-            state.latest_image_path = standalone.string();
-            state.latest_image_error = false;
-            state.latest_image_count++;
-        } catch (const std::exception& e) {
-            LOG_WARN("Standalone write failed: " << e.what());
-        }
-    } else {
-        // Multi-slice: buffer by slice index
         std::lock_guard<std::mutex> lk(state.scan_mtx);
+        xml = state.current_xml_header;
+        latest_images.emplace_back(static_cast<const uint8_t*>(data),
+                                   static_cast<const uint8_t*>(data) + size);
+    } else {
+        std::lock_guard<std::mutex> lk(state.scan_mtx);
+        xml = state.current_xml_header;
         state.slice_buffer[slice_idx].assign(
             static_cast<const uint8_t*>(data),
             static_cast<const uint8_t*>(data) + size);
 
-        if (static_cast<uint16_t>(state.slice_buffer.size()) >= nz) {
-            // Once all slices have been seen at least once, write the latest
-            // slice set after every incoming image. This keeps the file-based
-            // viz path live at image rate while still providing all slices.
-            // Compute total size: uint16_t nz + sum of all slice sizes
-            size_t total = sizeof(uint16_t);
-            for (auto& [idx, bytes] : state.slice_buffer)
-                total += bytes.size();
+        if (static_cast<uint16_t>(state.slice_buffer.size()) < nz)
+            return;
 
-            std::vector<uint8_t> buf(total);
-            size_t off = 0;
-            std::memcpy(buf.data() + off, &nz, sizeof(uint16_t));
-            off += sizeof(uint16_t);
-            // Write slices in order of slice index (map is sorted)
-            for (auto& [idx, bytes] : state.slice_buffer) {
-                std::memcpy(buf.data() + off, bytes.data(), bytes.size());
-                off += bytes.size();
-            }
+        latest_images.reserve(state.slice_buffer.size());
+        for (auto& [idx, bytes] : state.slice_buffer)
+            latest_images.push_back(bytes);
+    }
 
-            auto standalone = mrd::recon_dir(state.dump_dir) / "latest_image.bin";
-            try {
-                mrd::write_standalone_file(standalone, buf.data(), buf.size());
-                std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
-                state.latest_image_path = standalone.string();
-                state.latest_image_error = false;
-                state.latest_image_count++;
-            } catch (const std::exception& e) {
-                LOG_WARN("Standalone write failed: " << e.what());
-            }
-        }
+    auto dest = mrd::recon_dir(state.dump_dir) / "latest_image.h5";
+    const auto generation = state.latest_image_generation.load();
+    auto on_complete = [&state, generation](const std::filesystem::path& path) {
+        if (state.latest_image_generation.load() != generation) return;
+        std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
+        state.latest_image_path = path.string();
+        state.latest_image_error = false;
+        state.latest_image_count++;
+    };
+
+    if (state.latest_writer) {
+        state.latest_writer->enqueue(dest, std::move(xml), std::move(latest_images),
+                                     std::move(on_complete));
+        return;
+    }
+
+    try {
+        mrd::write_latest_image_h5_file(dest, xml, latest_images);
+        on_complete(dest);
+    } catch (const std::exception& e) {
+        LOG_WARN("Latest H5 write failed: " << e.what());
+    }
+}
+
+inline void handle_recon_waveform(MarshalState& state, const void* data, size_t size)
+{
+    if (size < mrd::WAVEFORM_HEADER_BYTES) return;
+    const auto* whdr = static_cast<const ISMRMRD::WaveformHeader*>(data);
+    size_t data_bytes = size_t(whdr->number_of_samples) * whdr->channels * sizeof(uint32_t);
+    if (size < mrd::WAVEFORM_HEADER_BYTES + data_bytes) return;
+    if (state.dump_enabled && state.dump_recorder) {
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        state.dump_recorder->append_recon_waveform(std::vector<uint8_t>(bytes, bytes + size));
     }
 }
 
@@ -256,20 +243,24 @@ static auto handle_get_pose(const http::request<Body>& req, MarshalState& state)
 // ---------------------------------------------------------------------------
 // GET /dump/scanner and GET /dump/recon
 // ---------------------------------------------------------------------------
-static nlohmann::json list_h5_files(const std::filesystem::path& dir)
+static nlohmann::json list_dump_files(const std::filesystem::path& dir)
 {
     namespace fs = std::filesystem;
     nlohmann::json arr = nlohmann::json::array();
     if (!fs::exists(dir)) return arr;
     for (auto& entry : fs::directory_iterator(dir)) {
-        if (entry.path().extension() == ".h5") {
+        if (entry.path().extension() == ".h5" && entry.path().filename().string().rfind("scan_", 0) == 0) {
             nlohmann::json item;
             item["path"] = entry.path().string();
             std::error_code ec;
             item["size"] = fs::file_size(entry.path(), ec);
             auto ftime = fs::last_write_time(entry.path(), ec);
-            item["modified"] = std::chrono::duration_cast<std::chrono::seconds>(
-                ftime.time_since_epoch()).count();
+            if (!ec) {
+                auto sys_time = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                    ftime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+                item["modified"] = std::chrono::duration_cast<std::chrono::seconds>(
+                    sys_time.time_since_epoch()).count();
+            }
             arr.push_back(item);
         }
     }
@@ -280,14 +271,14 @@ template <class Body>
 static auto handle_get_dump_scanner(const http::request<Body>& req, MarshalState& state)
 {
     return json_response(req, http::status::ok,
-                         list_h5_files(mrd::scanner_dir(state.dump_dir)));
+                         list_dump_files(mrd::scanner_dir(state.dump_dir)));
 }
 
 template <class Body>
 static auto handle_get_dump_recon(const http::request<Body>& req, MarshalState& state)
 {
     return json_response(req, http::status::ok,
-                         list_h5_files(mrd::recon_dir(state.dump_dir)));
+                         list_dump_files(mrd::recon_dir(state.dump_dir)));
 }
 
 // ---------------------------------------------------------------------------

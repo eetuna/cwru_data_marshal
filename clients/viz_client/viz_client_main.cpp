@@ -1,13 +1,9 @@
 /*
- * viz_client — polls GET /image/latest, reads multi-slice standalone file, renders with OpenCV
+ * viz_client — polls GET /image/latest, reads canonical ISMRMRD H5, renders with OpenCV.
  *
- * File format (written by marshal's handle_recon_image):
- *   uint16_t nz  — number of spatial slices in this volume
- *   nz × (198B ImageHeader + 8B attr_len + attr_bytes + pixel_bytes)
- *
- * Each image is standard ISMRMRD wire format (same as connection.py send_image).
- * The ImageHeader.slice field identifies the spatial slice position.
- * The ImageHeader.data_type field determines pixel size.
+ * The marshal writes latest_image.h5 using libismrmrd Dataset::appendImage,
+ * matching python-ismrmrd-server's saved-image pattern. Images for the latest
+ * live view are stored in group image_0.
  *
  * UP/DOWN arrows scroll through spatial slices (like a DICOM viewer).
  * Selection persists across time updates.
@@ -17,8 +13,8 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -27,6 +23,7 @@
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 #include <ismrmrd/ismrmrd.h>
+#include <ismrmrd/dataset.h>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/highgui.hpp>
@@ -47,17 +44,6 @@ std::string http_get(CURL* curl, const std::string& url) {
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 2L);
     curl_easy_perform(curl);
     return body;
-}
-
-bool read_file(const std::string& path, std::vector<uint8_t>& out) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) return false;
-    auto sz = f.tellg();
-    if (sz <= 0) return false;
-    out.resize(static_cast<size_t>(sz));
-    f.seekg(0);
-    f.read(reinterpret_cast<char*>(out.data()), sz);
-    return f.good();
 }
 
 // Compute bytes per pixel from ISMRMRD data_type enum
@@ -137,50 +123,37 @@ struct SliceImage {
     std::vector<float> pixels;
 };
 
-// Parse multi-slice file: uint16_t nz + nz × wire-format images
-static bool parse_multislice_file(const std::vector<uint8_t>& data,
-                                   std::vector<SliceImage>& slices_out) {
+static bool read_latest_h5(const std::string& path, std::vector<SliceImage>& slices_out) {
     slices_out.clear();
-    if (data.size() < sizeof(uint16_t)) return false;
+    try {
+        ISMRMRD::Dataset ds(path.c_str(), "/dataset", false);
+        uint32_t n = ds.getNumberOfImages("image_0");
+        if (n == 0 || n > 256) return false;
 
-    uint16_t nz = 0;
-    std::memcpy(&nz, data.data(), sizeof(uint16_t));
-    if (nz == 0 || nz > 256) return false;
+        for (uint32_t i = 0; i < n; ++i) {
+            ISMRMRD::Image<float> img;
+            ds.readImage("image_0", i, img);
+            const auto& hdr = img.getHead();
+            uint16_t w = hdr.matrix_size[0];
+            uint16_t h = hdr.matrix_size[1];
+            if (w == 0 || h == 0) continue;
 
-    size_t off = sizeof(uint16_t);
-    for (uint16_t i = 0; i < nz; ++i) {
-        if (off + mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t) > data.size())
-            return false;
-
-        const auto* hdr = reinterpret_cast<const ISMRMRD::ImageHeader*>(data.data() + off);
-        uint64_t attr_len = 0;
-        std::memcpy(&attr_len, data.data() + off + mrd::IMAGE_HEADER_BYTES, sizeof(uint64_t));
-
-        size_t pixel_offset = off + mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t) + attr_len;
-        uint16_t w = hdr->matrix_size[0];
-        uint16_t h = hdr->matrix_size[1];
-        uint16_t z = std::max<uint16_t>(hdr->matrix_size[2], 1);
-        uint16_t ch = std::max<uint16_t>(hdr->channels, 1);
-        size_t npixels = static_cast<size_t>(w) * h * z * ch;
-        size_t is = itemsize_for_data_type(hdr->data_type);
-        size_t pixel_bytes = npixels * is;
-
-        if (pixel_offset + pixel_bytes > data.size())
-            return false;
-
-        SliceImage si;
-        si.nx = w;
-        si.ny = h;
-        si.slice_idx = hdr->slice;
-        // For multi-channel: use first channel only (w*h pixels)
-        size_t display_pixels = static_cast<size_t>(w) * h;
-        extract_float_pixels(data.data() + pixel_offset, display_pixels,
-                             hdr->data_type, si.pixels);
-        slices_out.push_back(std::move(si));
-
-        // Advance past this image
-        off = pixel_offset + pixel_bytes;
+            SliceImage si;
+            si.nx = w;
+            si.ny = h;
+            si.slice_idx = hdr.slice;
+            size_t display_pixels = static_cast<size_t>(w) * h;
+            si.pixels.assign(img.getDataPtr(), img.getDataPtr() + display_pixels);
+            slices_out.push_back(std::move(si));
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "viz H5 read error: " << e.what() << "\n";
+        return false;
     }
+
+    std::sort(slices_out.begin(), slices_out.end(), [](const auto& a, const auto& b) {
+        return a.slice_idx < b.slice_idx;
+    });
     return !slices_out.empty();
 }
 
@@ -234,36 +207,39 @@ int main(int argc, char** argv) {
                     std::error_code ec;
                     auto mtime = std::filesystem::last_write_time(path, ec);
                     if (!ec && (path != last_path || mtime != last_mtime)) {
-                        std::vector<uint8_t> data;
-                        if (read_file(path, data) && data.size() > sizeof(uint16_t)) {
-                            std::vector<SliceImage> new_volume;
-                            if (parse_multislice_file(data, new_volume)) {
-                                current_volume = std::move(new_volume);
-                                // Update tracking ONLY after successful parse
-                                last_path = path;
-                                last_mtime = mtime;
+                        std::vector<SliceImage> new_volume;
+                        if (read_latest_h5(path, new_volume)) {
+                            current_volume = std::move(new_volume);
+                            // Update tracking ONLY after successful parse
+                            last_path = path;
+                            last_mtime = mtime;
 
-                                int nz = static_cast<int>(current_volume.size());
-                                if (selected_slice >= nz) selected_slice = nz - 1;
-                                if (selected_slice < 0) selected_slice = 0;
+                            int nz = static_cast<int>(current_volume.size());
+                            if (selected_slice >= nz) selected_slice = nz - 1;
+                            if (selected_slice < 0) selected_slice = 0;
 
-                                frame_count++;
-                                total_frames++;
+                            frame_count++;
+                            total_frames++;
 
-                                auto& s0 = current_volume[selected_slice];
-                                std::cout << "viz: frame " << total_frames
-                                          << " nz=" << current_volume.size()
-                                          << " viewing slice " << (selected_slice + 1)
-                                          << "/" << current_volume.size()
-                                          << " (" << s0.nx << "x" << s0.ny << ")\n";
-                            }
+                            auto& s0 = current_volume[selected_slice];
+                            std::cout << "viz: frame " << total_frames
+                                      << " nz=" << current_volume.size()
+                                      << " viewing slice " << (selected_slice + 1)
+                                      << "/" << current_volume.size()
+                                      << " (" << s0.nx << "x" << s0.ny << ")\n";
                         }
                     }
                 } else if (is_error && !path.empty()) {
                     cv::Mat err_img = cv::imread(path, cv::IMREAD_COLOR);
                     if (!err_img.empty()) {
-                        cv::putText(err_img, "RECON FAILED", {10, 30},
-                                    cv::FONT_HERSHEY_SIMPLEX, 0.8, {0, 0, 255}, 2);
+                        const int target_w = 640;
+                        const int target_h = 360;
+                        cv::resize(err_img, err_img, cv::Size(target_w, target_h), 0, 0, cv::INTER_NEAREST);
+                        cv::rectangle(err_img, cv::Rect(0, 0, target_w, target_h), {0, 0, 120}, 8);
+                        cv::putText(err_img, "RECON FAILED", {70, 185},
+                                    cv::FONT_HERSHEY_SIMPLEX, 1.6, {255, 255, 255}, 4);
+                        cv::putText(err_img, "reconstruction connection lost", {95, 235},
+                                    cv::FONT_HERSHEY_SIMPLEX, 0.7, {255, 255, 255}, 2);
                         cv::imshow("viz_client", err_img);
                         showing_error = true;
                     }

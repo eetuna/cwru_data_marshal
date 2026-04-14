@@ -10,7 +10,9 @@
 #include <vector>
 #include <cstring>
 #include <complex>
+#include <fstream>
 
+#include <hdf5.h>
 #include <ismrmrd/ismrmrd.h>
 #include <ismrmrd/dataset.h>
 #include <ismrmrd/waveform.h>
@@ -43,6 +45,28 @@ TEST_CASE("MrdSink writes header and reads it back", "[mrd_sink]") {
     std::string xml;
     ds.readHeader(xml);
     REQUIRE(xml.find("<ismrmrdHeader") != std::string::npos);
+}
+
+TEST_CASE("MrdSink writes python savedata string datasets", "[mrd_sink]") {
+    auto path = temp_h5("metadata_test.h5");
+    {
+        mrd::MrdSink sink(path);
+        sink.write_string_dataset("config_file", "simplefft");
+        sink.write_string_dataset("config", "config text");
+    }
+
+    hid_t file = H5Fopen(path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+    REQUIRE(file >= 0);
+    hid_t dset = H5Dopen2(file, "/dataset/config_file", H5P_DEFAULT);
+    REQUIRE(dset >= 0);
+    hid_t type = H5Dget_type(dset);
+    char* value = nullptr;
+    REQUIRE(H5Dread(dset, type, H5S_ALL, H5S_ALL, H5P_DEFAULT, &value) >= 0);
+    REQUIRE(std::string(value) == "simplefft");
+    H5free_memory(value);
+    H5Tclose(type);
+    H5Dclose(dset);
+    H5Fclose(file);
 }
 
 TEST_CASE("MrdSink appends acquisitions and reads them back", "[mrd_sink]") {

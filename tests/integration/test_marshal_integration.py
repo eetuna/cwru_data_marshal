@@ -9,6 +9,7 @@ for health and latest-file query/control checks.
 import json
 import os
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -19,6 +20,7 @@ import urllib.request
 
 MARSHAL_BIN = os.environ.get("MARSHAL_BIN", "./build/marshal")
 KSPACE_STREAMER = os.environ.get("KSPACE_STREAMER", "./build/kspace_streamer")
+IMAGE_STREAMER = os.environ.get("IMAGE_STREAMER", "./build/image_streamer")
 MOCK_RECON = os.environ.get("MOCK_RECON", "./docker/mock-recon/mock_recon.py")
 MARSHAL_HTTP_PORT = 18080
 MARSHAL_MRD_PORT = 19100
@@ -45,22 +47,37 @@ def http_get(url, timeout=5):
         return 0, str(e)
 
 
+def wait_for_latest_file(base_url, timeout=5):
+    deadline = time.time() + timeout
+    latest = None
+    while time.time() < deadline:
+        status, body = http_get(f"{base_url}/image/latest")
+        if status == 200:
+            latest = json.loads(body)
+            path = latest.get("path", "")
+            if path and os.path.exists(path):
+                return latest
+        time.sleep(0.05)
+    return latest
+
+
 class TestMarshalIntegration(unittest.TestCase):
     marshal_proc = None
     recon_proc = None
     dump_dir = None
 
-    @classmethod
-    def setUpClass(cls):
-        cls.dump_dir = tempfile.mkdtemp(prefix="marshal_test_")
+    def setUp(self):
+        self.dump_dir = tempfile.mkdtemp(prefix="marshal_test_")
 
-    def start_marshal(self, with_recon=False):
+    def start_marshal(self, with_recon=False, dump=True):
         cmd = [
             MARSHAL_BIN,
             "--http", f"0.0.0.0:{MARSHAL_HTTP_PORT}",
             "--mrd-port", str(MARSHAL_MRD_PORT),
             "--dump-dir", self.dump_dir,
         ]
+        if dump:
+            cmd.append("--dump")
         if with_recon:
             cmd += ["--recon-host", "localhost", "--recon-port", str(RECON_PORT)]
         self.marshal_proc = subprocess.Popen(
@@ -89,6 +106,19 @@ class TestMarshalIntegration(unittest.TestCase):
         return subprocess.run(cmd, text=True, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, timeout=timeout)
 
+    def run_image_streamer(self, frames=3, timeout=15):
+        cmd = [
+            IMAGE_STREAMER,
+            "--host", "localhost",
+            "--port", str(MARSHAL_MRD_PORT),
+            "--frames", str(frames),
+            "--interval", "0",
+            "--size", "16",
+            "--log-stride", "1",
+        ]
+        return subprocess.run(cmd, text=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=timeout)
+
     def start_kspace_async(self):
         cmd = [
             KSPACE_STREAMER,
@@ -111,6 +141,9 @@ class TestMarshalIntegration(unittest.TestCase):
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait(timeout=5)
+        elif proc:
+            proc.wait(timeout=0)
         if proc:
             if proc.stdout:
                 proc.stdout.close()
@@ -125,6 +158,8 @@ class TestMarshalIntegration(unittest.TestCase):
 
     def tearDown(self):
         self.stop_all()
+        if self.dump_dir and os.path.exists(self.dump_dir):
+            shutil.rmtree(self.dump_dir, ignore_errors=True)
 
     def base(self):
         return f"http://localhost:{MARSHAL_HTTP_PORT}"
@@ -138,6 +173,17 @@ class TestMarshalIntegration(unittest.TestCase):
         h5_files = [f for f in os.listdir(scanner_dir) if f.endswith(".h5")]
         self.assertGreater(len(h5_files), 0, "No HDF5 file in from_scanner/")
 
+        status, body = http_get(f"{self.base()}/dump/scanner")
+        self.assertEqual(status, 200)
+        dump = json.loads(body)
+        paths = "\n".join(item["path"] for item in dump)
+        self.assertIn(".h5", paths)
+
+        recon_dir = os.path.join(self.dump_dir, "from_reconstruction")
+        if os.path.exists(recon_dir):
+            recon_h5 = [f for f in os.listdir(recon_dir) if f.endswith(".h5")]
+            self.assertEqual(recon_h5, [], "Recon HDF5 should not exist in scanner-only dump")
+
     def test_t2_roundtrip_pushes_images_back_to_scanner(self):
         self.start_recon()
         self.start_marshal(with_recon=True)
@@ -145,11 +191,52 @@ class TestMarshalIntegration(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         self.assertIn("received", res.stdout)
 
-        status, body = http_get(f"{self.base()}/image/latest")
-        self.assertEqual(status, 200)
-        latest = json.loads(body)
+        latest = wait_for_latest_file(self.base())
+        self.assertIsNotNone(latest)
+        self.assertFalse(latest["error"])
+        self.assertTrue(os.path.exists(latest["path"]), latest)
+
+        scanner_dir = os.path.join(self.dump_dir, "from_scanner")
+        recon_dir = os.path.join(self.dump_dir, "from_reconstruction")
+        self.assertGreater(len([f for f in os.listdir(scanner_dir) if f.endswith(".h5")]), 0)
+        self.assertGreater(len([f for f in os.listdir(recon_dir) if f.endswith(".h5")]), 0)
+
+    def test_t2b_scanner_images_are_saved_not_forwarded_to_recon(self):
+        self.start_marshal(with_recon=True)
+        res = self.run_image_streamer(frames=3)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+
+        latest = wait_for_latest_file(self.base())
+        self.assertIsNotNone(latest)
+        self.assertFalse(latest["error"])
+        self.assertTrue(os.path.exists(latest["path"]), latest)
+        self.assertIn("from_scanner", latest["path"])
+
+        scanner_dir = os.path.join(self.dump_dir, "from_scanner")
+        recon_dir = os.path.join(self.dump_dir, "from_reconstruction")
+        self.assertGreater(len([f for f in os.listdir(scanner_dir)
+                                if f.startswith("scan_") and f.endswith(".h5")]), 0)
+        self.assertEqual([f for f in os.listdir(recon_dir)
+                          if f.startswith("scan_") and f.endswith(".h5")], [])
+
+    def test_t3_dump_off_still_proxies_without_h5_archives(self):
+        self.start_recon()
+        self.start_marshal(with_recon=True, dump=False)
+        res = self.run_kspace(volumes=1)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn("received", res.stdout)
+
+        latest = wait_for_latest_file(self.base())
+        self.assertIsNotNone(latest)
         self.assertFalse(latest["error"])
         self.assertTrue(os.path.exists(latest["path"]))
+
+        for subdir in ("from_scanner", "from_reconstruction"):
+            path = os.path.join(self.dump_dir, subdir)
+            dump_h5_files = [f for f in os.listdir(path)
+                             if f.startswith("scan_") and f.endswith(".h5")]
+            self.assertEqual(dump_h5_files, [],
+                             f"{subdir} should not contain dump H5 files with dump off")
 
     def test_t4_recon_kill_marshal_survives_and_reconnects(self):
         self.start_recon()

@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <random>
 #include <cstring>
+#include <fstream>
 
 #include <ismrmrd/ismrmrd.h>
 
@@ -116,5 +117,38 @@ TEST_CASE("No /v1/ routes exist", "[http]") {
         http::request<http::string_body> req{http::verb::get, path, 11};
         auto res = dispatch(req, state);
         CHECK(res.result() == http::status::not_found);
+    }
+}
+
+
+TEST_CASE("Dump endpoints list H5 files only", "[http]") {
+    MarshalState state; init_state(state);
+    auto scanner_dir = mrd::scanner_dir(state.dump_dir);
+    auto recon_dir = mrd::recon_dir(state.dump_dir);
+    std::ofstream(scanner_dir / "scan_a.h5").put('h');
+    std::ofstream(scanner_dir / "latest_image.h5").put('x');
+    std::ofstream(recon_dir / "scan_b.h5").put('h');
+    std::ofstream(recon_dir / "latest_error.png").put('p');
+
+    {
+        http::request<http::string_body> req{http::verb::get, "/dump/scanner", 11};
+        auto res = dispatch(req, state);
+        REQUIRE(res.result() == http::status::ok);
+        auto j = json::parse(res.body());
+        REQUIRE(j.size() == 1);
+        std::string combined = j.dump();
+        CHECK(combined.find("scan_a.h5") != std::string::npos);
+        CHECK(combined.find("latest_image.h5") == std::string::npos);
+    }
+
+    {
+        http::request<http::string_body> req{http::verb::get, "/dump/recon", 11};
+        auto res = dispatch(req, state);
+        REQUIRE(res.result() == http::status::ok);
+        auto j = json::parse(res.body());
+        REQUIRE(j.size() == 1);
+        std::string combined = j.dump();
+        CHECK(combined.find("scan_b.h5") != std::string::npos);
+        CHECK(combined.find("latest_error.png") == std::string::npos);
     }
 }

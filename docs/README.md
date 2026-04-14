@@ -20,7 +20,7 @@ From this worktree, the canonical docs are at `../../docs/`:
 docker compose --env-file .env.demo -f docker-compose.demo.yml up
 
 # Or manually (from this worktree)
-./build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir ./data --recon-host localhost --recon-port 9002
+./build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir ./data --dump --recon-host localhost --recon-port 9002
 ```
 
 ## Key Design Points
@@ -28,6 +28,6 @@ docker compose --env-file .env.demo -f docker-compose.demo.yml up
 - **MRD TCP** for scanner ↔ marshal ↔ recon (same wire protocol as python-ismrmrd-server)
 - **HTTP** for query/control only (viz, pose, transform, health, dump)
 - **Canonical HDF5** via libismrmrd appendAcquisition/appendImage/appendWaveform
-- **Standalone file** for live viz (atomic rename, faster than SWMR)
+- **Canonical latest-image H5** for live viz (atomic rename, faster than SWMR)
 - **Fault tolerant** — marshal stays up if recon crashes
 - **Bidirectional** — reconstructed images pushed back to scanner on the same MRD TCP socket

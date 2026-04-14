@@ -18,16 +18,21 @@
 #include "logging.hpp"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <regex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
+
+#include <sys/socket.h>
 
 #include <boost/asio.hpp>
 
@@ -45,6 +50,58 @@ namespace net = boost::asio;
 using tcp = net::ip::tcp;
 
 namespace mrd {
+
+inline void write_scanner_latest_image_h5(MarshalState& state, const uint8_t* body, size_t size)
+{
+    if (size < IMAGE_HEADER_BYTES + sizeof(uint64_t)) return;
+
+    const auto* hdr = reinterpret_cast<const ISMRMRD::ImageHeader*>(body);
+    uint64_t attr_len = 0;
+    std::memcpy(&attr_len, body + IMAGE_HEADER_BYTES, sizeof(uint64_t));
+    const size_t attr_off = IMAGE_HEADER_BYTES + sizeof(uint64_t);
+    if (size < attr_off + attr_len) return;
+    const size_t pixel_off = attr_off + static_cast<size_t>(attr_len);
+
+    std::string xml;
+    {
+        std::lock_guard<std::mutex> lk(state.scan_mtx);
+        xml = state.current_xml_header;
+    }
+
+    auto dest = scanner_dir(state.dump_dir) / "latest_image.h5";
+    auto tmp = dest;
+    tmp += ".tmp";
+
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+
+    {
+        MrdSink sink(tmp);
+        if (!xml.empty()) sink.set_header(xml);
+        sink.append_image("image_0", *hdr,
+                          reinterpret_cast<const char*>(body + attr_off),
+                          static_cast<size_t>(attr_len),
+                          body + pixel_off,
+                          size - pixel_off);
+        sink.close();
+    }
+
+    std::filesystem::rename(tmp, dest, ec);
+    if (ec) {
+        std::filesystem::remove(dest, ec);
+        ec.clear();
+        std::filesystem::rename(tmp, dest, ec);
+        if (ec) {
+            LOG_WARN("Scanner latest H5 rename failed: " << ec.message());
+            return;
+        }
+    }
+
+    std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
+    state.latest_image_path = dest.string();
+    state.latest_image_error = false;
+    state.latest_image_count++;
+}
 
 class MrdTcpListener {
 public:
@@ -66,13 +123,17 @@ public:
             LOG_WARN("No scanner connected, cannot push MRD message");
             return;
         }
-        try {
-            net::write(*scanner_socket_, net::buffer(&tag, sizeof(tag)));
-            if (len > 0) net::write(*scanner_socket_, net::buffer(data, len));
+        int fd = scanner_socket_->native_handle();
+        if (fd < 0) {
+            LOG_WARN("No scanner fd, cannot push MRD message");
+            return;
+        }
+        if (write_exact_fd(fd, &tag, sizeof(tag)) &&
+            (len == 0 || write_exact_fd(fd, data, len))) {
             LOG_DEBUG("Pushed MRD message to scanner tag=" << tag
                       << " (" << len << " bytes)");
-        } catch (const std::exception& e) {
-            LOG_WARN("Failed to push MRD message to scanner: " << e.what());
+        } else {
+            LOG_WARN("Failed to push MRD message to scanner");
         }
     }
 
@@ -88,6 +149,21 @@ private:
     mutable std::mutex scanner_mtx_;
     std::shared_ptr<tcp::socket> scanner_socket_;
     std::atomic<bool> session_active_{false};
+
+    static bool write_exact_fd(int fd, const void* buf, size_t n) {
+        const auto* p = static_cast<const uint8_t*>(buf);
+        size_t done = 0;
+        while (done < n) {
+            ssize_t rc = ::send(fd, p + done, n - done, MSG_NOSIGNAL);
+            if (rc < 0) {
+                if (errno == EINTR) continue;
+                return false;
+            }
+            if (rc == 0) return false;
+            done += static_cast<size_t>(rc);
+        }
+        return true;
+    }
 
     void do_accept() {
         acceptor_.async_accept([this](boost::system::error_code ec, tcp::socket sock) {
@@ -119,6 +195,28 @@ private:
 
     void handle_session(std::shared_ptr<tcp::socket> sock) {
         LOG_INFO("MRD session started");
+        std::vector<std::pair<uint16_t, std::vector<uint8_t>>> recon_preamble;
+
+        auto send_or_buffer_recon = [&](uint16_t tag, const std::vector<uint8_t>& body) {
+            if (!forwarder_) return;
+            if (session_active_.load() && forwarder_->is_connected()) {
+                forwarder_->post_frame(tag, body);
+            } else {
+                recon_preamble.emplace_back(tag, body);
+            }
+        };
+
+        auto ensure_recon_session = [&]() -> bool {
+            if (!forwarder_) return false;
+            if (!session_active_.load() || !forwarder_->is_connected()) {
+                session_active_.store(forwarder_->begin_session());
+                if (!session_active_.load()) return false;
+                for (const auto& [tag, body] : recon_preamble) {
+                    forwarder_->post_frame(tag, body);
+                }
+            }
+            return session_active_.load() && forwarder_->is_connected();
+        };
 
         try {
             while (sock->is_open()) {
@@ -128,49 +226,56 @@ private:
                 switch (msg_id) {
 
                 case MRD_MESSAGE_CONFIG_FILE: {
-                    char buf[1024];
-                    if (!read_exact(*sock, buf, 1024)) goto done;
+                    std::vector<uint8_t> body;
+                    if (!read_exact(*sock, body, 1024)) goto done;
+                    const char* buf = reinterpret_cast<const char*>(body.data());
                     std::string config(buf, strnlen(buf, 1024));
                     LOG_INFO("CONFIG_FILE: " << config);
-                    std::lock_guard<std::mutex> lk(state_.scan_mtx);
-                    state_.current_config = config;
-                    state_.config_received.store(true);
-                    if (forwarder_) {
-                        if (!session_active_.load() || !forwarder_->is_connected()) {
-                            session_active_.store(forwarder_->begin_session());
-                        }
-                        forwarder_->post_config(config);
+                    {
+                        std::lock_guard<std::mutex> lk(state_.scan_mtx);
+                        state_.current_config = config;
+                        state_.config_received.store(true);
                     }
+                    if (state_.dump_enabled && state_.dump_recorder) {
+                        state_.dump_recorder->set_scanner_config_file(config);
+                    }
+                    send_or_buffer_recon(MRD_MESSAGE_CONFIG_FILE, body);
                     break;
                 }
 
                 case MRD_MESSAGE_CONFIG_TEXT: {
                     uint32_t len = 0;
                     if (!read_exact(*sock, &len, 4)) goto done;
-                    std::vector<uint8_t> buf;
-                    if (!read_exact(*sock, buf, len)) goto done;
-                    std::string config(buf.begin(), buf.end());
+                    std::vector<uint8_t> body(4 + len);
+                    std::memcpy(body.data(), &len, 4);
+                    if (len > 0 && !read_exact(*sock, body.data() + 4, len)) goto done;
+                    const auto* payload = body.data() + 4;
+                    std::string config(reinterpret_cast<const char*>(payload),
+                                       reinterpret_cast<const char*>(payload) + len);
                     auto nul = config.find('\0');
                     if (nul != std::string::npos) config.resize(nul);
                     LOG_INFO("CONFIG_TEXT: " << config);
-                    std::lock_guard<std::mutex> lk(state_.scan_mtx);
-                    state_.current_config = config;
-                    state_.config_received.store(true);
-                    if (forwarder_) {
-                        if (!session_active_.load() || !forwarder_->is_connected()) {
-                            session_active_.store(forwarder_->begin_session());
-                        }
-                        forwarder_->post_config_text(config);
+                    {
+                        std::lock_guard<std::mutex> lk(state_.scan_mtx);
+                        state_.current_config = config;
+                        state_.config_received.store(true);
                     }
+                    if (state_.dump_enabled && state_.dump_recorder) {
+                        state_.dump_recorder->set_scanner_config_text(config);
+                    }
+                    send_or_buffer_recon(MRD_MESSAGE_CONFIG_TEXT, body);
                     break;
                 }
 
                 case MRD_MESSAGE_METADATA_XML_TEXT: {
                     uint32_t len = 0;
                     if (!read_exact(*sock, &len, 4)) goto done;
-                    std::vector<uint8_t> buf;
-                    if (!read_exact(*sock, buf, len)) goto done;
-                    std::string xml(buf.begin(), buf.end());
+                    std::vector<uint8_t> body(4 + len);
+                    std::memcpy(body.data(), &len, 4);
+                    if (len > 0 && !read_exact(*sock, body.data() + 4, len)) goto done;
+                    const auto* payload = body.data() + 4;
+                    std::string xml(reinterpret_cast<const char*>(payload),
+                                    reinterpret_cast<const char*>(payload) + len);
                     auto nul = xml.find('\0');
                     if (nul != std::string::npos) xml.resize(nul);
                     LOG_INFO("METADATA_XML: " << xml.size() << " bytes");
@@ -192,41 +297,41 @@ private:
                         if (nz == 0) nz = 1;
                     }
 
+                    std::string scan_file;
                     {
                         std::lock_guard<std::mutex> lk(state_.scan_mtx);
-                        if (state_.scanner_sink) {
-                            state_.scanner_sink->close();
-                            state_.scanner_sink.reset();
-                        }
-                        auto path = scanner_dir(state_.dump_dir) / scan_filename();
-                        state_.scanner_sink = std::make_unique<MrdSink>(path);
-                        state_.scanner_sink->set_header(xml);
+                        if (state_.current_scan_filename.empty())
+                            state_.current_scan_filename = scan_filename();
+                        scan_file = state_.current_scan_filename;
                         state_.current_xml_header = xml;
                         state_.expected_slices = nz;
                         state_.recon_failure_reported.store(false);
+                        state_.latest_image_generation.fetch_add(1);
                         state_.slice_buffer.clear();
-                        // Close recon sink from previous scan
-                        if (state_.recon_sink) {
-                            state_.recon_sink->close();
-                            state_.recon_sink.reset();
-                        }
                     }
-                    // Reset standalone viz file for new scan
+                    if (state_.dump_enabled && state_.dump_recorder) {
+                        state_.dump_recorder->start_scan(scan_file, xml);
+                    }
+                    // Reset latest image pointer for new scan. The latest live-client
+                    // file is a canonical ISMRMRD H5 written by handle_recon_image().
                     {
-                        auto standalone = recon_dir(state_.dump_dir) / "latest_image.bin";
-                        std::ofstream(standalone.string(), std::ios::binary | std::ios::trunc);
+                        auto standalone = recon_dir(state_.dump_dir) / "latest_image.h5";
+                        std::error_code ec;
+                        std::filesystem::remove(standalone, ec);
                         std::lock_guard<std::mutex> img_lk(state_.latest_image_mtx);
+                        state_.latest_image_path.clear();
+                        state_.latest_image_error = false;
                         state_.latest_image_count = 0;
                     }
                     LOG_INFO("Expected slices (nz): " << nz);
                     state_.header_received.store(true);
-                    if (forwarder_) forwarder_->post_header(xml);
+                    send_or_buffer_recon(MRD_MESSAGE_METADATA_XML_TEXT, body);
                     break;
                 }
 
                 case MRD_MESSAGE_CLOSE: {
                     LOG_INFO("CLOSE");
-                    if (forwarder_) {
+                    if (forwarder_ && session_active_.load()) {
                         forwarder_->post_close();
                         forwarder_->wait_for_close(std::chrono::milliseconds(2000));
                         forwarder_->end_session();
@@ -239,13 +344,17 @@ private:
                 case MRD_MESSAGE_TEXT: {
                     uint32_t len = 0;
                     if (!read_exact(*sock, &len, 4)) goto done;
-                    std::vector<uint8_t> buf;
-                    if (!read_exact(*sock, buf, len)) goto done;
-                    LOG_INFO("TEXT: " << std::string(buf.begin(), buf.end()));
-                    if (forwarder_) {
-                        std::string body(4 + len, '\0');
-                        std::memcpy(body.data(), &len, 4);
-                        if (len > 0) std::memcpy(body.data() + 4, buf.data(), len);
+                    std::vector<uint8_t> body(4 + len);
+                    std::memcpy(body.data(), &len, 4);
+                    if (len > 0 && !read_exact(*sock, body.data() + 4, len)) goto done;
+                    std::string text(reinterpret_cast<const char*>(body.data() + 4), len);
+                    auto nul = text.find('\0');
+                    if (nul != std::string::npos) text.resize(nul);
+                    LOG_INFO("TEXT: " << text);
+                    if (state_.dump_enabled && state_.dump_recorder) {
+                        state_.dump_recorder->append_scanner_text(text);
+                    }
+                    if (ensure_recon_session()) {
                         forwarder_->post_frame(MRD_MESSAGE_TEXT, body);
                     }
                     break;
@@ -263,30 +372,21 @@ private:
                     std::vector<uint8_t> samples(sample_bytes);
                     if (!read_exact(*sock, samples.data(), sample_bytes)) goto done;
 
-                    // Archive
-                    {
-                        std::lock_guard<std::mutex> lk(state_.scan_mtx);
-                        if (state_.scanner_sink) {
-                            ISMRMRD::Acquisition acq(ahdr.number_of_samples,
-                                                     ahdr.active_channels,
-                                                     ahdr.trajectory_dimensions);
-                            acq.setHead(ahdr);
-                            if (traj_bytes > 0)
-                                std::memcpy(acq.getTrajPtr(), traj.data(), traj_bytes);
-                            std::memcpy(acq.getDataPtr(), samples.data(), sample_bytes);
-                            state_.scanner_sink->append_acquisition(acq);
-                        }
+                    std::vector<uint8_t> body(ACQUISITION_HEADER_BYTES + traj_bytes + sample_bytes);
+                    std::memcpy(body.data(), &ahdr, ACQUISITION_HEADER_BYTES);
+                    if (traj_bytes > 0)
+                        std::memcpy(body.data() + ACQUISITION_HEADER_BYTES,
+                                    traj.data(), traj_bytes);
+                    std::memcpy(body.data() + ACQUISITION_HEADER_BYTES + traj_bytes,
+                                samples.data(), sample_bytes);
+
+                    if (state_.dump_enabled && state_.dump_recorder) {
+                        state_.dump_recorder->append_scanner_acquisition(
+                            ahdr, std::vector<uint8_t>(traj), std::vector<uint8_t>(samples));
                     }
 
                     // Forward raw bytes to recon with correct tag
-                    if (forwarder_) {
-                        std::string body(ACQUISITION_HEADER_BYTES + traj_bytes + sample_bytes, '\0');
-                        std::memcpy(body.data(), &ahdr, ACQUISITION_HEADER_BYTES);
-                        if (traj_bytes > 0)
-                            std::memcpy(body.data() + ACQUISITION_HEADER_BYTES,
-                                        traj.data(), traj_bytes);
-                        std::memcpy(body.data() + ACQUISITION_HEADER_BYTES + traj_bytes,
-                                    samples.data(), sample_bytes);
+                    if (ensure_recon_session()) {
                         forwarder_->post_frame(MRD_MESSAGE_ISMRMRD_ACQUISITION, body);
                     }
                     break;
@@ -308,28 +408,24 @@ private:
                     std::vector<uint8_t> pixels(pixel_bytes);
                     if (!read_exact(*sock, pixels.data(), pixel_bytes)) goto done;
 
+                    size_t total = IMAGE_HEADER_BYTES + 8 + attr_len + pixel_bytes;
+                    std::vector<uint8_t> body(total);
+                    size_t o = 0;
+                    std::memcpy(body.data()+o, hdr_buf.data(), IMAGE_HEADER_BYTES); o += IMAGE_HEADER_BYTES;
+                    std::memcpy(body.data()+o, &attr_len, 8); o += 8;
+                    if (attr_len > 0) { std::memcpy(body.data()+o, attr.data(), attr_len); o += attr_len; }
+                    std::memcpy(body.data()+o, pixels.data(), pixel_bytes);
+
                     LOG_DEBUG("IMAGE from scanner: "
                               << ihdr->matrix_size[0] << "x" << ihdr->matrix_size[1]);
-                    {
-                        std::lock_guard<std::mutex> lk(state_.scan_mtx);
-                        if (state_.scanner_sink) {
-                            std::string var = "image_" + std::to_string(ihdr->image_series_index);
-                            state_.scanner_sink->append_image(
-                                var, *ihdr,
-                                reinterpret_cast<const char*>(attr.data()), attr_len,
-                                pixels.data(), pixel_bytes);
-                        }
+                    if (state_.dump_enabled && state_.dump_recorder) {
+                        state_.dump_recorder->append_scanner_image(
+                            *ihdr, std::vector<uint8_t>(attr), std::vector<uint8_t>(pixels));
                     }
-                    if (forwarder_) {
-                        size_t total = IMAGE_HEADER_BYTES + 8 + attr_len + pixel_bytes;
-                        std::string body(total, '\0');
-                        size_t o = 0;
-                        std::memcpy(body.data()+o, hdr_buf.data(), IMAGE_HEADER_BYTES); o += IMAGE_HEADER_BYTES;
-                        std::memcpy(body.data()+o, &attr_len, 8); o += 8;
-                        if (attr_len > 0) { std::memcpy(body.data()+o, attr.data(), attr_len); o += attr_len; }
-                        std::memcpy(body.data()+o, pixels.data(), pixel_bytes);
-                        forwarder_->post_frame(MRD_MESSAGE_ISMRMRD_IMAGE, body);
-                    }
+                    // Scanner-origin IMAGE is already reconstructed image data.
+                    // Save/expose it for file-reading clients; do not send it to
+                    // the k-space reconstruction service.
+                    write_scanner_latest_image_h5(state_, body.data(), body.size());
                     break;
                 }
 
@@ -340,19 +436,15 @@ private:
                     std::vector<uint8_t> wf_data(data_bytes);
                     if (!read_exact(*sock, wf_data.data(), data_bytes)) goto done;
 
-                    {
-                        std::lock_guard<std::mutex> lk(state_.scan_mtx);
-                        if (state_.scanner_sink) {
-                            ISMRMRD::Waveform wf(whdr.number_of_samples, whdr.channels);
-                            std::memcpy(&wf.head, &whdr, WAVEFORM_HEADER_BYTES);
-                            std::memcpy(wf.data, wf_data.data(), data_bytes);
-                            state_.scanner_sink->append_waveform(wf);
-                        }
+                    std::vector<uint8_t> body(WAVEFORM_HEADER_BYTES + data_bytes);
+                    std::memcpy(body.data(), &whdr, WAVEFORM_HEADER_BYTES);
+                    std::memcpy(body.data() + WAVEFORM_HEADER_BYTES, wf_data.data(), data_bytes);
+
+                    if (state_.dump_enabled && state_.dump_recorder) {
+                        state_.dump_recorder->append_scanner_waveform(
+                            whdr, std::vector<uint8_t>(wf_data));
                     }
-                    if (forwarder_) {
-                        std::string body(WAVEFORM_HEADER_BYTES + data_bytes, '\0');
-                        std::memcpy(body.data(), &whdr, WAVEFORM_HEADER_BYTES);
-                        std::memcpy(body.data() + WAVEFORM_HEADER_BYTES, wf_data.data(), data_bytes);
+                    if (ensure_recon_session()) {
                         forwarder_->post_frame(MRD_MESSAGE_ISMRMRD_WAVEFORM, body);
                     }
                     break;
@@ -368,6 +460,10 @@ private:
         }
 
     done:
+        if (forwarder_ && session_active_.load()) {
+            forwarder_->end_session();
+        }
+        state_.close_scan();
         LOG_INFO("MRD session ended");
         session_active_.store(false);
         {

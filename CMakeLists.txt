@@ -53,7 +53,12 @@ include_directories(${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
 
 # ---------- marshal server ----------
 
-add_executable(marshal src/marshal_main.cpp src/mrd_sink.cpp)
+add_executable(marshal
+  src/marshal_main.cpp
+  src/mrd_sink.cpp
+  src/dump_recorder.cpp
+  src/latest_image_writer.cpp
+)
 target_link_libraries(marshal PRIVATE
   Boost::system Threads::Threads nlohmann_json::nlohmann_json
   ${hdf5_target} ${ismrmrd_target} CURL::libcurl)
@@ -123,19 +128,34 @@ if(BUILD_TESTING)
     ${hdf5_target} ${ismrmrd_target})
   add_test(NAME test_mrd_sink COMMAND test_mrd_sink)
 
-  add_executable(unit_http_handlers tests/test_http_handlers.cpp src/mrd_sink.cpp)
+  add_executable(unit_http_handlers
+    tests/test_http_handlers.cpp
+    src/mrd_sink.cpp
+    src/dump_recorder.cpp
+    src/latest_image_writer.cpp
+  )
   target_link_libraries(unit_http_handlers PRIVATE
     Catch2::Catch2WithMain Boost::system Threads::Threads
     nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target} CURL::libcurl)
   add_test(NAME unit_http_handlers COMMAND unit_http_handlers)
 
-  add_executable(it_http tests/test_http_endpoints.cpp src/mrd_sink.cpp)
+  add_executable(it_http
+    tests/test_http_endpoints.cpp
+    src/mrd_sink.cpp
+    src/dump_recorder.cpp
+    src/latest_image_writer.cpp
+  )
   target_link_libraries(it_http PRIVATE
     Catch2::Catch2WithMain Boost::system Threads::Threads
     nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target} CURL::libcurl)
   add_test(NAME it_http COMMAND it_http)
 
-  add_executable(test_ws_client tests/test_ws_client.cpp src/mrd_sink.cpp)
+  add_executable(test_ws_client
+    tests/test_ws_client.cpp
+    src/mrd_sink.cpp
+    src/dump_recorder.cpp
+    src/latest_image_writer.cpp
+  )
   target_link_libraries(test_ws_client PRIVATE
     Catch2::Catch2WithMain Boost::system Threads::Threads
     nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target} CURL::libcurl)

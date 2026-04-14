@@ -34,6 +34,11 @@ public:
     // Write the XML header string. Call once before appending data.
     void set_header(const std::string& xml);
 
+    // Write a one-element variable-length string dataset under the ISMRMRD group.
+    // Used for python-ismrmrd-server-compatible savedata metadata such as
+    // /dataset/config_file and /dataset/config.
+    void write_string_dataset(const std::string& name, const std::string& value);
+
     // Typed append methods — delegate to ISMRMRD::Dataset
     void append_acquisition(const ISMRMRD::Acquisition& acq);
 
@@ -68,7 +73,7 @@ private:
 };
 
 // Write raw bytes to a standalone file via atomic rename (write tmp, fsync, rename).
-// Used for latest_image.bin and latest_error.png.
+// Used for latest_image.h5 and latest_error.png.
 void write_standalone_file(const std::filesystem::path& dest,
                            const void* data, size_t len);
 

@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <hdf5.h>
 #include <stdexcept>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -29,7 +30,10 @@ MrdSink::MrdSink(const std::filesystem::path& path, const std::string& groupname
     namespace fs = std::filesystem;
     fs::create_directories(path.parent_path());
     dataset_ = std::make_unique<ISMRMRD::Dataset>(path.c_str(), groupname.c_str(), true);
-    LOG_INFO("Opened HDF5 sink: " << path.string());
+    if (path.filename().string().rfind("latest_image.h5", 0) == 0)
+        LOG_DEBUG("Opened HDF5 sink: " << path.string());
+    else
+        LOG_INFO("Opened HDF5 sink: " << path.string());
 }
 
 MrdSink::~MrdSink()
@@ -42,6 +46,53 @@ void MrdSink::set_header(const std::string& xml)
     std::lock_guard<std::mutex> lk(mtx_);
     if (!dataset_) return;
     dataset_->writeHeader(xml);
+}
+
+void MrdSink::write_string_dataset(const std::string& name, const std::string& value)
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!dataset_) return;
+
+    hid_t file = H5Fopen(path_.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+    if (file < 0) throw std::runtime_error("H5Fopen failed for " + path_.string());
+
+    hid_t group = H5Gopen2(file, groupname_.c_str(), H5P_DEFAULT);
+    if (group < 0) group = H5Gcreate2(file, groupname_.c_str(), H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    if (group < 0) {
+        H5Fclose(file);
+        throw std::runtime_error("H5Gopen/create failed for " + groupname_);
+    }
+
+    if (H5Lexists(group, name.c_str(), H5P_DEFAULT) > 0) {
+        H5Ldelete(group, name.c_str(), H5P_DEFAULT);
+    }
+
+    hsize_t dims[1] = {1};
+    hid_t space = H5Screate_simple(1, dims, nullptr);
+    hid_t type = H5Tcopy(H5T_C_S1);
+    H5Tset_size(type, H5T_VARIABLE);
+    H5Tset_cset(type, H5T_CSET_UTF8);
+
+    hid_t dset = H5Dcreate2(group, name.c_str(), type, space,
+                            H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    if (dset < 0) {
+        H5Tclose(type);
+        H5Sclose(space);
+        H5Gclose(group);
+        H5Fclose(file);
+        throw std::runtime_error("H5Dcreate failed for " + name);
+    }
+
+    const char* ptr = value.c_str();
+    herr_t rc = H5Dwrite(dset, type, H5S_ALL, H5S_ALL, H5P_DEFAULT, &ptr);
+
+    H5Dclose(dset);
+    H5Tclose(type);
+    H5Sclose(space);
+    H5Gclose(group);
+    H5Fclose(file);
+
+    if (rc < 0) throw std::runtime_error("H5Dwrite failed for " + name);
 }
 
 void MrdSink::append_acquisition(const ISMRMRD::Acquisition& acq)
@@ -167,10 +218,17 @@ void MrdSink::close()
     std::lock_guard<std::mutex> lk(mtx_);
     if (dataset_) {
         dataset_.reset(); // ISMRMRD::Dataset destructor closes HDF5
-        LOG_INFO("Closed HDF5 sink: " << path_.string()
-                 << " (acq=" << acq_count_
-                 << " img=" << img_count_
-                 << " wf=" << wf_count_ << ")");
+        if (path_.filename().string().rfind("latest_image.h5", 0) == 0) {
+            LOG_DEBUG("Closed HDF5 sink: " << path_.string()
+                      << " (acq=" << acq_count_
+                      << " img=" << img_count_
+                      << " wf=" << wf_count_ << ")");
+        } else {
+            LOG_INFO("Closed HDF5 sink: " << path_.string()
+                     << " (acq=" << acq_count_
+                     << " img=" << img_count_
+                     << " wf=" << wf_count_ << ")");
+        }
     }
 }
 

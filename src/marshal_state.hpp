@@ -3,8 +3,8 @@
  * Project: CWRU Data Marshal - MRI Marshal
  * Purpose: Global mutable state shared across HTTP handlers
  *
- * Two sinks (scanner + recon), transform delta, pose cache,
- * stored XML + config per scan, optional recon forwarding.
+ * Dump recorder, transform delta, pose cache, stored XML + config per scan,
+ * optional recon forwarding.
  */
 
 #pragma once
@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -20,7 +21,8 @@
 #include <vector>
 
 #include "common/pose.hpp"
-#include "mrd_sink.hpp"
+#include "dump_recorder.hpp"
+#include "latest_image_writer.hpp"
 
 struct SliceTransform {
     double through_plane_mm{0};
@@ -44,8 +46,9 @@ struct SliceTransform {
 struct MarshalState {
     // --dump-dir root
     std::filesystem::path dump_dir{"./data"};
+    bool dump_enabled{false};
 
-    // --recon-url (empty = archival-only mode)
+    // --recon-url (empty = no reconstruction target)
     std::string recon_url;
 
     // --http and --ws-port
@@ -70,12 +73,10 @@ struct MarshalState {
     std::mutex scan_mtx;
     std::string current_xml_header;
     std::string current_config;
+    std::string current_scan_filename;
 
-    // Scanner-side HDF5 sink (from_scanner/)
-    std::unique_ptr<mrd::MrdSink> scanner_sink;
-
-    // Recon-side HDF5 sink (from_reconstruction/), opened lazily on first POST /image
-    std::unique_ptr<mrd::MrdSink> recon_sink;
+    // Async H5 dump recorder, present only when --dump is enabled.
+    std::unique_ptr<mrd::DumpRecorder> dump_recorder;
 
     // ------ Persistent state (survives across scans) ------
 
@@ -91,7 +92,9 @@ struct MarshalState {
     std::string latest_image_path;
     bool latest_image_error{false};
     uint32_t latest_image_count{0};
+    std::atomic<uint64_t> latest_image_generation{0};
     std::atomic<bool> recon_failure_reported{false};
+    std::unique_ptr<mrd::LatestImageWriter> latest_writer;
 
     // Multi-slice buffering: collect all spatial slices before writing to file
     uint16_t expected_slices{0};  // From METADATA_XML <z> field; 0 = unknown
@@ -109,10 +112,10 @@ struct MarshalState {
     // Close both sinks and clear per-scan state. Ready for next POST /header.
     void close_scan() {
         std::lock_guard<std::mutex> lk(scan_mtx);
-        if (scanner_sink) { scanner_sink->close(); scanner_sink.reset(); }
-        if (recon_sink)   { recon_sink->close();   recon_sink.reset(); }
+        if (dump_recorder) dump_recorder->close_scan();
         current_xml_header.clear();
         current_config.clear();
+        current_scan_filename.clear();
         header_received.store(false);
         config_received.store(false);
         recon_failure_reported.store(false);

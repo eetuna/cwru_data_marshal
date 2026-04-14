@@ -1,9 +1,10 @@
 /*
  * ReconForwarder — forwards scanner MRD TCP messages to a reconstruction service.
  *
- * Design: simple TCP pipe, matching python-ismrmrd-server's connection model.
- * One socket per scan. Sequential writes. A reader thread reads MRD messages back.
- * No reconnect mid-scan. No queues. No complexity.
+ * Design: one MRD TCP connection per scan, matching python-ismrmrd-server's
+ * connection model. Scanner-side messages are written to recon in the same
+ * order they are received. A reader thread concurrently drains recon return
+ * messages so IMAGE/TEXT/WAVEFORM/CLOSE can be pushed back to the scanner.
  *
  * Lifecycle:
  *   1. Scanner sends CONFIG → marshal calls begin_session() → connects to recon
@@ -19,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -27,6 +29,9 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <ismrmrd/ismrmrd.h>
 #include <ismrmrd/waveform.h>
@@ -57,18 +62,22 @@ public:
     bool begin_session() {
         end_session();  // clean up any previous session
         drop_logged_.store(false);
+        failure_reported_.store(false);
         close_received_.store(false);
 
         try {
             tcp::resolver resolver(ioc_);
             auto endpoints = resolver.resolve(recon_host_, std::to_string(recon_port_));
-            socket_ = std::make_unique<tcp::socket>(ioc_);
-            net::connect(*socket_, endpoints);
-            socket_->set_option(tcp::no_delay(true));
+            {
+                std::lock_guard<std::mutex> lk(socket_mtx_);
+                socket_ = std::make_unique<tcp::socket>(ioc_);
+                net::connect(*socket_, endpoints);
+                socket_->set_option(tcp::no_delay(true));
+            }
             connected_.store(true);
             LOG_INFO("Connected to recon at " << recon_host_ << ":" << recon_port_);
 
-            // Start reader thread for recon responses.
+            // Start reader thread for recon->scanner responses.
             reader_running_.store(true);
             reader_ = std::thread(&ReconForwarder::read_loop, this);
             return true;
@@ -83,27 +92,32 @@ public:
     // Close connection, join reader thread. Call after CLOSE is sent.
     void end_session() {
         reader_running_.store(false);
-
-        if (socket_ && socket_->is_open()) {
-            boost::system::error_code ec;
-            socket_->shutdown(tcp::socket::shutdown_both, ec);
-            socket_->close(ec);
-        }
-        socket_.reset();
         connected_.store(false);
 
+        // Shutdown wakes blocking send/recv. Close/reset only after the
+        // reader thread has exited so the fd cannot be reused underneath it.
+        shutdown_socket();
+
         if (reader_.joinable()) reader_.join();
+        {
+            std::lock_guard<std::mutex> lk(socket_mtx_);
+            if (socket_ && socket_->is_open()) {
+                boost::system::error_code ec;
+                socket_->close(ec);
+            }
+            socket_.reset();
+        }
     }
 
     // --- Message sending (called from marshal's MRD TCP listener thread) ---
-    // All of these write directly to the socket. No queue. Sequential.
+    // These write synchronously to preserve python-server-like ordering.
 
     void send_config_file(const std::string& name) {
         uint8_t buf[2 + 1024] = {};
         uint16_t tag = MRD_MESSAGE_CONFIG_FILE;
         std::memcpy(buf, &tag, 2);
         std::memcpy(buf + 2, name.data(), std::min(name.size(), size_t(1024)));
-        write_all(buf, sizeof(buf));
+        send_message(buf, sizeof(buf));
     }
 
     void send_config_text(const std::string& text) {
@@ -114,7 +128,7 @@ public:
         std::memcpy(msg.data(), &tag, 2);
         std::memcpy(msg.data() + 2, &len, 4);
         std::memcpy(msg.data() + 6, with_nul.data(), len);
-        write_all(msg.data(), msg.size());
+        send_message(msg.data(), msg.size());
     }
 
     void send_header(const std::string& xml) {
@@ -125,19 +139,19 @@ public:
         std::memcpy(msg.data(), &tag, 2);
         std::memcpy(msg.data() + 2, &len, 4);
         std::memcpy(msg.data() + 6, with_nul.data(), len);
-        write_all(msg.data(), msg.size());
+        send_message(msg.data(), msg.size());
     }
 
     void send_frame(uint16_t tag, const void* data, size_t len) {
         std::vector<uint8_t> msg(2 + len);
         std::memcpy(msg.data(), &tag, 2);
         std::memcpy(msg.data() + 2, data, len);
-        write_all(msg.data(), msg.size());
+        send_message(msg.data(), msg.size());
     }
 
     void send_close() {
         uint16_t tag = MRD_MESSAGE_CLOSE;
-        write_all(&tag, 2);
+        send_message(&tag, 2);
     }
 
     // Legacy API names (used by mrd_tcp_listener)
@@ -145,6 +159,9 @@ public:
     void post_config(const std::string& config) { send_config_file(config); }
     void post_config_text(const std::string& t) { send_config_text(t); }
     void post_frame(uint16_t tag, const std::string& body) {
+        send_frame(tag, body.data(), body.size());
+    }
+    void post_frame(uint16_t tag, const std::vector<uint8_t>& body) {
         send_frame(tag, body.data(), body.size());
     }
     void post_close() { send_close(); }
@@ -169,27 +186,55 @@ private:
 
     net::io_context ioc_;
     std::unique_ptr<tcp::socket> socket_;
+    std::mutex socket_mtx_;
+    std::mutex send_mtx_;
     std::atomic<bool> connected_{false};
     std::atomic<bool> reader_running_{false};
     std::atomic<bool> drop_logged_{false};
+    std::atomic<bool> failure_reported_{false};
     std::atomic<bool> close_received_{false};
     std::thread reader_;
     std::mutex close_mtx_;
     std::condition_variable close_cv_;
 
-    void write_all(const void* data, size_t len) {
-        if (!connected_.load() || !socket_ || !socket_->is_open()) {
+    void report_failure_once() {
+        if (failure_reported_.exchange(true) == false && on_failure_) {
+            try { on_failure_(); } catch (...) {}
+        }
+    }
+
+    void shutdown_socket() {
+        std::lock_guard<std::mutex> lk(socket_mtx_);
+        if (socket_ && socket_->is_open()) {
+            boost::system::error_code ec;
+            socket_->shutdown(tcp::socket::shutdown_both, ec);
+        }
+    }
+
+    void fail_recon(const std::string& reason) {
+        if (connected_.exchange(false)) {
+            LOG_WARN(reason);
+        } else if (drop_logged_.exchange(true) == false) {
+            LOG_WARN(reason);
+        }
+        shutdown_socket();
+        close_cv_.notify_all();
+        report_failure_once();
+    }
+
+    void send_message(const void* data, size_t len) {
+        if (!connected_.load()) {
             // Only log once to avoid spam during shutdown
             if (drop_logged_.exchange(true) == false)
                 LOG_WARN("Not connected to recon, dropping messages");
             return;
         }
-        try {
-            net::write(*socket_, net::buffer(data, len));
-        } catch (const std::exception& e) {
-            LOG_WARN("Write to recon failed: " << e.what());
-            connected_.store(false);
-            if (on_failure_) { try { on_failure_(); } catch (...) {} }
+
+        std::lock_guard<std::mutex> lk(send_mtx_);
+        if (!connected_.load()) return;
+        if (!write_exact(data, len)) {
+            fail_recon("Write to recon failed");
+            return;
         }
     }
 
@@ -235,16 +280,50 @@ private:
             failure = true;
         }
         connected_.store(false);
+        if (failure) shutdown_socket();
         close_cv_.notify_all();
-        if (failure && on_failure_) { try { on_failure_(); } catch (...) {} }
+        if (failure) report_failure_once();
         LOG_INFO("Recon reader ended");
     }
 
     bool read_exact(void* buf, size_t n) {
-        if (!socket_ || !socket_->is_open()) return false;
-        boost::system::error_code ec;
-        net::read(*socket_, net::buffer(buf, n), ec);
-        return !ec;
+        auto* out = static_cast<uint8_t*>(buf);
+        size_t done = 0;
+        while (done < n) {
+            const int fd = native_fd();
+            if (fd < 0) return false;
+            ssize_t rc = ::recv(fd, out + done, n - done, 0);
+            if (rc == 0) return false;
+            if (rc < 0) {
+                if (errno == EINTR) continue;
+                return false;
+            }
+            done += static_cast<size_t>(rc);
+        }
+        return true;
+    }
+
+    bool write_exact(const void* buf, size_t n) {
+        const auto* in = static_cast<const uint8_t*>(buf);
+        size_t done = 0;
+        while (done < n) {
+            const int fd = native_fd();
+            if (fd < 0) return false;
+            ssize_t rc = ::send(fd, in + done, n - done, MSG_NOSIGNAL);
+            if (rc < 0) {
+                if (errno == EINTR) continue;
+                return false;
+            }
+            if (rc == 0) return false;
+            done += static_cast<size_t>(rc);
+        }
+        return true;
+    }
+
+    int native_fd() {
+        std::lock_guard<std::mutex> lk(socket_mtx_);
+        if (!socket_ || !socket_->is_open()) return -1;
+        return socket_->native_handle();
     }
 
     bool read_message_body(uint16_t tag, std::vector<uint8_t>& body) {

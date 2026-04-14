@@ -3,13 +3,15 @@
  * Project: CWRU Data Marshal - MRI Marshal
  * Purpose: Main server binary — new API (v2)
  *
- * Flags: --http host:port, --ws-port N, --recon-url URL, --dump-dir PATH
+ * Flags: --http host:port, --ws-port N, --recon-host HOST, --recon-port N,
+ *        --dump-dir PATH, --dump
  */
 
 #undef LOG_COMPONENT
 #define LOG_COMPONENT "marshal_main"
 #include "logging.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <filesystem>
@@ -31,21 +33,104 @@
 
 namespace fs = std::filesystem;
 
-// Embedded reconstruction-failed PNG (minimal 1x1 red pixel PNG, ~67 bytes)
-// In production this would be a proper 200x200 image compiled in via xxd.
-// For now, we generate a placeholder at runtime.
+static uint32_t png_crc32(const uint8_t* data, size_t len)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= data[i];
+        for (int k = 0; k < 8; ++k)
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+static uint32_t png_adler32(const std::vector<uint8_t>& data)
+{
+    uint32_t a = 1, b = 0;
+    for (uint8_t v : data) {
+        a = (a + v) % 65521u;
+        b = (b + a) % 65521u;
+    }
+    return (b << 16) | a;
+}
+
+static void append_be32(std::vector<uint8_t>& out, uint32_t v)
+{
+    out.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>(v & 0xFF));
+}
+
+static void append_png_chunk(std::vector<uint8_t>& out, const char type[4],
+                             const std::vector<uint8_t>& data)
+{
+    append_be32(out, static_cast<uint32_t>(data.size()));
+    size_t crc_start = out.size();
+    out.insert(out.end(), type, type + 4);
+    out.insert(out.end(), data.begin(), data.end());
+    uint32_t crc = png_crc32(out.data() + crc_start, out.size() - crc_start);
+    append_be32(out, crc);
+}
+
+static std::vector<uint8_t> build_error_png()
+{
+    constexpr uint32_t width = 512;
+    constexpr uint32_t height = 288;
+
+    std::vector<uint8_t> raw;
+    raw.reserve((width * 3 + 1) * height);
+    for (uint32_t y = 0; y < height; ++y) {
+        raw.push_back(0); // PNG filter type: none
+        for (uint32_t x = 0; x < width; ++x) {
+            const bool border = x < 10 || y < 10 || x >= width - 10 || y >= height - 10;
+            const bool diag = (x * height > y * width ? x * height - y * width : y * width - x * height) < 2500;
+            const bool anti = ((width - 1 - x) * height > y * width
+                               ? (width - 1 - x) * height - y * width
+                               : y * width - (width - 1 - x) * height) < 2500;
+            if (border || diag || anti) {
+                raw.insert(raw.end(), {255, 255, 255});
+            } else {
+                raw.insert(raw.end(), {180, 0, 0});
+            }
+        }
+    }
+
+    std::vector<uint8_t> zlib;
+    zlib.push_back(0x78); // zlib header: deflate, no compression/fastest
+    zlib.push_back(0x01);
+    size_t off = 0;
+    while (off < raw.size()) {
+        const size_t chunk = std::min<size_t>(65535, raw.size() - off);
+        const bool final = off + chunk == raw.size();
+        zlib.push_back(final ? 0x01 : 0x00); // stored block
+        uint16_t len = static_cast<uint16_t>(chunk);
+        uint16_t nlen = static_cast<uint16_t>(~len);
+        zlib.push_back(static_cast<uint8_t>(len & 0xFF));
+        zlib.push_back(static_cast<uint8_t>((len >> 8) & 0xFF));
+        zlib.push_back(static_cast<uint8_t>(nlen & 0xFF));
+        zlib.push_back(static_cast<uint8_t>((nlen >> 8) & 0xFF));
+        zlib.insert(zlib.end(), raw.begin() + off, raw.begin() + off + chunk);
+        off += chunk;
+    }
+    append_be32(zlib, png_adler32(raw));
+
+    std::vector<uint8_t> png = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    std::vector<uint8_t> ihdr;
+    append_be32(ihdr, width);
+    append_be32(ihdr, height);
+    ihdr.insert(ihdr.end(), {8, 2, 0, 0, 0}); // 8-bit RGB
+    append_png_chunk(png, "IHDR", ihdr);
+    append_png_chunk(png, "IDAT", zlib);
+    append_png_chunk(png, "IEND", {});
+    return png;
+}
+
 static void write_error_png(const fs::path& dump_dir)
 {
-    // Valid 8x8 red PNG (75 bytes) — generated with correct CRC and zlib checksums
-    static const uint8_t png[] = {
-        0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,0x00,0x00,0x00,0x0D,0x49,0x48,0x44,0x52,
-        0x00,0x00,0x00,0x08,0x00,0x00,0x00,0x08,0x08,0x02,0x00,0x00,0x00,0x4B,0x6D,0x29,
-        0xDC,0x00,0x00,0x00,0x12,0x49,0x44,0x41,0x54,0x78,0x9C,0x63,0xF8,0xCF,0xC0,0x80,
-        0x15,0x61,0x17,0x1D,0xB4,0x12,0x00,0x28,0xFF,0x3F,0xC1,0x6E,0xEC,0xDF,0x61,0x00,
-        0x00,0x00,0x00,0x49,0x45,0x4E,0x44,0xAE,0x42,0x60,0x82
-    };
+    auto png = build_error_png();
     auto path = mrd::recon_dir(dump_dir) / "latest_error.png";
-    mrd::write_standalone_file(path, png, sizeof(png));
+    mrd::write_standalone_file(path, png.data(), png.size());
 }
 
 static std::vector<uint8_t> build_recon_failure_image_body()
@@ -161,6 +246,7 @@ int main(int argc, char** argv)
     // Defaults
     std::string http_bind = "0.0.0.0:8080";
     std::string dump_dir  = "./data";
+    bool dump_enabled = false;
     std::string recon_host;
     uint16_t recon_port = 9002;
     uint16_t ws_port = 0;
@@ -181,6 +267,8 @@ int main(int argc, char** argv)
             recon_port = static_cast<uint16_t>(std::stoi(argv[++i]));
         else if (a == "--dump-dir" && i + 1 < argc)
             dump_dir = argv[++i];
+        else if (a == "--dump")
+            dump_enabled = true;
         else if (a == "--max-body-size" && i + 1 < argc)
             max_body_size = std::stoull(argv[++i]);
     }
@@ -198,10 +286,14 @@ int main(int argc, char** argv)
     state.http_port = http_port;
     state.ws_port = ws_port;
     state.dump_dir = dump_dir;
+    state.dump_enabled = dump_enabled;
+    if (state.dump_enabled)
+        state.dump_recorder = std::make_unique<mrd::DumpRecorder>(state.dump_dir);
     state.recon_url = recon_host.empty() ? "" : recon_host + ":" + std::to_string(recon_port);
     state.max_body_bytes = max_body_size;
+    state.latest_writer = std::make_unique<mrd::LatestImageWriter>();
 
-    // Ensure dump directories
+    // Ensure file directories used by dump and live latest-image output.
     mrd::scanner_dir(state.dump_dir);
     mrd::recon_dir(state.dump_dir);
 
@@ -229,10 +321,25 @@ int main(int argc, char** argv)
         // Recon return callback: archive IMAGE messages for non-scanner clients,
         // and push every MRD return message back to the scanner.
         auto on_message = [&state](uint16_t tag, const void* data, size_t len) {
+            try { state.mrd_push_message(tag, data, len); } catch (...) {}
+
             if (tag == mrd::MRD_MESSAGE_ISMRMRD_IMAGE) {
                 handle_recon_image(state, data, len);
+            } else if (tag == mrd::MRD_MESSAGE_ISMRMRD_WAVEFORM) {
+                handle_recon_waveform(state, data, len);
+            } else if (tag == mrd::MRD_MESSAGE_TEXT && state.dump_enabled && state.dump_recorder) {
+                std::string text;
+                if (len >= sizeof(uint32_t)) {
+                    uint32_t text_len = 0;
+                    std::memcpy(&text_len, data, sizeof(text_len));
+                    if (len >= sizeof(uint32_t) + text_len) {
+                        text.assign(static_cast<const char*>(data) + sizeof(uint32_t), text_len);
+                        auto nul = text.find('\0');
+                        if (nul != std::string::npos) text.resize(nul);
+                    }
+                }
+                state.dump_recorder->append_recon_text(text);
             }
-            try { state.mrd_push_message(tag, data, len); } catch (...) {}
         };
 
         forwarder = std::make_unique<mrd::ReconForwarder>(
@@ -244,6 +351,7 @@ int main(int argc, char** argv)
         std::ostringstream cfg;
         cfg << "marshal v2 listening http=" << http_bind
             << " dump-dir=" << dump_dir
+            << " dump=" << (dump_enabled ? "on" : "off")
             << " max_body=" << max_body_size;
         if (!recon_host.empty()) cfg << " recon=" << recon_host << ":" << recon_port;
         if (ws_port > 0) cfg << " ws-port=" << ws_port;
