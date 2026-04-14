@@ -6,7 +6,7 @@ This document describes the MRD TCP interface between the MRI Marshal and recons
 
 Marshal connects to recon via **raw TCP** using python-ismrmrd-server's 2-byte message ID framing. This is the same protocol the scanner uses — the recon service is agnostic to whether it's talking to a scanner or the marshal.
 
-Configure via: `--recon-host <host> --recon-port <port>` (default: not set, archival-only mode).
+Configure via: `--recon-host <host> --recon-port <port>` (default: not set, so scanner data is accepted but not forwarded to recon; add `--dump` if you also want H5 recording).
 
 ## Data Flow
 
@@ -104,7 +104,7 @@ def handle_client(conn):
 If the recon service is unreachable or crashes mid-scan:
 
 - The marshal's recon forwarder marks the recon connection disconnected and logs a warning
-- The marshal continues accepting scanner data (archival continues)
+- The marshal continues accepting scanner data (`--dump` H5 recording continues when enabled)
 - A scanner-visible MRD `IMAGE(1022)` failure image is pushed on the active scanner TCP connection
 - A "reconstruction failed" PNG is written to `latest_error.png`
 - `GET /image/latest` returns `{"path": "...latest_error.png", "error": true}`
@@ -115,6 +115,6 @@ No special error handling is needed on the recon side — TCP disconnection is s
 
 ## Storage
 
-- Scanner data: `${dump_dir}/from_scanner/*.h5` (canonical ISMRMRD HDF5)
-- Reconstructed images: `${dump_dir}/from_reconstruction/*.h5` (canonical ISMRMRD HDF5)
-- Live view: `${dump_dir}/from_reconstruction/latest_image.bin` (raw wire bytes, updated atomically)
+- With `--dump`, scanner data: `${dump_dir}/from_scanner/*.h5` (canonical ISMRMRD HDF5)
+- With `--dump`, reconstructed images: `${dump_dir}/from_reconstruction/*.h5` (canonical ISMRMRD HDF5)
+- Live view: `${dump_dir}/from_reconstruction/latest_image.h5` (canonical ISMRMRD images, updated atomically)

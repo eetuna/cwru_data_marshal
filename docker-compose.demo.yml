@@ -32,6 +32,38 @@ services:
     networks:
       - cwru-net
 
+  mri-marshal-dump:
+    image: cwru/mri-marshal:latest
+    container_name: cwru-mri-marshal-dump
+    command:
+      - /opt/mri/build/marshal
+      - --http
+      - "0.0.0.0:8080"
+      - --mrd-port
+      - "9100"
+      - --dump-dir
+      - /session-data
+      - --dump
+      - --recon-host
+      - ${DUMP_RECON_HOST-mock-recon}
+      - --recon-port
+      - ${DUMP_RECON_PORT-9002}
+    volumes:
+      - ${SESSION_DATA_DIR:-./session-data}:/session-data
+    ports:
+      - "8080:8080"
+      - "9100:9100"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    networks:
+      - cwru-net
+    profiles:
+      - dump
+
   robot-marshal:
     image: cwru/robot-marshal:latest
     container_name: cwru-robot-marshal
@@ -94,6 +126,18 @@ services:
         condition: service_healthy
     networks:
       - cwru-net
+
+  kspace-streamer-dump:
+    image: cwru/kspace-streamer:latest
+    container_name: cwru-kspace-streamer-dump
+    command: ["./build/kspace_streamer", "--host", "mri-marshal-dump", "--port", "9100", "--ecg", "--interval", "${KSPACE_INTERVAL:-0.5}", "--slices", "${KSPACE_SLICES:-5}"]
+    depends_on:
+      mri-marshal-dump:
+        condition: service_healthy
+    networks:
+      - cwru-net
+    profiles:
+      - dump
 
   viz-client:
     image: cwru/viz-client:latest

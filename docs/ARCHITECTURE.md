@@ -2,7 +2,7 @@
 
 ## Overview
 
-The CWRU Data Marshal is a persistent intermediary between the MRI scanner and the reconstruction service. It archives all data, forwards scanner MRD messages to recon, receives recon MRD return messages back, pushes scanner-relevant return messages to the scanner, and serves query endpoints for visualization and control clients.
+The CWRU Data Marshal is a persistent intermediary between the MRI scanner and the reconstruction service. It forwards scanner MRD messages to recon, receives recon MRD return messages back, pushes scanner-relevant return messages to the scanner, optionally records canonical H5 dumps, and serves query endpoints for visualization and control clients.
 
 ## Transport Map
 
@@ -41,7 +41,7 @@ The CWRU Data Marshal is a persistent intermediary between the MRI scanner and t
 
 **Query/Control clients → Marshal:** HTTP on `--http` (default 0.0.0.0:8080). The viz client, pose client, tracker, and any external consumer use HTTP GET/POST for querying images, transforms, poses, and health.
 
-**Viz client:** Polls `GET /image/latest` over HTTP, receives a file path, opens the standalone binary file directly from disk. No HDF5 concurrent access needed.
+**Viz client:** Polls `GET /image/latest` over HTTP, receives a file path, opens the canonical ISMRMRD H5 latest-image file directly from disk. No HDF5 concurrent access needed.
 
 ## MRD TCP Wire Protocol
 
@@ -123,15 +123,15 @@ ${dump_dir}/
 │   └── scan_<timestamp>.h5          canonical ISMRMRD HDF5 (acquisitions, images, waveforms)
 ├── from_reconstruction/
 │   ├── scan_<timestamp>.h5          canonical ISMRMRD HDF5 (reconstructed images)
-│   ├── latest_image.bin             standalone file for live viz (raw ISMRMRD image wire bytes)
+│   ├── latest_image.h5             canonical latest-image H5 file for live viz (raw ISMRMRD image wire bytes)
 │   └── latest_error.png             reconstruction-failed indicator (if applicable)
 ```
 
-- `from_scanner/*.h5` — everything received from the scanner via MRD TCP
-- `from_reconstruction/*.h5` — reconstructed images received from the recon service
+- `from_scanner/*.h5` — scanner-side standard ISMRMRD objects recorded when `--dump` is enabled
+- `from_reconstruction/*.h5` — recon-side standard ISMRMRD objects recorded when `--dump` is enabled
 - HDF5 files use canonical libismrmrd layout (`appendAcquisition`, `appendImage`, `appendWaveform`)
 - HDF5 files are readable only after `/close` (no concurrent access mode)
-- `latest_image.bin` is updated atomically (write-to-temp + rename) during the scan for live viewing
+- `latest_image.h5` is updated atomically (write-to-temp + rename) during the scan for live viewing
 - `latest_error.png` is a pre-made failure image written when the recon forwarder detects recon is down
 
 ## Fault Tolerance
@@ -144,7 +144,7 @@ The marshal stays running regardless of recon failure:
 - `latest_error.png` is written so the viz client visually shows "reconstruction failed"
 - T4 test: kill recon mid-scan, assert marshal still accepts MRD TCP connections and GET /health returns 200
 
-If `--recon-host`/`--recon-port` are not set, the marshal runs in archival-only mode: scanner data is archived but never forwarded.
+If `--recon-host`/`--recon-port` are not set, the marshal has no reconstruction target. With `--dump`, scanner data is archived but never forwarded.
 
 ## WebSocket (Optional)
 

@@ -132,20 +132,13 @@ Complete reference for connecting external clients to the CWRU Data Marshal syst
 
 ## MRI Marshal API (Port 8080)
 
-### Scanner-facing (POST data from scanner/streamer)
+### Scanner/recon-facing MRD TCP
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/header` | POST | ISMRMRD XML header (starts a new scan) |
-| `/config` | POST | Recon config name (e.g. "simplefft") |
-| `/frame` | POST | One ISMRMRD message (acquisition, image, or waveform) |
-| `/close` | POST | End of scan (closes HDF5 files) |
-
-### Recon-facing (POST from reconstruction service)
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/image` | POST | Reconstructed image (ImageHeader + pixels) |
+Scanner-side clients connect to port `9100` and send the same raw MRD TCP wire
+protocol used by python-ismrmrd-server: 2-byte message tag followed by the
+tag-specific body. The marshal forwards scanner messages to recon over MRD TCP
+when recon is configured, and pushes recon return messages back to the scanner
+on the original TCP connection.
 
 ### Query endpoints
 
@@ -162,10 +155,13 @@ Complete reference for connecting external clients to the CWRU Data Marshal syst
 
 ### Data flow
 
-Scanner POSTs `/header` + `/config` + `/frame` (repeated) + `/close`. Marshal archives to
-`from_scanner/` as canonical ISMRMRD HDF5 and forwards to recon (if `--recon-url` set). Recon
-POSTs `/image` back. Marshal archives to `from_reconstruction/` and writes a standalone file
-for live viewing via `GET /image/latest`.
+Scanner sends CONFIG + METADATA_XML + ACQUISITION/IMAGE/WAVEFORM + CLOSE over
+MRD TCP. Marshal forwards to recon over MRD TCP when `--recon-host` is set.
+Recon returns IMAGE/WAVEFORM/TEXT/CLOSE over MRD TCP; marshal pushes those
+messages back to the scanner on the original scanner socket. With `--dump`,
+standard ISMRMRD objects are recorded as canonical H5 under `from_scanner/` and
+`from_reconstruction/`. Live clients use `GET /image/latest` to obtain the
+standalone latest-image file path.
 
 ## Robot Marshal API (Port 8081)
 
@@ -310,8 +306,8 @@ cwru/robot-clients      latest
 ls -lh session-data/mrd/
 
 # Expected directories:
-# - from_scanner/       (Archived scanner HDF5 files)
-# - from_reconstruction/ (Archived recon HDF5 files + latest_image.bin)
+# - from_scanner/        (scanner HDF5 files when --dump is enabled)
+# - from_reconstruction/ (recon HDF5 files when --dump is enabled, plus latest_image.h5)
 ```
 
 **Note:** By default, `CLEANUP_DATA=true` clears this directory after each demo run. To keep data between runs, edit `.env.demo` and set `CLEANUP_DATA=false`.

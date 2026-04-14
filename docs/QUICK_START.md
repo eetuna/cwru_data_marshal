@@ -1,5 +1,7 @@
 # Quick Start
 
+For disk-output-only checks, use [Dump Quick Start](DUMP_QUICK_START.md).
+
 One-time alias (add to `~/.bashrc` so every new shell has it):
 
 ```bash
@@ -82,7 +84,7 @@ Individual robot clients (run separately instead of as the `robot-clients` bundl
 
 ## Rules
 
-- Always use `cdd` (or pass `--env-file .env.demo`). Without it, marshal starts without `--recon-host`/`--recon-port` and acquisition frames are stored but not forwarded.
+- Always use `cdd` (or pass `--env-file .env.demo`). Without it, marshal may start without the intended recon settings, so acquisition frames are accepted but not forwarded.
 - Flow A and Flow B are mutually exclusive. Do not run `image-streamer` together with `mock-recon`/`kspace-streamer`.
 - `mock-recon` must be up before `kspace-streamer`, otherwise marshal has nowhere to forward acquisitions.
 - `viz-client` and `robot-clients` live behind compose profiles (`viz`, `robot-clients`). They only start when the matching `--profile` flag is on the command.

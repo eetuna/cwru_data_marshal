@@ -26,7 +26,7 @@ Required message IDs:
 - `1022` ISMRMRD IMAGE
 - `1026` ISMRMRD WAVEFORM
 
-The marshal forwards scanner MRD messages to recon over MRD TCP and archives scanner-side ISMRMRD data under `from_scanner/`.
+The marshal forwards scanner MRD messages to recon over MRD TCP. With `--dump`, it archives scanner-side standard ISMRMRD data under `from_scanner/`.
 
 ## Marshal to Recon
 
@@ -40,7 +40,7 @@ Recon return messages arrive on the recon MRD TCP connection. The marshal pushes
 
 This return path is not optional for scanner operation. It is how reconstructed images, text/feedback, close notifications, and future MRD feedback messages reach the scanner.
 
-Recon-side images are also archived under `from_reconstruction/`.
+With `--dump`, recon-side standard ISMRMRD objects are also archived under `from_reconstruction/`.
 
 ## HTTP Side Channel
 
@@ -57,7 +57,7 @@ HTTP is only for non-scanner clients:
 
 ## Failure Behavior
 
-The marshal process must remain up if recon fails. Scanner data should continue to be accepted and archived. Recon connection state must be reset so a later scan can reconnect.
+The marshal process must remain up if recon fails. Scanner data should continue to be accepted, and archived when `--dump` is enabled. Recon connection state must be reset so a later scan can reconnect.
 
 Recon failure is exposed in two ways:
 

@@ -10,7 +10,7 @@ The marshal has two transport interfaces:
 
 ## MRD TCP Interface (Scanner and Recon)
 
-Scanner-side clients (kspace_streamer, image_streamer) connect via raw TCP to the marshal's `--mrd-port` and send MRD messages. The marshal archives all data and forwards to recon via a second MRD TCP connection. Reconstructed images are pushed back to the scanner on the same socket.
+Scanner-side clients (kspace_streamer, image_streamer) connect via raw TCP to the marshal's `--mrd-port` and send MRD messages. The marshal forwards to recon via a second MRD TCP connection. When `--dump` is enabled, it also archives standard ISMRMRD objects to canonical H5 files. Reconstructed images are pushed back to the scanner on the same socket.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full wire protocol reference (message IDs, framing, body formats, session flow).
 
@@ -34,7 +34,7 @@ Health check. Returns `{"status": "ok"}`.
 
 Returns path to the latest reconstructed image file:
 ```json
-{"path": "/session-data/from_reconstruction/latest_image.bin", "error": false}
+{"path": "/session-data/from_reconstruction/latest_image.h5", "error": false}
 ```
 
 When reconstruction has failed:
@@ -93,8 +93,9 @@ List archived reconstruction HDF5 files (same format as `/dump/scanner`).
 | `--http host:port` | `0.0.0.0:8080` | HTTP listen address (query/control endpoints) |
 | `--mrd-port N` | `9100` | MRD TCP listen port (scanner connections) |
 | `--dump-dir path` | `./data` | Root for `from_scanner/` and `from_reconstruction/` |
+| `--dump` | off | Enable retrospective canonical ISMRMRD H5 dump writing |
 | `--recon-host host` | (none) | Recon service hostname for MRD TCP forwarding |
-| `--recon-port N` | (none) | Recon service port. Both `--recon-host` and `--recon-port` required. If omitted, archival-only mode. |
+| `--recon-port N` | `9002` | Recon service port. Used only when `--recon-host` is set. |
 | `--ws-port N` | (none) | Optional WebSocket listener port |
 
 ---
@@ -220,7 +221,7 @@ Scanner/K-Space Streamer
     │ MRD TCP (port 9100)
     │ CONFIG_FILE + METADATA_XML + ACQUISITION×N + WAVEFORM + CLOSE
     v
-MRI Marshal (archives to from_scanner/*.h5)
+MRI Marshal (with `--dump`, archives standard ISMRMRD objects to from_scanner/*.h5)
     │
     │ MRD TCP (to recon-host:recon-port)
     │ same messages forwarded
@@ -229,7 +230,7 @@ Reconstruction Service (MRD TCP server)
     │
     │ MRD TCP return messages on same connection
     v
-MRI Marshal (archives to from_reconstruction/*.h5, writes latest_image.bin)
+MRI Marshal (with `--dump`, archives standard ISMRMRD objects to from_reconstruction/*.h5; always writes latest_image.h5 for live clients)
     │                              │
     │ MRD TCP return messages      │ HTTP GET /image/latest -> {"path": "..."}
     │ pushed back to scanner       │
@@ -237,6 +238,6 @@ MRI Marshal (archives to from_reconstruction/*.h5, writes latest_image.bin)
 Scanner                        Viz Client (opens file, renders with OpenCV)
 ```
 
-Scanner data transport is MRD TCP. Query/control is HTTP. Archived HDF5 files are readable after `/close`. The standalone file (`latest_image.bin`) provides live view during the scan.
+Scanner data transport is MRD TCP. Query/control is HTTP. Archived HDF5 files are readable after `/close`. The canonical latest-image H5 file (`latest_image.h5`) provides live view during the scan.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system diagram and wire protocol reference.

@@ -165,7 +165,7 @@ WARN[0000] The "IMAGE_INTERVAL" variable is not set. Defaulting to a blank strin
 
 When those warnings appear:
 
-- Marshal starts **without** `--recon-host`/`--recon-port`, so acquisitions are archived locally but never forwarded to recon. No reconstructed images will be produced.
+- Marshal starts **without** the intended recon settings, so acquisitions are accepted but never forwarded to recon. No reconstructed images will be produced. H5 recording requires `--dump`.
 - Image-streamer / ECG / pose clients receive empty strings for their flags and will error out or behave unpredictably.
 
 If you do not want to type `--env-file .env.demo -f docker-compose.demo.yml` each time, define an alias once per shell:
@@ -274,7 +274,7 @@ K-Space Streamer                  MRI Marshal                    Recon Service
      │                                 │                              │
      │ MRD TCP: ACQUISITION(1008)      │                              │
      │────────────────────────────────>│                              │
-     │                                 │ Archive + forward            │
+     │                                 │ Forward                      │
      │                                 │ MRD TCP: ACQUISITION(1008)   │
      │                                 │─────────────────────────────>│
      │                                 │                              │
@@ -283,8 +283,8 @@ K-Space Streamer                  MRI Marshal                    Recon Service
      │                                 │ MRD TCP: IMAGE(1022)         │
      │                                 │<─────────────────────────────│
      │                                 │                              │
-     │ MRD TCP: IMAGE(1022)            │ Archive + write              │
-     │ pushed back on same socket      │ latest_image.bin             │
+     │ MRD TCP: IMAGE(1022)            │ Push + write                 │
+     │ pushed back on same socket      │ latest_image.h5             │
      │<────────────────────────────────│                              │
 ```
 
@@ -295,6 +295,52 @@ K-Space Streamer                  MRI Marshal                    Recon Service
 - **Concurrent**: Multiple k-space frames can reconstruct simultaneously
 
 **Note:** To test the full reconstruction flow, start the mock-recon service (Terminal 6) and k-space streamer (Terminal 8). The `RECON_HOST/RECON_PORT` is already configured in `.env.demo`.
+
+### Manual Dump Mode
+
+Dump mode is for retrospective analysis. It records canonical ISMRMRD H5 evidence trails while the marshal still behaves as the same MRD TCP proxy.
+
+Do not run `mri-marshal` and `mri-marshal-dump` at the same time; both bind ports `8080` and `9100`.
+
+**Scanner-side dump only**:
+
+```bash
+# Terminal 1
+DUMP_RECON_HOST= cdd --profile dump up mri-marshal-dump
+
+# Terminal 2
+cdd --profile dump up kspace-streamer-dump
+
+# Verify
+curl -s http://localhost:8080/dump/scanner | jq
+ls -lh session-data/from_scanner/
+ls -lh session-data/from_reconstruction/
+```
+
+Expected: `from_scanner/scan_*.h5` exists. `from_reconstruction/` has no recon H5 for that run because no recon service was started.
+
+**Full proxy dump**:
+
+```bash
+# Terminal 1
+cdd up mock-recon
+
+# Terminal 2
+cdd --profile dump up mri-marshal-dump
+
+# Terminal 3
+cdd --profile dump up kspace-streamer-dump
+
+# Verify
+curl -s http://localhost:8080/dump/scanner | jq
+curl -s http://localhost:8080/dump/recon | jq
+ls -lh session-data/from_scanner/
+ls -lh session-data/from_reconstruction/
+```
+
+Expected: scanner-side H5 appears under `from_scanner/`; recon-side H5 appears under `from_reconstruction/`.
+
+For more dump cases, including image-input dump and failure behavior, see [DUMP_QUICK_START.md](DUMP_QUICK_START.md).
 
 ### Clearing the Latest Frame Cache (Session End)
 
@@ -309,7 +355,7 @@ curl -X DELETE http://localhost:8080/image/latest
 Effects:
 
 - Next `GET /image/latest` returns `204 No Content` until the next frame is POSTed.
-- HDF5 files on disk, `/dump/scanner` history, WebSocket subscribers, and every other marshal state are unaffected - only the in-memory "latest" cache is wiped.
+- HDF5 files on disk when `--dump` is enabled, `/dump/scanner` history, WebSocket subscribers, and every other marshal state are unaffected - only the in-memory "latest" cache is wiped.
 - The coordinator safety poller (`clients/bridge/coordinator.py`) is unaffected: it ignores non-200 responses and only acts on observed fault envelopes, so a cleared cache just means it waits for the next real frame.
 
 Typical callers:

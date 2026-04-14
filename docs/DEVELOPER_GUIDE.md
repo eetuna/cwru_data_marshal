@@ -78,14 +78,14 @@ Reconstruction Service (:9002)   Viz Client, Pose Client, etc.
     │
     │ MRD TCP IMAGE(1022) back
     v
-MRI Marshal → from_reconstruction/*.h5 + latest_image.bin
+MRI Marshal → from_reconstruction/*.h5 + latest_image.h5
     │
     │ MRD TCP IMAGE(1022) pushed to scanner
     v
 Scanner
 ```
 
-The marshal has two interfaces: **MRD TCP** for scanner data transport (the same wire protocol as python-ismrmrd-server) and **HTTP** for query/control endpoints. Scanner clients connect via MRD TCP and send ISMRMRD messages. Marshal archives to canonical ISMRMRD HDF5 and forwards to recon via MRD TCP. Recon sends images back on the same TCP connection. The viz client polls HTTP `GET /image/latest` for the file path and reads the standalone binary file directly.
+The marshal has two interfaces: **MRD TCP** for scanner data transport (the same wire protocol as python-ismrmrd-server) and **HTTP** for query/control endpoints. Scanner clients connect via MRD TCP and send ISMRMRD messages. Marshal forwards to recon via MRD TCP and, when `--dump` is enabled, archives standard ISMRMRD objects to canonical HDF5. Recon sends images back on the same TCP connection. The viz client polls HTTP `GET /image/latest` for the file path and reads the canonical ISMRMRD H5 latest-image file directly.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full wire protocol reference and compose topology.
 
@@ -131,7 +131,7 @@ The demo ships with mock clients that generate synthetic data. To integrate real
 
 5. **Update `docker-compose.demo.yml`** to use your new image.
 
-6. **The marshal server does not change.** It accepts MRD TCP connections and archives/forwards based on the ISMRMRD wire format, not client identity.
+6. **The marshal server does not change.** It accepts MRD TCP connections and forwards based on the ISMRMRD wire format, not client identity. With `--dump`, it also archives standard ISMRMRD objects.
 
 ---
 
@@ -166,7 +166,7 @@ Scanner and recon clients connect via raw TCP using python-ismrmrd-server's 2-by
 
 ## Storage
 
-Data is archived to disk as canonical ISMRMRD HDF5 files:
+When `--dump` is enabled, data is archived to disk as canonical ISMRMRD HDF5 files:
 
 ```
 ${dump_dir}/
@@ -174,15 +174,15 @@ ${dump_dir}/
 │   └── scan_<timestamp>.h5      <- Scanner data (acquisitions, images, waveforms)
 ├── from_reconstruction/
 │   ├── scan_<timestamp>.h5      <- Reconstructed images
-│   ├── latest_image.bin         <- Standalone file for live viz (raw ISMRMRD wire bytes)
+│   ├── latest_image.h5         <- Canonical latest-image H5 for live viz (canonical ISMRMRD images)
 │   └── latest_error.png         <- Reconstruction-failed indicator (if applicable)
 ```
 
-- Scanner MRD TCP messages -> scanner archive
-- Recon MRD TCP image messages -> recon archive + standalone file
+- Scanner MRD TCP standard ISMRMRD objects -> scanner archive
+- Recon MRD TCP standard ISMRMRD objects -> recon archive; recon images also update the standalone live file
 - Recon failure -> scanner MRD `IMAGE(1022)` failure image + HTTP/viz `latest_error.png`
 - HDF5 files are readable only after `/close`
-- `latest_image.bin` is updated atomically during the scan for live viewing
+- `latest_image.h5` is updated atomically during the scan for live viewing
 
 ---
 

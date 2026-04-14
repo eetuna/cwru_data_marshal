@@ -57,7 +57,7 @@ Scanner / K-Space Streamer
 |  MRI Marshal                         | ──> Reconstruction Service (port 9002)
 |  HTTP :8080 (query/control)          |
 |  MRD TCP :9100 (scanner data)        | <── IMAGE(1022) returned
-|  - Archives to from_scanner/         |
+|  - Optional dump to from_scanner/    |
 |  - Forwards to recon via MRD TCP     |
 |  - Pushes IMAGE back to scanner      |
 |  - GET /image/latest (file path)     |
@@ -83,7 +83,7 @@ Scanner / K-Space Streamer
 ## Key Features
 
 ### MRI Marshal
-- **Canonical ISMRMRD HDF5** - Archives scanner and recon data in standard format
+- **Canonical ISMRMRD HDF5 dump** - Records scanner and recon data in standard format when `--dump` is enabled
 - **Standalone File for Live View** - Atomic rename for fast image polling
 - **Reconstruction Forwarding** - Transparent proxy to external recon service
 - **Pose Tracking** - Cached JSON position/orientation
