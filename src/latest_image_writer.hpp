@@ -31,14 +31,17 @@ public:
 
     // Open a new scan file. Blocks on the worker to ensure file exists before
     // any append_image. Any previous scan file is closed first.
-    void open_scan(std::filesystem::path dest, std::string xml);
+    // Returns true on success, false if file creation failed (caller should
+    // log and avoid queueing appends into a sink that no longer exists).
+    bool open_scan(std::filesystem::path dest, std::string xml);
 
     // Enqueue an appendImage onto the worker. `on_complete` runs after the
     // append lands; receives the scan file path.
     void append_image(std::vector<uint8_t> body, AppendCompletion on_complete);
 
     // Close the current scan file (sync, waits for pending appends).
-    void close_scan();
+    // Returns true on success, false if the close/flush threw.
+    bool close_scan();
 
 private:
     struct Impl;

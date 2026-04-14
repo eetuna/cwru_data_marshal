@@ -286,13 +286,22 @@ private:
                     }
                     // Open both live per-scan files (scanner + recon sides). The
                     // filename matches the dump side so pairs line up by name.
+                    // A false return means the file could not be created; log
+                    // and continue — subsequent appends will no-op on the
+                    // failed side, but scanner/recon wire flow keeps going.
                     if (state_.live_scanner_writer) {
-                        state_.live_scanner_writer->open_scan(
-                            live_scanner_dir(state_.dump_dir) / scan_file, xml);
+                        if (!state_.live_scanner_writer->open_scan(
+                                live_scanner_dir(state_.dump_dir) / scan_file, xml)) {
+                            LOG_WARN("Failed to open live scanner file for "
+                                     << scan_file << "; scanner-side live writes will drop");
+                        }
                     }
                     if (state_.live_recon_writer) {
-                        state_.live_recon_writer->open_scan(
-                            live_recon_dir(state_.dump_dir) / scan_file, xml);
+                        if (!state_.live_recon_writer->open_scan(
+                                live_recon_dir(state_.dump_dir) / scan_file, xml)) {
+                            LOG_WARN("Failed to open live recon file for "
+                                     << scan_file << "; recon-side live writes will drop");
+                        }
                     }
                     // Reset latest image pointer for new scan.
                     {

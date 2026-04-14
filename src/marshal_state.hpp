@@ -113,6 +113,12 @@ struct MarshalState {
     // ------ Methods ------
 
     // Close both sinks and clear per-scan state. Ready for next POST /header.
+    //
+    // Clears /image/latest-visible fields so a viz client that restarts (or
+    // first connects) after a scan ends sees "nothing to show" instead of a
+    // pointer into the just-closed scan file. Viz clients already running
+    // during the CLOSE keep their in-memory frame — marshal just stops
+    // advertising a pointer.
     void close_scan() {
         if (live_scanner_writer) live_scanner_writer->close_scan();
         if (live_recon_writer) live_recon_writer->close_scan();
@@ -124,5 +130,12 @@ struct MarshalState {
         header_received.store(false);
         config_received.store(false);
         recon_failure_reported.store(false);
+        {
+            std::lock_guard<std::mutex> img_lk(latest_image_mtx);
+            latest_image_path.clear();
+            latest_image_error = false;
+            latest_image_count = 0;
+            latest_series_index = 0;
+        }
     }
 };

@@ -412,6 +412,13 @@ int main(int argc, char** argv)
 
     ioc.run();
 
+    // Explicitly tear down the forwarder before `state` leaves scope. The
+    // forwarder owns a background thread whose callbacks capture `state` by
+    // reference; destroying `state` first would be a use-after-free. stop()
+    // above was called from the signal handler, but only `reset()` guarantees
+    // the callback-firing thread is fully joined before return.
+    forwarder.reset();
+
     LOG_INFO("Server stopped");
     return 0;
 }

@@ -21,6 +21,18 @@
 namespace mrd {
 
 // ---------------------------------------------------------------------------
+// DatasetWithFileid: tiny friend-subclass that exposes the protected
+// ISMRMRD_Dataset::fileid so we can call H5Fflush on the real open handle
+// (rather than reopening by path, which creates a separate HDF5 state that
+// does not share the metadata cache of the first open).
+// ---------------------------------------------------------------------------
+class DatasetWithFileid : public ISMRMRD::Dataset {
+public:
+    using ISMRMRD::Dataset::Dataset;
+    hid_t file_id() const { return dset_.fileid; }
+};
+
+// ---------------------------------------------------------------------------
 // MrdSink
 // ---------------------------------------------------------------------------
 
@@ -29,7 +41,7 @@ MrdSink::MrdSink(const std::filesystem::path& path, const std::string& groupname
 {
     namespace fs = std::filesystem;
     fs::create_directories(path.parent_path());
-    dataset_ = std::make_unique<ISMRMRD::Dataset>(path.c_str(), groupname.c_str(), true);
+    dataset_ = std::make_unique<DatasetWithFileid>(path.c_str(), groupname.c_str(), true);
     // Live scan files open frequently; log at DEBUG to avoid flooding. Dump
     // files open once per scan; keep them at INFO.
     if (path.string().find("/live/") != std::string::npos)
@@ -219,13 +231,20 @@ void MrdSink::flush()
 {
     std::lock_guard<std::mutex> lk(mtx_);
     if (!dataset_) return;
-    // ISMRMRD::Dataset::dset_ is protected, so we can't grab its fileid.
-    // Reopen by path (same-process multi-open is permitted in our build —
-    // write_string_dataset uses the same pattern), flush, and close.
-    hid_t f = H5Fopen(path_.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
-    if (f < 0) return;
-    H5Fflush(f, H5F_SCOPE_LOCAL);
-    H5Fclose(f);
+    // Flush the real open handle so HDF5's in-memory metadata/data cache for
+    // this file is pushed to disk. Reopening the file by path creates a
+    // separate HDF5 file state with its own empty cache; calling H5Fflush on
+    // that unrelated handle does not flush the dataset's cache.
+    auto* d = static_cast<DatasetWithFileid*>(dataset_.get());
+    hid_t fid = d->file_id();
+    if (fid < 0) {
+        LOG_WARN("flush() skipped: dataset has no valid fileid for "
+                 << path_.string());
+        return;
+    }
+    if (H5Fflush(fid, H5F_SCOPE_LOCAL) < 0) {
+        LOG_WARN("H5Fflush failed for " << path_.string());
+    }
 }
 
 void MrdSink::close()

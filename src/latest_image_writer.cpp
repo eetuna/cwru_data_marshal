@@ -58,7 +58,7 @@ struct LatestImageWriter::Impl {
         std::string xml;
         std::vector<uint8_t> body;
         AppendCompletion on_complete;
-        std::shared_ptr<std::promise<void>> done;
+        std::shared_ptr<std::promise<bool>> done;  // true = ok, false = failed
     };
 
     std::mutex mtx;
@@ -105,6 +105,7 @@ struct LatestImageWriter::Impl {
                 jobs.pop_front();
             }
 
+            bool ok = true;
             try {
                 switch (job.kind) {
                 case Job::Open: {
@@ -131,13 +132,28 @@ struct LatestImageWriter::Impl {
                     break;
                 case Job::Stop:
                     close_sink();
+                    if (job.done) job.done->set_value(true);
                     return;
                 }
             } catch (const std::exception& e) {
-                LOG_WARN("Live H5 write failed: " << e.what());
+                ok = false;
+                LOG_WARN("Live H5 "
+                         << (job.kind == Job::Open ? "open" :
+                             job.kind == Job::Close ? "close" :
+                             job.kind == Job::Append ? "append" : "stop")
+                         << " failed on "
+                         << (current_path.empty() ? job.dest.string() : current_path.string())
+                         << ": " << e.what());
+                if (job.kind == Job::Open) {
+                    // Open failed; leave sink null so subsequent Appends drop
+                    // instead of writing to a stale file. Clear current_path so
+                    // no HTTP pointer is exposed.
+                    sink.reset();
+                    current_path.clear();
+                }
             }
 
-            if (job.done) job.done->set_value();
+            if (job.done) job.done->set_value(ok);
         }
     }
 
@@ -157,16 +173,16 @@ LatestImageWriter::LatestImageWriter()
 
 LatestImageWriter::~LatestImageWriter() = default;
 
-void LatestImageWriter::open_scan(std::filesystem::path dest, std::string xml)
+bool LatestImageWriter::open_scan(std::filesystem::path dest, std::string xml)
 {
     Impl::Job job;
     job.kind = Impl::Job::Open;
     job.dest = std::move(dest);
     job.xml = std::move(xml);
-    job.done = std::make_shared<std::promise<void>>();
+    job.done = std::make_shared<std::promise<bool>>();
     auto fut = job.done->get_future();
     impl_->enqueue(std::move(job));
-    fut.wait();
+    return fut.get();
 }
 
 void LatestImageWriter::append_image(std::vector<uint8_t> body,
@@ -179,14 +195,14 @@ void LatestImageWriter::append_image(std::vector<uint8_t> body,
     impl_->enqueue(std::move(job));
 }
 
-void LatestImageWriter::close_scan()
+bool LatestImageWriter::close_scan()
 {
     Impl::Job job;
     job.kind = Impl::Job::Close;
-    job.done = std::make_shared<std::promise<void>>();
+    job.done = std::make_shared<std::promise<bool>>();
     auto fut = job.done->get_future();
     impl_->enqueue(std::move(job));
-    fut.wait();
+    return fut.get();
 }
 
 } // namespace mrd
