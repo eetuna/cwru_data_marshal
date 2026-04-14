@@ -112,6 +112,7 @@ async function main() {
   let lastVolumeTimestamp = -1;
   let lastTipTimestamp = -1;
   let lastFKTimestamp = -1;
+  let lastForceTimestamp = -1;
 
   // Create 2D image renderer
   const image2DRenderer = new Image2DRenderer(gl);
@@ -385,6 +386,28 @@ initCurrentSliders();
     }
   }
 
+  // Fetch force sensing data from server (read_from5 = fileKey 4)
+  async function updateForceSensingFromServer() {
+    try {
+      const response = await fetch(`${readServerUrl}/api/read/${clientId}/4`);
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+      const data = await response.json();
+      const ts = data.sent_at || data.received_at || data.timestamp || 0;
+
+      if (ts && ts !== lastForceTimestamp) {
+        lastForceTimestamp = ts;
+
+        if (data.values && Array.isArray(data.values)) {
+          const v = data.values;
+          const valuesStr = v.map(val => val.toFixed(3)).join(", ");
+          updateStatus("forceSensing", `[${valuesStr}]`);
+        }
+      }
+    } catch (error) {
+      // Silently retry - force sensing data may not be available yet
+    }
+  }
 
 
   // Parse flat forward kinematics values into control points
@@ -940,6 +963,7 @@ initCurrentSliders();
   let fetchingVolume = false;
   let fetchingTipPose = false;
   let fetchingFK = false;
+  let fetchingForceSensing = false;
 
   function render(now) {
     now *= 0.001;
@@ -962,6 +986,10 @@ initCurrentSliders();
     if (!fetchingFK) {
       fetchingFK = true;
       updateForwardKinematicsFromServer().catch(() => {}).finally(() => { fetchingFK = false; });
+    }
+    if (!fetchingForceSensing) {
+      fetchingForceSensing = true;
+      updateForceSensingFromServer().catch(() => {}).finally(() => { fetchingForceSensing = false; });
     }
 
     gl.clearColor(0.0, 0.0, 0.0, 1.0);

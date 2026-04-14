@@ -131,6 +131,8 @@ app.get('/api/read/:clientId/:fileKey', async (req, res) => {
       fileName = clientRoutes.read_from3;
     } else if (fileKey === '3') {
       fileName = clientRoutes.read_from4;
+    } else if (fileKey === '4') {
+      fileName = clientRoutes.read_from5;
     } else {
       return res.status(400).json({ error: `Invalid fileKey: ${fileKey}` });
     }

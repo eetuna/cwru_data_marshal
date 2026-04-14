@@ -38,6 +38,7 @@
       "read_from2": "file_3D_images.json",
       "read_from3": "file_tip_position_orientation.json",
       "read_from4": "file_forward_kinematics.json",
+      "read_from5": "file_force_sensing.json",
       "write_to": "file_user_input.json",
       "write_to2": "file_catheter_base_configuration.json",
       "write_to3": "file_rendered_2D_image.json"
