@@ -215,6 +215,19 @@ void MrdSink::append_unknown_bytes(const void* data, size_t len)
     dataset_->appendNDArray("unknown_data", arr);
 }
 
+void MrdSink::flush()
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!dataset_) return;
+    // ISMRMRD::Dataset::dset_ is protected, so we can't grab its fileid.
+    // Reopen by path (same-process multi-open is permitted in our build —
+    // write_string_dataset uses the same pattern), flush, and close.
+    hid_t f = H5Fopen(path_.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+    if (f < 0) return;
+    H5Fflush(f, H5F_SCOPE_LOCAL);
+    H5Fclose(f);
+}
+
 void MrdSink::close()
 {
     std::lock_guard<std::mutex> lk(mtx_);

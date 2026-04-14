@@ -11,6 +11,7 @@
 #include <deque>
 #include <future>
 #include <mutex>
+#include <string>
 #include <thread>
 
 #include <ismrmrd/ismrmrd.h>
@@ -118,6 +119,10 @@ struct LatestImageWriter::Impl {
                 case Job::Append:
                     if (sink && append_wire_image(*sink, job.body.data(),
                                                   job.body.size())) {
+                        // Flush per image so a mid-scan marshal crash preserves
+                        // every image appended so far on disk (durability
+                        // policy chosen after A/B benchmark — see plan file).
+                        sink->flush();
                         if (job.on_complete) job.on_complete(current_path);
                     }
                     break;
