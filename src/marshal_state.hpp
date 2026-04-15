@@ -11,10 +11,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <functional>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -23,6 +23,34 @@
 #include "common/pose.hpp"
 #include "dump_recorder.hpp"
 #include "latest_image_writer.hpp"
+#include "live_image_recorder.hpp"
+#include "mrd_sink.hpp"
+
+struct LiveImageLaneState {
+    std::unique_ptr<mrd::LiveImageRecorder> recorder;
+
+    void close() {
+        if (recorder) {
+            recorder->close_scan();
+        }
+    }
+};
+
+struct ReconLatestGroupState {
+    bool active{false};
+    bool published{false};
+    uint16_t image_series_index{0};
+    std::vector<std::vector<uint8_t>> images;
+    std::vector<uint16_t> seen_slices;
+
+    void reset() {
+        active = false;
+        published = false;
+        image_series_index = 0;
+        images.clear();
+        seen_slices.clear();
+    }
+};
 
 struct SliceTransform {
     double through_plane_mm{0};
@@ -74,6 +102,7 @@ struct MarshalState {
     std::string current_xml_header;
     std::string current_config;
     std::string current_scan_filename;
+    uint16_t recon_expected_slices{0};
 
     // Async H5 dump recorder, present only when --dump is enabled.
     std::unique_ptr<mrd::DumpRecorder> dump_recorder;
@@ -91,17 +120,16 @@ struct MarshalState {
     std::mutex latest_image_mtx;
     std::string latest_image_path;
     bool latest_image_error{false};
-    uint32_t latest_image_count{0};
-    // Highest image_series_index seen this scan. Viz opens image_<this> directly.
-    uint32_t latest_series_index{0};
     std::atomic<uint64_t> latest_image_generation{0};
     std::atomic<bool> recon_failure_reported{false};
+    std::unique_ptr<mrd::LatestImageWriter> latest_writer;
 
-    // Per-scan live appenders. One per side so a slow scanner-side write does
-    // not block the recon side (and vice versa). Opened on scan start,
-    // closed on scan close.
-    std::unique_ptr<mrd::LatestImageWriter> live_scanner_writer;
-    std::unique_ptr<mrd::LatestImageWriter> live_recon_writer;
+    // Async live image-only history writers per provenance lane.
+    LiveImageLaneState scanner_live;
+    LiveImageLaneState recon_live;
+
+    // Current logical recon result for /image/latest publication.
+    ReconLatestGroupState recon_latest_group;
 
     // WS emit hook (set by WsServer on init, optional)
     std::function<void(const std::string&)> ws_emit = [](const std::string&) {};
@@ -113,29 +141,18 @@ struct MarshalState {
     // ------ Methods ------
 
     // Close both sinks and clear per-scan state. Ready for next POST /header.
-    //
-    // Clears /image/latest-visible fields so a viz client that restarts (or
-    // first connects) after a scan ends sees "nothing to show" instead of a
-    // pointer into the just-closed scan file. Viz clients already running
-    // during the CLOSE keep their in-memory frame — marshal just stops
-    // advertising a pointer.
     void close_scan() {
-        if (live_scanner_writer) live_scanner_writer->close_scan();
-        if (live_recon_writer) live_recon_writer->close_scan();
         std::lock_guard<std::mutex> lk(scan_mtx);
         if (dump_recorder) dump_recorder->close_scan();
+        scanner_live.close();
+        recon_live.close();
         current_xml_header.clear();
         current_config.clear();
         current_scan_filename.clear();
+        recon_expected_slices = 0;
         header_received.store(false);
         config_received.store(false);
         recon_failure_reported.store(false);
-        {
-            std::lock_guard<std::mutex> img_lk(latest_image_mtx);
-            latest_image_path.clear();
-            latest_image_error = false;
-            latest_image_count = 0;
-            latest_series_index = 0;
-        }
+        recon_latest_group.reset();
     }
 };

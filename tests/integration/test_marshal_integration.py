@@ -18,6 +18,8 @@ import time
 import unittest
 import urllib.request
 
+import ismrmrd
+
 MARSHAL_BIN = os.environ.get("MARSHAL_BIN", "./build/marshal")
 KSPACE_STREAMER = os.environ.get("KSPACE_STREAMER", "./build/kspace_streamer")
 IMAGE_STREAMER = os.environ.get("IMAGE_STREAMER", "./build/image_streamer")
@@ -59,6 +61,13 @@ def wait_for_latest_file(base_url, timeout=5):
                 return latest
         time.sleep(0.05)
     return latest
+
+
+def latest_image_count(path):
+    ds = ismrmrd.Dataset(path, '/dataset', create_if_needed=False)
+    if hasattr(ds, 'number_of_images'):
+        return ds.number_of_images('image_0')
+    return ds.getNumberOfImages('image_0')
 
 
 class TestMarshalIntegration(unittest.TestCase):
@@ -164,14 +173,26 @@ class TestMarshalIntegration(unittest.TestCase):
     def base(self):
         return f"http://localhost:{MARSHAL_HTTP_PORT}"
 
+    def live_scanner_dir(self):
+        return os.path.join(self.dump_dir, "live", "from_scanner")
+
+    def live_recon_dir(self):
+        return os.path.join(self.dump_dir, "live", "from_reconstruction")
+
+    def dump_scanner_dir(self):
+        return os.path.join(self.dump_dir, "dump", "from_scanner")
+
+    def dump_recon_dir(self):
+        return os.path.join(self.dump_dir, "dump", "from_reconstruction")
+
     def test_t1_scanner_data_archived_without_recon(self):
         self.start_marshal(with_recon=False)
         res = self.run_kspace(volumes=1)
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
 
-        scanner_dir = os.path.join(self.dump_dir, "dump", "from_scanner")
+        scanner_dir = self.dump_scanner_dir()
         h5_files = [f for f in os.listdir(scanner_dir) if f.endswith(".h5")]
-        self.assertGreater(len(h5_files), 0, "No HDF5 file in dump/from_scanner/")
+        self.assertGreater(len(h5_files), 0, "No HDF5 file in from_scanner/")
 
         status, body = http_get(f"{self.base()}/dump/scanner")
         self.assertEqual(status, 200)
@@ -179,7 +200,7 @@ class TestMarshalIntegration(unittest.TestCase):
         paths = "\n".join(item["path"] for item in dump)
         self.assertIn(".h5", paths)
 
-        recon_dir = os.path.join(self.dump_dir, "dump", "from_reconstruction")
+        recon_dir = self.dump_recon_dir()
         if os.path.exists(recon_dir):
             recon_h5 = [f for f in os.listdir(recon_dir) if f.endswith(".h5")]
             self.assertEqual(recon_h5, [], "Recon HDF5 should not exist in scanner-only dump")
@@ -196,8 +217,8 @@ class TestMarshalIntegration(unittest.TestCase):
         self.assertFalse(latest["error"])
         self.assertTrue(os.path.exists(latest["path"]), latest)
 
-        scanner_dir = os.path.join(self.dump_dir, "dump", "from_scanner")
-        recon_dir = os.path.join(self.dump_dir, "dump", "from_reconstruction")
+        scanner_dir = self.dump_scanner_dir()
+        recon_dir = self.dump_recon_dir()
         self.assertGreater(len([f for f in os.listdir(scanner_dir) if f.endswith(".h5")]), 0)
         self.assertGreater(len([f for f in os.listdir(recon_dir) if f.endswith(".h5")]), 0)
 
@@ -210,15 +231,13 @@ class TestMarshalIntegration(unittest.TestCase):
         self.assertIsNotNone(latest)
         self.assertFalse(latest["error"])
         self.assertTrue(os.path.exists(latest["path"]), latest)
-        # Live path — under <dump_dir>/live/from_scanner/
-        self.assertIn(os.path.join("live", "from_scanner"), latest["path"])
+        self.assertIn("from_scanner", latest["path"])
 
-        # Dump (dump/) — scanner side should have the scan, recon side must not.
-        dump_scanner = os.path.join(self.dump_dir, "dump", "from_scanner")
-        dump_recon = os.path.join(self.dump_dir, "dump", "from_reconstruction")
-        self.assertGreater(len([f for f in os.listdir(dump_scanner)
+        scanner_dir = self.live_scanner_dir()
+        recon_dir = self.dump_recon_dir()
+        self.assertGreater(len([f for f in os.listdir(scanner_dir)
                                 if f.startswith("scan_") and f.endswith(".h5")]), 0)
-        self.assertEqual([f for f in os.listdir(dump_recon)
+        self.assertEqual([f for f in os.listdir(recon_dir)
                           if f.startswith("scan_") and f.endswith(".h5")], [])
 
     def test_t3_dump_off_still_proxies_without_h5_archives(self):
@@ -233,14 +252,13 @@ class TestMarshalIntegration(unittest.TestCase):
         self.assertFalse(latest["error"])
         self.assertTrue(os.path.exists(latest["path"]))
 
-        for subdir in ("from_scanner", "from_reconstruction"):
-            path = os.path.join(self.dump_dir, "dump", subdir)
+        for path in (self.dump_scanner_dir(), self.dump_recon_dir()):
             if not os.path.exists(path):
-                continue  # dump/ subtree may not exist when --dump is off
+                continue
             dump_h5_files = [f for f in os.listdir(path)
                              if f.startswith("scan_") and f.endswith(".h5")]
             self.assertEqual(dump_h5_files, [],
-                             f"dump/{subdir} should not contain dump H5 files with dump off")
+                             f"{path} should not contain dump H5 files with dump off")
 
     def test_t4_recon_kill_marshal_survives_and_reconnects(self):
         self.start_recon()
@@ -311,6 +329,37 @@ class TestMarshalIntegration(unittest.TestCase):
             latest = json.loads(body)
             self.assertTrue(latest["error"])
             self.assertTrue(os.path.exists(latest["path"]))
+        finally:
+            self.stop_proc(scanner)
+
+    def test_t6_multislice_latest_stays_on_completed_stack(self):
+        self.start_recon()
+        self.start_marshal(with_recon=True)
+        scanner = self.start_kspace_async()
+        try:
+            saw_completed_stack = False
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                latest = wait_for_latest_file(self.base(), timeout=1)
+                if not latest or latest.get('error'):
+                    continue
+                path = latest.get('path', '')
+                if not path or not os.path.exists(path):
+                    continue
+                count = latest_image_count(path)
+                if count == 5:
+                    saw_completed_stack = True
+                    break
+            self.assertTrue(saw_completed_stack, 'Never observed a completed 5-slice latest stack')
+
+            stable_deadline = time.time() + 3
+            while time.time() < stable_deadline:
+                latest = wait_for_latest_file(self.base(), timeout=1)
+                self.assertIsNotNone(latest)
+                self.assertFalse(latest['error'])
+                count = latest_image_count(latest['path'])
+                self.assertEqual(count, 5, f'Latest stack regressed to partial size {count}')
+                time.sleep(0.2)
         finally:
             self.stop_proc(scanner)
 

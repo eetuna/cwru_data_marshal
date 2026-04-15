@@ -27,6 +27,8 @@
 #include "marshal_http.hpp"
 #include "marshal_state.hpp"
 #include "marshal_ws.hpp"
+#include "live_image_recorder.hpp"
+#include "live_image_store.hpp"
 #include "mrd_io.hpp"
 #include "mrd_tcp_listener.hpp"
 #include "recon_forwarder.hpp"
@@ -291,14 +293,19 @@ int main(int argc, char** argv)
         state.dump_recorder = std::make_unique<mrd::DumpRecorder>(state.dump_dir);
     state.recon_url = recon_host.empty() ? "" : recon_host + ":" + std::to_string(recon_port);
     state.max_body_bytes = max_body_size;
-    state.live_scanner_writer = std::make_unique<mrd::LatestImageWriter>();
-    state.live_recon_writer = std::make_unique<mrd::LatestImageWriter>();
+    state.latest_writer = std::make_unique<mrd::LatestImageWriter>();
+    state.scanner_live.recorder = std::make_unique<mrd::LiveImageRecorder>(
+        mrd::live_scanner_dir(state.dump_dir));
+    state.recon_live.recorder = std::make_unique<mrd::LiveImageRecorder>(
+        mrd::live_recon_dir(state.dump_dir));
 
-    // Ensure umbrella layout exists on disk at startup.
+    // Ensure file directories used by dump and live latest-image output.
     mrd::live_scanner_dir(state.dump_dir);
     mrd::live_recon_dir(state.dump_dir);
-    mrd::dump_scanner_dir(state.dump_dir);
-    mrd::dump_recon_dir(state.dump_dir);
+    if (state.dump_enabled) {
+        mrd::dump_scanner_dir(state.dump_dir);
+        mrd::dump_recon_dir(state.dump_dir);
+    }
 
     // Recon forwarder via MRD TCP (optional)
     std::unique_ptr<mrd::ReconForwarder> forwarder;
@@ -406,18 +413,12 @@ int main(int argc, char** argv)
         LOG_INFO("Received signal " << signum << ", shutting down...");
         acceptor.close();
         if (forwarder) forwarder->stop();
+        mrd::flush_all_live_lanes(state);
         state.close_scan();
         ioc.stop();
     });
 
     ioc.run();
-
-    // Explicitly tear down the forwarder before `state` leaves scope. The
-    // forwarder owns a background thread whose callbacks capture `state` by
-    // reference; destroying `state` first would be a use-after-free. stop()
-    // above was called from the signal handler, but only `reset()` guarantees
-    // the callback-firing thread is fully joined before return.
-    forwarder.reset();
 
     LOG_INFO("Server stopped");
     return 0;

@@ -57,6 +57,7 @@ add_executable(marshal
   src/marshal_main.cpp
   src/mrd_sink.cpp
   src/dump_recorder.cpp
+  src/live_image_recorder.cpp
   src/latest_image_writer.cpp
 )
 target_link_libraries(marshal PRIVATE
@@ -132,6 +133,7 @@ if(BUILD_TESTING)
     tests/test_http_handlers.cpp
     src/mrd_sink.cpp
     src/dump_recorder.cpp
+    src/live_image_recorder.cpp
     src/latest_image_writer.cpp
   )
   target_link_libraries(unit_http_handlers PRIVATE
@@ -143,6 +145,7 @@ if(BUILD_TESTING)
     tests/test_http_endpoints.cpp
     src/mrd_sink.cpp
     src/dump_recorder.cpp
+    src/live_image_recorder.cpp
     src/latest_image_writer.cpp
   )
   target_link_libraries(it_http PRIVATE
@@ -154,6 +157,7 @@ if(BUILD_TESTING)
     tests/test_ws_client.cpp
     src/mrd_sink.cpp
     src/dump_recorder.cpp
+    src/live_image_recorder.cpp
     src/latest_image_writer.cpp
   )
   target_link_libraries(test_ws_client PRIVATE

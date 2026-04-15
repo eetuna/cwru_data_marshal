@@ -201,8 +201,8 @@ TEST_CASE("write_standalone_file creates file via atomic rename", "[mrd_sink]") 
     REQUIRE_FALSE(fs::exists(tmp));
 }
 
-TEST_CASE("MrdSink no SWMR symbols", "[mrd_sink]") {
-    // This test is a compile-time check enforced by grep in CI.
-    // If this file compiles, it doesn't use SWMR APIs.
+TEST_CASE("MrdSink avoids SWMR-specific APIs", "[mrd_sink]") {
+    // This is a compile-time check enforced by grep in CI.
+    // If this file compiles, it avoids SWMR-specific APIs.
     REQUIRE(true);
 }

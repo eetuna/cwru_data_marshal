@@ -52,10 +52,6 @@ public:
     // Fallback: store raw bytes as an opaque NDArray (for UNKNOWN type).
     void append_unknown_bytes(const void* data, size_t len);
 
-    // Flush in-memory HDF5 buffers to disk without closing. Used by the
-    // per-append flush-per-image durability policy (option b).
-    void flush();
-
     // Close the HDF5 file. Idempotent.
     void close();
 

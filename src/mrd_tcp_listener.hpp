@@ -40,6 +40,7 @@
 #include <ismrmrd/waveform.h>
 
 #include "marshal_state.hpp"
+#include "live_image_store.hpp"
 #include "mrd_io.hpp"
 #include "mrd_sink.hpp"
 #include "mrd_stream_tags.hpp"
@@ -50,32 +51,6 @@ namespace net = boost::asio;
 using tcp = net::ip::tcp;
 
 namespace mrd {
-
-// Append one scanner-side IMAGE to the live per-scan file. The live scan file
-// was opened by begin_session (METADATA_XML_TEXT handler) on the scanner
-// writer thread; this call is non-blocking.
-inline void append_scanner_live_image(MarshalState& state,
-                                      const uint8_t* body, size_t size)
-{
-    if (size < IMAGE_HEADER_BYTES + sizeof(uint64_t)) return;
-    if (!state.live_scanner_writer) return;
-
-    const auto* hdr = reinterpret_cast<const ISMRMRD::ImageHeader*>(body);
-    const uint32_t series = hdr->image_series_index;
-
-    std::vector<uint8_t> owned(body, body + size);
-    const auto generation = state.latest_image_generation.load();
-    state.live_scanner_writer->append_image(
-        std::move(owned),
-        [&state, generation, series](const std::filesystem::path& path) {
-            if (state.latest_image_generation.load() != generation) return;
-            std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
-            state.latest_image_path = path.string();
-            state.latest_image_error = false;
-            state.latest_image_count++;
-            if (series > state.latest_series_index) state.latest_series_index = series;
-        });
-}
 
 class MrdTcpListener {
 public:
@@ -253,16 +228,13 @@ private:
                     auto nul = xml.find('\0');
                     if (nul != std::string::npos) xml.resize(nul);
                     LOG_INFO("METADATA_XML: " << xml.size() << " bytes");
-                    // Parse <z> from encoding limits (slice count)
                     uint16_t nz = 1;
                     {
-                        // Look for <slice><maximum>N</maximum> in encodingLimits
                         std::regex re_slice(R"(<slice>\s*<minimum>\d+</minimum>\s*<maximum>(\d+)</maximum>)");
                         std::smatch m;
                         if (std::regex_search(xml, m, re_slice)) {
                             nz = static_cast<uint16_t>(std::stoi(m[1].str()) + 1);
                         } else {
-                            // Fallback: look for <z> in matrixSize
                             std::regex re_z(R"(<z>(\d+)</z>)");
                             if (std::regex_search(xml, m, re_z)) {
                                 nz = static_cast<uint16_t>(std::stoi(m[1].str()));
@@ -270,7 +242,6 @@ private:
                         }
                         if (nz == 0) nz = 1;
                     }
-
                     std::string scan_file;
                     {
                         std::lock_guard<std::mutex> lk(state_.scan_mtx);
@@ -278,40 +249,12 @@ private:
                             state_.current_scan_filename = scan_filename();
                         scan_file = state_.current_scan_filename;
                         state_.current_xml_header = xml;
-                        state_.recon_failure_reported.store(false);
-                        state_.latest_image_generation.fetch_add(1);
+                        state_.recon_expected_slices = nz;
                     }
                     if (state_.dump_enabled && state_.dump_recorder) {
                         state_.dump_recorder->start_scan(scan_file, xml);
                     }
-                    // Open both live per-scan files (scanner + recon sides). The
-                    // filename matches the dump side so pairs line up by name.
-                    // A false return means the file could not be created; log
-                    // and continue — subsequent appends will no-op on the
-                    // failed side, but scanner/recon wire flow keeps going.
-                    if (state_.live_scanner_writer) {
-                        if (!state_.live_scanner_writer->open_scan(
-                                live_scanner_dir(state_.dump_dir) / scan_file, xml)) {
-                            LOG_WARN("Failed to open live scanner file for "
-                                     << scan_file << "; scanner-side live writes will drop");
-                        }
-                    }
-                    if (state_.live_recon_writer) {
-                        if (!state_.live_recon_writer->open_scan(
-                                live_recon_dir(state_.dump_dir) / scan_file, xml)) {
-                            LOG_WARN("Failed to open live recon file for "
-                                     << scan_file << "; recon-side live writes will drop");
-                        }
-                    }
-                    // Reset latest image pointer for new scan.
-                    {
-                        std::lock_guard<std::mutex> img_lk(state_.latest_image_mtx);
-                        state_.latest_image_path.clear();
-                        state_.latest_image_error = false;
-                        state_.latest_image_count = 0;
-                        state_.latest_series_index = 0;
-                    }
-                    LOG_INFO("Expected slices (nz): " << nz);
+                    reset_live_outputs_for_new_scan(state_);
                     state_.header_received.store(true);
                     send_or_buffer_recon(MRD_MESSAGE_METADATA_XML_TEXT, body);
                     break;
@@ -324,6 +267,7 @@ private:
                         forwarder_->wait_for_close(std::chrono::milliseconds(2000));
                         forwarder_->end_session();
                     }
+                    flush_all_live_lanes(state_);
                     state_.close_scan();
                     session_active_.store(false);
                     break;
@@ -413,7 +357,7 @@ private:
                     // Scanner-origin IMAGE is already reconstructed image data.
                     // Save/expose it for file-reading clients; do not send it to
                     // the k-space reconstruction service.
-                    append_scanner_live_image(state_, body.data(), body.size());
+                    append_live_image(state_, LiveLane::Scanner, body.data(), body.size());
                     break;
                 }
 
@@ -451,6 +395,7 @@ private:
         if (forwarder_ && session_active_.load()) {
             forwarder_->end_session();
         }
+        flush_all_live_lanes(state_);
         state_.close_scan();
         LOG_INFO("MRD session ended");
         session_active_.store(false);

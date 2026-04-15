@@ -21,18 +21,6 @@
 namespace mrd {
 
 // ---------------------------------------------------------------------------
-// DatasetWithFileid: tiny friend-subclass that exposes the protected
-// ISMRMRD_Dataset::fileid so we can call H5Fflush on the real open handle
-// (rather than reopening by path, which creates a separate HDF5 state that
-// does not share the metadata cache of the first open).
-// ---------------------------------------------------------------------------
-class DatasetWithFileid : public ISMRMRD::Dataset {
-public:
-    using ISMRMRD::Dataset::Dataset;
-    hid_t file_id() const { return dset_.fileid; }
-};
-
-// ---------------------------------------------------------------------------
 // MrdSink
 // ---------------------------------------------------------------------------
 
@@ -41,10 +29,8 @@ MrdSink::MrdSink(const std::filesystem::path& path, const std::string& groupname
 {
     namespace fs = std::filesystem;
     fs::create_directories(path.parent_path());
-    dataset_ = std::make_unique<DatasetWithFileid>(path.c_str(), groupname.c_str(), true);
-    // Live scan files open frequently; log at DEBUG to avoid flooding. Dump
-    // files open once per scan; keep them at INFO.
-    if (path.string().find("/live/") != std::string::npos)
+    dataset_ = std::make_unique<ISMRMRD::Dataset>(path.c_str(), groupname.c_str(), true);
+    if (path.filename().string().rfind("latest_image.h5", 0) == 0)
         LOG_DEBUG("Opened HDF5 sink: " << path.string());
     else
         LOG_INFO("Opened HDF5 sink: " << path.string());
@@ -227,32 +213,12 @@ void MrdSink::append_unknown_bytes(const void* data, size_t len)
     dataset_->appendNDArray("unknown_data", arr);
 }
 
-void MrdSink::flush()
-{
-    std::lock_guard<std::mutex> lk(mtx_);
-    if (!dataset_) return;
-    // Flush the real open handle so HDF5's in-memory metadata/data cache for
-    // this file is pushed to disk. Reopening the file by path creates a
-    // separate HDF5 file state with its own empty cache; calling H5Fflush on
-    // that unrelated handle does not flush the dataset's cache.
-    auto* d = static_cast<DatasetWithFileid*>(dataset_.get());
-    hid_t fid = d->file_id();
-    if (fid < 0) {
-        LOG_WARN("flush() skipped: dataset has no valid fileid for "
-                 << path_.string());
-        return;
-    }
-    if (H5Fflush(fid, H5F_SCOPE_LOCAL) < 0) {
-        LOG_WARN("H5Fflush failed for " << path_.string());
-    }
-}
-
 void MrdSink::close()
 {
     std::lock_guard<std::mutex> lk(mtx_);
     if (dataset_) {
         dataset_.reset(); // ISMRMRD::Dataset destructor closes HDF5
-        if (path_.string().find("/live/") != std::string::npos) {
+        if (path_.filename().string().rfind("latest_image.h5", 0) == 0) {
             LOG_DEBUG("Closed HDF5 sink: " << path_.string()
                       << " (acq=" << acq_count_
                       << " img=" << img_count_

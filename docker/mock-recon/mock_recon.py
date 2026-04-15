@@ -86,7 +86,7 @@ def send_image(sock, image_data, image_series, slice_idx=0):
     sock.sendall(struct.pack('<H', MRD_MESSAGE_ISMRMRD_IMAGE))
     img.serialize_into(sock.sendall)
 
-    log.info(f"Sent image ({nx}x{ny}) series={image_series} slice={slice_idx}")
+    log.debug(f"Sent image ({nx}x{ny}) series={image_series} slice={slice_idx}")
 
 
 def handle_connection(conn, addr):
@@ -97,9 +97,11 @@ def handle_connection(conn, addr):
     config = None
     enc_nx = 128
     enc_ny = 128
+    enc_nz = 1
     acq_count = 0
     image_series = 0
     kspace_buffer = {}  # slice_idx -> [(line_idx, complex64 array)]
+    slices_in_series = set()
 
     try:
         while True:
@@ -126,11 +128,20 @@ def handle_connection(conn, addr):
                 import re
                 mx = re.search(r'<x>(\d+)</x>', xml_header)
                 my = re.search(r'<y>(\d+)</y>', xml_header)
+                mz = re.search(r'<z>(\d+)</z>', xml_header)
+                mslice = re.search(r'<slice>\s*<minimum>\d+</minimum>\s*<maximum>(\d+)</maximum>', xml_header)
                 if mx: enc_nx = int(mx.group(1))
                 if my: enc_ny = int(my.group(1))
+                if mslice:
+                    enc_nz = int(mslice.group(1)) + 1
+                elif mz:
+                    enc_nz = max(1, int(mz.group(1)))
+                else:
+                    enc_nz = 1
                 acq_count = 0
                 kspace_buffer = {}
-                log.info(f"METADATA_XML: {len(xml_header)}B, enc={enc_nx}x{enc_ny}")
+                slices_in_series = set()
+                log.info(f"METADATA_XML: {len(xml_header)}B, enc={enc_nx}x{enc_ny}x{enc_nz}")
 
             elif msg_id == MRD_MESSAGE_CLOSE:
                 log.info(f"CLOSE (received {acq_count} acquisitions)")
@@ -139,8 +150,11 @@ def handle_connection(conn, addr):
                     if lines:
                         img = reconstruct_slice(lines, enc_nx, enc_ny)
                         send_image(conn, img, image_series, flush_slice_idx)
-                        image_series += 1
+                        slices_in_series.add(flush_slice_idx)
+                if slices_in_series:
+                    image_series += 1
                 kspace_buffer = {}
+                slices_in_series = set()
                 acq_count = 0
                 # Send CLOSE back but keep connection open for next volume
                 conn.sendall(struct.pack('<H', MRD_MESSAGE_CLOSE))
@@ -175,7 +189,10 @@ def handle_connection(conn, addr):
                     if lines:
                         img = reconstruct_slice(lines, enc_nx, enc_ny)
                         send_image(conn, img, image_series, slice_idx)
-                        image_series += 1
+                        slices_in_series.add(slice_idx)
+                        if len(slices_in_series) >= max(1, enc_nz):
+                            image_series += 1
+                            slices_in_series = set()
 
                 if acq_count % 100 == 0:
                     log.info(f"Received {acq_count} acquisitions")

@@ -1,11 +1,9 @@
 /*
  * viz_client — polls GET /image/latest, reads canonical ISMRMRD H5, renders with OpenCV.
  *
- * The marshal writes one live scan file per scan (scan_<ts>.h5) using
- * libismrmrd Dataset::appendImage, matching python-ismrmrd-server's
- * saved-image pattern. Images are grouped by image_series_index into
- * "image_<N>" HDF5 groups. /image/latest tells viz which group is newest
- * via the "newest_series" field, so viz reads it directly without probing.
+ * The marshal writes latest_image.h5 using libismrmrd Dataset::appendImage,
+ * matching python-ismrmrd-server's saved-image pattern. Images for the latest
+ * live view are stored in group image_0.
  *
  * UP/DOWN arrows scroll through spatial slices (like a DICOM viewer).
  * Selection persists across time updates.
@@ -125,34 +123,103 @@ struct SliceImage {
     std::vector<float> pixels;
 };
 
-// Read a specific image_<series> group from the per-scan live file. The marshal
-// tells us which group is newest via /image/latest's newest_series field — no
-// probing needed.
-static bool read_latest_h5(const std::string& path, uint32_t series,
-                           std::vector<SliceImage>& slices_out) {
+template <typename T>
+static void append_image_slices(const ISMRMRD::Image<T>& img,
+                                std::vector<SliceImage>& slices_out) {
+    const auto& hdr = img.getHead();
+    uint16_t w = hdr.matrix_size[0];
+    uint16_t h = hdr.matrix_size[1];
+    uint16_t d = std::max<uint16_t>(1, hdr.matrix_size[2]);
+    if (w == 0 || h == 0) return;
+
+    std::vector<float> all_pixels;
+    const size_t total_pixels = static_cast<size_t>(w) * h * d;
+    extract_float_pixels(img.getDataPtr(), total_pixels, hdr.data_type, all_pixels);
+
+    const size_t slice_pixels = static_cast<size_t>(w) * h;
+    for (uint16_t z = 0; z < d; ++z) {
+        SliceImage si;
+        si.nx = w;
+        si.ny = h;
+        si.slice_idx = d > 1 ? z : hdr.slice;
+        auto begin = all_pixels.begin() + static_cast<std::ptrdiff_t>(z * slice_pixels);
+        auto end = begin + static_cast<std::ptrdiff_t>(slice_pixels);
+        si.pixels.assign(begin, end);
+        slices_out.push_back(std::move(si));
+    }
+}
+
+static bool read_dataset_image(ISMRMRD::Dataset& ds,
+                               uint32_t index,
+                               uint16_t data_type,
+                               std::vector<SliceImage>& slices_out) {
+    switch (data_type) {
+    case ISMRMRD::ISMRMRD_USHORT: {
+        ISMRMRD::Image<uint16_t> img;
+        ds.readImage("image_0", index, img);
+        append_image_slices(img, slices_out);
+        return true;
+    }
+    case ISMRMRD::ISMRMRD_SHORT: {
+        ISMRMRD::Image<int16_t> img;
+        ds.readImage("image_0", index, img);
+        append_image_slices(img, slices_out);
+        return true;
+    }
+    case ISMRMRD::ISMRMRD_UINT: {
+        ISMRMRD::Image<uint32_t> img;
+        ds.readImage("image_0", index, img);
+        append_image_slices(img, slices_out);
+        return true;
+    }
+    case ISMRMRD::ISMRMRD_INT: {
+        ISMRMRD::Image<int32_t> img;
+        ds.readImage("image_0", index, img);
+        append_image_slices(img, slices_out);
+        return true;
+    }
+    case ISMRMRD::ISMRMRD_FLOAT: {
+        ISMRMRD::Image<float> img;
+        ds.readImage("image_0", index, img);
+        append_image_slices(img, slices_out);
+        return true;
+    }
+    case ISMRMRD::ISMRMRD_DOUBLE: {
+        ISMRMRD::Image<double> img;
+        ds.readImage("image_0", index, img);
+        append_image_slices(img, slices_out);
+        return true;
+    }
+    case ISMRMRD::ISMRMRD_CXFLOAT: {
+        ISMRMRD::Image<complex_float_t> img;
+        ds.readImage("image_0", index, img);
+        append_image_slices(img, slices_out);
+        return true;
+    }
+    case ISMRMRD::ISMRMRD_CXDOUBLE: {
+        ISMRMRD::Image<complex_double_t> img;
+        ds.readImage("image_0", index, img);
+        append_image_slices(img, slices_out);
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+static bool read_latest_h5(const std::string& path, std::vector<SliceImage>& slices_out) {
     slices_out.clear();
     try {
         ISMRMRD::Dataset ds(path.c_str(), "/dataset", false);
-        const std::string var = "image_" + std::to_string(series);
-        uint32_t n = 0;
-        try { n = ds.getNumberOfImages(var); } catch (...) { return false; }
+        uint32_t n = ds.getNumberOfImages("image_0");
         if (n == 0 || n > 256) return false;
 
         for (uint32_t i = 0; i < n; ++i) {
-            ISMRMRD::Image<float> img;
-            ds.readImage(var, i, img);
-            const auto& hdr = img.getHead();
-            uint16_t w = hdr.matrix_size[0];
-            uint16_t h = hdr.matrix_size[1];
-            if (w == 0 || h == 0) continue;
-
-            SliceImage si;
-            si.nx = w;
-            si.ny = h;
-            si.slice_idx = hdr.slice;
-            size_t display_pixels = static_cast<size_t>(w) * h;
-            si.pixels.assign(img.getDataPtr(), img.getDataPtr() + display_pixels);
-            slices_out.push_back(std::move(si));
+            ISMRMRD::Image<float> probe;
+            ds.readImage("image_0", i, probe);
+            if (!read_dataset_image(ds, i, probe.getHead().data_type, slices_out)) {
+                std::cerr << "viz unsupported data_type: " << probe.getHead().data_type << "\n";
+            }
         }
     } catch (const std::exception& e) {
         std::cerr << "viz H5 read error: " << e.what() << "\n";
@@ -209,7 +276,6 @@ int main(int argc, char** argv) {
                 auto j = nlohmann::json::parse(resp);
                 std::string path = j.value("path", "");
                 bool is_error = j.value("error", false);
-                uint32_t newest_series = j.value("newest_series", 0u);
 
                 if (!path.empty() && !is_error) {
                     // Detect changes via file mtime (atomic rename changes mtime reliably)
@@ -217,7 +283,7 @@ int main(int argc, char** argv) {
                     auto mtime = std::filesystem::last_write_time(path, ec);
                     if (!ec && (path != last_path || mtime != last_mtime)) {
                         std::vector<SliceImage> new_volume;
-                        if (read_latest_h5(path, newest_series, new_volume)) {
+                        if (read_latest_h5(path, new_volume)) {
                             current_volume = std::move(new_volume);
                             // Update tracking ONLY after successful parse
                             last_path = path;

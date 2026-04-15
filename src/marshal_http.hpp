@@ -34,6 +34,7 @@
 #include <ismrmrd/waveform.h>
 
 #include "marshal_state.hpp"
+#include "live_image_store.hpp"
 #include "mrd_io.hpp"
 #include "mrd_sink.hpp"
 #include "mrd_stream_tags.hpp"
@@ -78,36 +79,13 @@ static auto text_response(const http::request<Body>& req,
 // ---------------------------------------------------------------------------
 inline void handle_recon_image(MarshalState& state, const void* data, size_t size)
 {
-    if (size < mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t)) return;
-
-    const auto* ihdr = static_cast<const ISMRMRD::ImageHeader*>(data);
-    const char* after_hdr = static_cast<const char*>(data) + mrd::IMAGE_HEADER_BYTES;
-    uint64_t attr_len = 0;
-    std::memcpy(&attr_len, after_hdr, sizeof(uint64_t));
-    if (size < mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t) + attr_len) return;
-
-    const auto* bytes = static_cast<const uint8_t*>(data);
-    const uint32_t series = ihdr->image_series_index;
-
     if (state.dump_enabled && state.dump_recorder) {
+        const auto* bytes = static_cast<const uint8_t*>(data);
         state.dump_recorder->append_recon_image(std::vector<uint8_t>(bytes, bytes + size));
     }
 
-    if (!state.live_recon_writer) return;
-
-    // One-in-one-out append. Matches python-ismrmrd-server connection.py:390.
-    // Grouping into volumes happens via image_<image_series_index> varname.
-    const auto generation = state.latest_image_generation.load();
-    state.live_recon_writer->append_image(
-        std::vector<uint8_t>(bytes, bytes + size),
-        [&state, generation, series](const std::filesystem::path& path) {
-            if (state.latest_image_generation.load() != generation) return;
-            std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
-            state.latest_image_path = path.string();
-            state.latest_image_error = false;
-            state.latest_image_count++;
-            if (series > state.latest_series_index) state.latest_series_index = series;
-        });
+    mrd::append_live_image(state, mrd::LiveLane::Recon,
+                           static_cast<const uint8_t*>(data), size);
 }
 
 inline void handle_recon_waveform(MarshalState& state, const void* data, size_t size)
@@ -129,11 +107,14 @@ template <class Body>
 static auto handle_get_image_latest(const http::request<Body>& req, MarshalState& state)
 {
     std::lock_guard<std::mutex> lk(state.latest_image_mtx);
+    if (state.latest_image_path.empty()) {
+        http::response<http::string_body> res{http::status::no_content, req.version()};
+        res.keep_alive(req.keep_alive());
+        return res;
+    }
     nlohmann::json j;
     j["path"] = state.latest_image_path;
     j["error"] = state.latest_image_error;
-    j["slices"] = state.latest_image_count;
-    j["newest_series"] = state.latest_series_index;
     return json_response(req, http::status::ok, j);
 }
 

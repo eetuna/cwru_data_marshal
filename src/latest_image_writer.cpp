@@ -1,7 +1,7 @@
 /*
  * File: src/latest_image_writer.cpp
  * Project: CWRU Data Marshal - MRI Marshal
- * Purpose: Per-scan async appender for the live ISMRMRD H5 file.
+ * Purpose: Async writer for the live latest-image H5 file.
  */
 
 #include "latest_image_writer.hpp"
@@ -9,9 +9,8 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
-#include <future>
 #include <mutex>
-#include <string>
+#include <stdexcept>
 #include <thread>
 
 #include <ismrmrd/ismrmrd.h>
@@ -24,10 +23,9 @@
 #define LOG_COMPONENT "latest_image"
 
 namespace mrd {
-
 namespace {
 
-bool append_wire_image(MrdSink& sink, const uint8_t* data, size_t size)
+bool append_latest_wire_image(MrdSink& sink, const uint8_t* data, size_t size)
 {
     if (size < IMAGE_HEADER_BYTES + sizeof(uint64_t)) return false;
 
@@ -38,10 +36,7 @@ bool append_wire_image(MrdSink& sink, const uint8_t* data, size_t size)
     if (size < attr_off + attr_len) return false;
     const size_t pixel_off = attr_off + static_cast<size_t>(attr_len);
 
-    // Group by image_series_index — same convention as python-ismrmrd-server
-    // (connection.py:390) and dump_recorder.cpp:217. One HDF5 group per volume.
-    const std::string varname = "image_" + std::to_string(hdr->image_series_index);
-    sink.append_image(varname, *hdr,
+    sink.append_image("image_0", *hdr,
                       reinterpret_cast<const char*>(data + attr_off),
                       static_cast<size_t>(attr_len),
                       data + pixel_off,
@@ -51,23 +46,53 @@ bool append_wire_image(MrdSink& sink, const uint8_t* data, size_t size)
 
 } // namespace
 
-struct LatestImageWriter::Impl {
-    struct Job {
-        enum Kind { Open, Append, Close, Stop } kind{Append};
-        std::filesystem::path dest;
-        std::string xml;
-        std::vector<uint8_t> body;
-        AppendCompletion on_complete;
-        std::shared_ptr<std::promise<bool>> done;  // true = ok, false = failed
-    };
+void write_latest_image_h5_file(const std::filesystem::path& dest,
+                                const std::string& xml,
+                                const std::vector<std::vector<uint8_t>>& images)
+{
+    if (images.empty()) return;
 
+    auto tmp = dest;
+    tmp += ".tmp";
+
+    std::error_code ec;
+    std::filesystem::create_directories(dest.parent_path(), ec);
+    ec.clear();
+    std::filesystem::remove(tmp, ec);
+
+    {
+        MrdSink sink(tmp);
+        if (!xml.empty()) sink.set_header(xml);
+        for (const auto& image : images) {
+            if (!append_latest_wire_image(sink, image.data(), image.size())) {
+                LOG_WARN("Skipping malformed image while writing latest H5");
+            }
+        }
+        sink.close();
+    }
+
+    std::filesystem::rename(tmp, dest, ec);
+    if (ec) {
+        std::filesystem::remove(dest, ec);
+        ec.clear();
+        std::filesystem::rename(tmp, dest, ec);
+        if (ec) throw std::runtime_error("rename latest H5 failed: " + ec.message());
+    }
+}
+
+struct LatestImageWriter::Job {
+    std::filesystem::path dest;
+    std::string xml;
+    std::vector<std::vector<uint8_t>> images;
+    Completion completion;
+};
+
+struct LatestImageWriter::Impl {
     std::mutex mtx;
     std::condition_variable cv;
     std::deque<Job> jobs;
+    bool stopping{false};
     std::thread worker;
-
-    std::unique_ptr<MrdSink> sink;
-    std::filesystem::path current_path;
 
     Impl()
         : worker([this] { run(); })
@@ -75,11 +100,9 @@ struct LatestImageWriter::Impl {
 
     ~Impl()
     {
-        Job stop;
-        stop.kind = Job::Stop;
         {
             std::lock_guard<std::mutex> lk(mtx);
-            jobs.push_back(std::move(stop));
+            stopping = true;
         }
         cv.notify_one();
         if (worker.joinable()) worker.join();
@@ -100,70 +123,19 @@ struct LatestImageWriter::Impl {
             Job job;
             {
                 std::unique_lock<std::mutex> lk(mtx);
-                cv.wait(lk, [&] { return !jobs.empty(); });
+                cv.wait(lk, [&] { return stopping || !jobs.empty(); });
+                if (stopping && jobs.empty()) break;
                 job = std::move(jobs.front());
                 jobs.pop_front();
             }
 
-            bool ok = true;
             try {
-                switch (job.kind) {
-                case Job::Open: {
-                    close_sink();
-                    std::error_code ec;
-                    std::filesystem::create_directories(job.dest.parent_path(), ec);
-                    sink = std::make_unique<MrdSink>(job.dest);
-                    if (!job.xml.empty()) sink->set_header(job.xml);
-                    current_path = job.dest;
-                    break;
-                }
-                case Job::Append:
-                    if (sink && append_wire_image(*sink, job.body.data(),
-                                                  job.body.size())) {
-                        // Flush per image so a mid-scan marshal crash preserves
-                        // every image appended so far on disk (durability
-                        // policy chosen after A/B benchmark — see plan file).
-                        sink->flush();
-                        if (job.on_complete) job.on_complete(current_path);
-                    }
-                    break;
-                case Job::Close:
-                    close_sink();
-                    break;
-                case Job::Stop:
-                    close_sink();
-                    if (job.done) job.done->set_value(true);
-                    return;
-                }
+                write_latest_image_h5_file(job.dest, job.xml, job.images);
+                if (job.completion) job.completion(job.dest);
             } catch (const std::exception& e) {
-                ok = false;
-                LOG_WARN("Live H5 "
-                         << (job.kind == Job::Open ? "open" :
-                             job.kind == Job::Close ? "close" :
-                             job.kind == Job::Append ? "append" : "stop")
-                         << " failed on "
-                         << (current_path.empty() ? job.dest.string() : current_path.string())
-                         << ": " << e.what());
-                if (job.kind == Job::Open) {
-                    // Open failed; leave sink null so subsequent Appends drop
-                    // instead of writing to a stale file. Clear current_path so
-                    // no HTTP pointer is exposed.
-                    sink.reset();
-                    current_path.clear();
-                }
+                LOG_WARN("Latest H5 write failed: " << e.what());
             }
-
-            if (job.done) job.done->set_value(ok);
         }
-    }
-
-    void close_sink()
-    {
-        if (sink) {
-            sink->close();
-            sink.reset();
-        }
-        current_path.clear();
     }
 };
 
@@ -173,36 +145,13 @@ LatestImageWriter::LatestImageWriter()
 
 LatestImageWriter::~LatestImageWriter() = default;
 
-bool LatestImageWriter::open_scan(std::filesystem::path dest, std::string xml)
+void LatestImageWriter::enqueue(std::filesystem::path dest,
+                                std::string xml,
+                                std::vector<std::vector<uint8_t>> images,
+                                Completion completion)
 {
-    Impl::Job job;
-    job.kind = Impl::Job::Open;
-    job.dest = std::move(dest);
-    job.xml = std::move(xml);
-    job.done = std::make_shared<std::promise<bool>>();
-    auto fut = job.done->get_future();
-    impl_->enqueue(std::move(job));
-    return fut.get();
-}
-
-void LatestImageWriter::append_image(std::vector<uint8_t> body,
-                                     AppendCompletion on_complete)
-{
-    Impl::Job job;
-    job.kind = Impl::Job::Append;
-    job.body = std::move(body);
-    job.on_complete = std::move(on_complete);
-    impl_->enqueue(std::move(job));
-}
-
-bool LatestImageWriter::close_scan()
-{
-    Impl::Job job;
-    job.kind = Impl::Job::Close;
-    job.done = std::make_shared<std::promise<bool>>();
-    auto fut = job.done->get_future();
-    impl_->enqueue(std::move(job));
-    return fut.get();
+    impl_->enqueue(Job{std::move(dest), std::move(xml), std::move(images),
+                       std::move(completion)});
 }
 
 } // namespace mrd

@@ -150,7 +150,7 @@ void DumpRecorder::ensure_recon_sink_on_worker()
         return;
 
     auto path = dump_recon_dir(dump_dir_) / current_filename_;
-        recon_sink_ = std::make_unique<MrdSink>(path);
+    recon_sink_ = std::make_unique<MrdSink>(path);
     if (!current_xml_.empty())
         recon_sink_->set_header(current_xml_);
 }

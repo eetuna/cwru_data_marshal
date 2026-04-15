@@ -3,7 +3,7 @@
  * Project: CWRU Data Marshal - MRI Marshal
  * Purpose: Utility functions for I/O, timestamps, directory creation
  *
- * Split paths: from_scanner/ and from_reconstruction/ under --dump-dir.
+ * Split paths: live/from_* and dump/from_* under --dump-dir.
  */
 
 #pragma once
@@ -59,46 +59,30 @@ inline std::string scan_filename()
     return "scan_" + iso8601_now_ms() + ".h5";
 }
 
-// Live subtree (always populated): one file per scan, images appended.
-inline std::filesystem::path live_root(const std::filesystem::path& dump_dir)
-{
-    auto p = dump_dir / "live";
-    ensure_dir(p);
-    return p;
-}
-
 inline std::filesystem::path live_scanner_dir(const std::filesystem::path& dump_dir)
 {
-    auto p = live_root(dump_dir) / "from_scanner";
+    auto p = dump_dir / "live" / "from_scanner";
     ensure_dir(p);
     return p;
 }
 
 inline std::filesystem::path live_recon_dir(const std::filesystem::path& dump_dir)
 {
-    auto p = live_root(dump_dir) / "from_reconstruction";
-    ensure_dir(p);
-    return p;
-}
-
-// Dump subtree (only populated when --dump is on): canonical archival per scan.
-inline std::filesystem::path dump_root(const std::filesystem::path& dump_dir)
-{
-    auto p = dump_dir / "dump";
+    auto p = dump_dir / "live" / "from_reconstruction";
     ensure_dir(p);
     return p;
 }
 
 inline std::filesystem::path dump_scanner_dir(const std::filesystem::path& dump_dir)
 {
-    auto p = dump_root(dump_dir) / "from_scanner";
+    auto p = dump_dir / "dump" / "from_scanner";
     ensure_dir(p);
     return p;
 }
 
 inline std::filesystem::path dump_recon_dir(const std::filesystem::path& dump_dir)
 {
-    auto p = dump_root(dump_dir) / "from_reconstruction";
+    auto p = dump_dir / "dump" / "from_reconstruction";
     ensure_dir(p);
     return p;
 }
