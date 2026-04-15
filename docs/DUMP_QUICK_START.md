@@ -8,7 +8,7 @@ Dump is not the live viz path. Dump means the marshal records the MRD traffic it
 - Reconstruction-side records go under `session-data/dump/from_reconstruction/`.
 - Standard ISMRMRD objects are written to canonical per-scan `scan_<ts>.h5` files.
 - The `live/` subtree (always populated) holds the same kind of per-scan files for live viewing. Dump is the extra mirror you opt into with `--dump`.
-- `/image/latest` points at the current scan's live file. It is not the dump.
+- `/image/latest` points at the closed `live/from_*/latest_image.h5` companion file. It is not the dump.
 
 ## Case 1 -- scanner-side dump only
 
@@ -100,15 +100,15 @@ curl -s http://localhost:8080/image/latest | jq
 Example live image response:
 
 ```json
-{"path":"/session-data/live/from_reconstruction/scan_2026-04-14T16:30:00.123Z.h5","error":false,"slices":12,"newest_series":3}
+{"path":"/session-data/live/from_reconstruction/latest_image.h5","error":false}
 ```
 
-`newest_series` is the highest `image_series_index` seen this scan. Clients open group `image_3` in the HDF5 file to render the newest volume; no HDF5 group enumeration is needed.
+Clients open the closed companion file returned by `/image/latest` and read group `image_0` to render the newest published image update.
 
 Example recon failure response:
 
 ```json
-{"path":"/session-data/live/from_reconstruction/latest_error.png","error":true,"slices":12,"newest_series":0}
+{"path":"/session-data/live/from_reconstruction/latest_error.png","error":true}
 ```
 
 The scanner does not use this endpoint. Scanner-visible recon output and failure images are MRD messages pushed on the scanner's existing TCP connection.

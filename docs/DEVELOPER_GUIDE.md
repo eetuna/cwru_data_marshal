@@ -22,7 +22,7 @@ main                          <- Umbrella branch (docs, Docker configs, scripts 
 | Branch | What it contains | Who works on it |
 |--------|-----------------|-----------------|
 | `main` | Docs, Dockerfiles, compose files, scripts (no source code) | Everyone (shared) |
-| `feature/mri-marshal-rewrite-v2-inner` | MRI marshal server (C++), streamers, viz client, ECG/pose clients | MRI team |
+| `audit/live-atomic-rename` | MRI marshal server (C++), streamers, viz client, pose client | MRI team |
 | `robot-data-marshal` | Robot marshal server (C++), catheter tracking, controller, planning, front-end, surface tracking | Robot team |
 
 **Rules:**
@@ -49,7 +49,7 @@ Git worktrees let you have all branches checked out simultaneously in separate d
 
 ```bash
 # From the repo root (main branch)
-git worktree add .worktrees/mri_data_marshal feature/mri-marshal-rewrite-v2-inner
+git worktree add .worktrees/mri_data_marshal audit/live-atomic-rename
 git worktree add .worktrees/robot_data_marshal robot_data_marshal_with_catheter_system_components
 ```
 
@@ -85,7 +85,7 @@ MRI Marshal → live/from_reconstruction/scan_<ts>.h5 (and dump/… with --dump)
 Scanner
 ```
 
-The marshal has two interfaces: **MRD TCP** for scanner data transport (the same wire protocol as python-ismrmrd-server) and **HTTP** for query/control endpoints. Scanner clients connect via MRD TCP and send ISMRMRD messages. Marshal forwards to recon via MRD TCP and always appends scanner- and recon-side standard ISMRMRD objects to per-scan HDF5 files under `live/from_scanner/` and `live/from_reconstruction/`. With `--dump`, it additionally mirrors both sides under `dump/from_scanner/` and `dump/from_reconstruction/` for retrospective analysis. Recon sends images back on the same TCP connection. The viz client polls HTTP `GET /image/latest`, reads the returned `path` and `newest_series`, and opens image group `image_<newest_series>` in the per-scan HDF5 file.
+The marshal has two interfaces: **MRD TCP** for scanner data transport (same wire protocol as python-ismrmrd-server) and **HTTP** for query/control endpoints. Scanner clients connect via MRD TCP. Marshal forwards to recon via MRD TCP and appends scanner- and recon-side ISMRMRD objects to per-scan history files under `live/from_scanner/scan_<ts>.h5` and `live/from_reconstruction/scan_<ts>.h5`. On each incoming live IMAGE it atomically publishes a closed companion snapshot at `live/from_*/latest_image.h5`. With `--dump`, history is additionally mirrored under `dump/from_{scanner,reconstruction}/`. Recon sends images back on the same TCP connection. The viz client polls HTTP `GET /image/latest`, receives the companion path, and opens group `image_0` with default HDF5 settings.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full wire protocol reference and compose topology.
 
@@ -172,9 +172,11 @@ Every scan produces per-scan HDF5 files under the session-data umbrella. The liv
 ${dump_dir}/
 ├── live/
 │   ├── from_scanner/
-│   │   └── scan_<ts>.h5         <- Scanner-origin ISMRMRD data (acquisitions, images, waveforms), appended
+│   │   ├── scan_<ts>.h5         <- Scanner-origin ISMRMRD data (acquisitions, images, waveforms), appended
+│   │   └── latest_image.h5      <- Closed companion snapshot for the latest published scanner image
 │   └── from_reconstruction/
 │       ├── scan_<ts>.h5         <- Recon-returned images, appended; image groups by image_series_index
+│       ├── latest_image.h5      <- Closed companion snapshot for the latest published recon image
 │       └── latest_error.png     <- Reconstruction-failed indicator (single overwritten file)
 └── dump/                         <- only when --dump is on
     ├── from_scanner/scan_<ts>.h5
@@ -184,7 +186,8 @@ ${dump_dir}/
 - Scanner MRD TCP standard ISMRMRD objects → live (always) and dump (if `--dump`) scanner archives.
 - Recon MRD TCP standard ISMRMRD objects → live (always) and dump (if `--dump`) recon archives.
 - Recon failure → scanner MRD `IMAGE(1022)` failure image + HTTP `GET /image/latest` points at `latest_error.png`.
-- HDF5 files are readable while being written (per-scan append). Viz uses `/image/latest`'s `newest_series` field to know which `image_<N>` group is the newest volume.
+- Before the current scan has published any live IMAGE, `GET /image/latest` returns `204 No Content`.
+- The per-scan history file is open for writing during the scan and readable only after CLOSE. The closed companion file at `live/from_*/latest_image.h5` is always readable — viz opens it via `/image/latest` and reads group `image_0`.
 - `<ts>` is shared between a scan's live and dump files.
 
 ---

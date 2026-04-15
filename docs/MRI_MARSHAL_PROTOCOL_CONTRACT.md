@@ -55,6 +55,8 @@ HTTP is only for non-scanner clients:
 
 `GET /image/latest` returns a JSON file pointer. It does not inline the image bytes. Viz-style clients read the file from the shared filesystem.
 
+Before the current scan has published any live IMAGE, `GET /image/latest` returns `204 No Content`.
+
 ## Failure Behavior
 
 The marshal process must remain up if recon fails. Scanner data should continue to be accepted, and archived when `--dump` is enabled. Recon connection state must be reset so a later scan can reconnect.

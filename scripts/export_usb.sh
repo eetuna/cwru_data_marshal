@@ -57,12 +57,11 @@ echo "[2/6] Building Docker images..."
 cd "$PROJECT_ROOT"
 docker compose -f docker-compose.demo.yml build
 
-# Verify all 9 images were built
+# Verify all 8 images were built
 REQUIRED_IMAGES=(
     "cwru/mri-marshal"
     "cwru/robot-marshal"
     "cwru/image-streamer"
-    "cwru/ecg-client"
     "cwru/pose-client"
     "cwru/kspace-streamer"
     "cwru/mock-recon"
@@ -86,7 +85,6 @@ docker save -o "$OUT_DIR/images/cwru-demo-images.tar" \
     cwru/mri-marshal:latest \
     cwru/robot-marshal:latest \
     cwru/image-streamer:latest \
-    cwru/ecg-client:latest \
     cwru/pose-client:latest \
     cwru/kspace-streamer:latest \
     cwru/mock-recon:latest \
@@ -272,12 +270,11 @@ docker load -i images/cwru-demo-images.tar
 docker images | grep cwru
 ```
 
-Expected output (9 images):
+Expected output (8 images):
 ```
 cwru/mri-marshal        latest
 cwru/robot-marshal      latest
 cwru/image-streamer     latest
-cwru/ecg-client         latest
 cwru/pose-client        latest
 cwru/kspace-streamer    latest
 cwru/mock-recon         latest
@@ -399,22 +396,17 @@ docker compose -f docker-compose.demo.yml up robot-marshal
 docker compose -f docker-compose.demo.yml up image-streamer
 ```
 
-**Terminal 4: ECG Client**
-```bash
-docker compose -f docker-compose.demo.yml up ecg-client
-```
-
-**Terminal 5: Pose Client**
+**Terminal 4: Pose Client**
 ```bash
 docker compose -f docker-compose.demo.yml up pose-client
 ```
 
-**Terminal 6: Robot Clients (all 5 together)**
+**Terminal 5: Robot Clients (all 5 together)**
 ```bash
 docker compose -f docker-compose.demo.yml up robot-clients
 ```
 
-**Terminal 7: Viz Client (optional)**
+**Terminal 6: Viz Client (optional)**
 ```bash
 docker compose -f docker-compose.demo.yml --profile viz up viz-client
 ```
@@ -487,7 +479,7 @@ docker compose -f docker-compose.demo.yml down
 
 # Remove all demo images
 docker rmi cwru/mri-marshal:latest cwru/robot-marshal:latest \
-    cwru/image-streamer:latest cwru/ecg-client:latest \
+    cwru/image-streamer:latest \
     cwru/pose-client:latest cwru/kspace-streamer:latest \
     cwru/mock-recon:latest cwru/viz-client:latest \
     cwru/robot-clients:latest

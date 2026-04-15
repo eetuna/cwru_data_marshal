@@ -41,7 +41,7 @@ The CWRU Data Marshal is a persistent intermediary between the MRI scanner and t
 
 **Query/Control clients → Marshal:** HTTP on `--http` (default 0.0.0.0:8080). The viz client, pose client, tracker, and any external consumer use HTTP GET/POST for querying images, transforms, poses, and health.
 
-**Viz client:** Polls `GET /image/latest` over HTTP, receives a file path, opens the canonical ISMRMRD H5 latest-image file directly from disk. No HDF5 concurrent access needed.
+**Viz client:** Polls `GET /image/latest` over HTTP, receives a stable path pointing at a closed companion HDF5 file, and opens it with default ISMRMRD / h5py settings. Marshal atomically renames a new companion snapshot on each incoming live IMAGE, so readers always see a closed file.
 
 ## MRD TCP Wire Protocol
 
@@ -119,25 +119,28 @@ docker-compose.demo.yml services:
 
 ```
 ${dump_dir}/                          session-data umbrella (--dump-dir flag)
-├── live/                             always populated — one file per scan, appended in-place
+├── live/                             always populated
 │   ├── from_scanner/
-│   │   └── scan_<ts>.h5              canonical ISMRMRD HDF5 (scanner-origin acquisitions/images/waveforms)
+│   │   ├── scan_<ts>.h5              per-scan history, open during scan, closed on CLOSE
+│   │   └── latest_image.h5           closed companion, atomic-rename per live IMAGE (reader-facing)
 │   └── from_reconstruction/
-│       ├── scan_<ts>.h5              canonical ISMRMRD HDF5 (recon-returned images/waveforms)
+│       ├── scan_<ts>.h5              per-scan history
+│       ├── latest_image.h5           closed companion (reader-facing)
 │       └── latest_error.png          single overwritten recon-failure indicator
 └── dump/                             populated only when --dump is on
     ├── from_scanner/
-    │   └── scan_<ts>.h5              mirror of live scanner file, for retrospective analysis
+    │   └── scan_<ts>.h5              mirror of live scanner history file
     └── from_reconstruction/
-        └── scan_<ts>.h5              mirror of live recon file, for retrospective analysis
+        └── scan_<ts>.h5              mirror of live recon history file
 ```
 
 - Each scan produces `scan_<ts>.h5`; `<ts>` is shared between the live and dump file of the same scan.
 - Images are appended with varname `image_<image_series_index>`, one HDF5 group per volume, matching python-ismrmrd-server's on-disk convention.
 - Old scans stay on disk. `latest_error.png` is the only overwritten file.
 - HDF5 files use canonical libismrmrd layout (`appendAcquisition`, `appendImage`, `appendWaveform`).
-- Live files are written concurrently with a scan; readers should tolerate partial volumes mid-scan (a volume may have fewer slices than its final count until all slices arrive).
-- `GET /image/latest` returns the current scan's live recon path plus `newest_series` so clients can open `image_<newest_series>` without enumerating groups.
+- The live per-scan file `scan_<ts>.h5` is open for writing while the scan runs and is not part of the live reader contract (POSIX file lock). It is readable after CLOSE. The closed companion `latest_image.h5` is always safe to open while marshal is writing the per-scan file.
+- `GET /image/latest` returns `204 No Content` before the current scan has published any live IMAGE.
+- After the first live IMAGE, `GET /image/latest` returns `{path, error}` — `path` is the companion file from whichever lane most recently published an image. Readers open the companion's only group, `image_0`, which holds the most recently published image update (2D slice, 2D multi-slice stack image, or 3D volume image).
 
 ## Fault Tolerance
 

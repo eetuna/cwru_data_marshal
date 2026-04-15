@@ -10,7 +10,7 @@ echo "alias cdd='docker compose --env-file .env.demo -f docker-compose.demo.yml'
 
 All commands below must be run from the repo root (`cd` into it first) because `cdd` resolves `.env.demo` and `docker-compose.demo.yml` relative to the current directory.
 
-## Flow A -- real reconstruction (k-space to recon to image)
+## Flow A -- reconstruction path (k-space to recon to image)
 
 One terminal per service. Each blocks that terminal and streams its logs until `Ctrl-C`.
 
@@ -84,7 +84,7 @@ Individual robot clients (run separately instead of as the `robot-clients` bundl
 
 ## Rules
 
-- Always use `cdd` (or pass `--env-file .env.demo`). Without it, marshal may start without the intended recon settings, so acquisition frames are accepted but not forwarded.
+- Always use `cdd` (or pass both `--env-file .env.demo -f docker-compose.demo.yml`) from the repo root. Without that, Docker Compose may resolve the wrong env file, compose file, or relative `SESSION_DATA_DIR` bind mount.
 - Flow A and Flow B are mutually exclusive. Do not run `image-streamer` together with `mock-recon`/`kspace-streamer`.
 - `mock-recon` must be up before `kspace-streamer`, otherwise marshal has nowhere to forward acquisitions.
 - `viz-client` and `robot-clients` live behind compose profiles (`viz`, `robot-clients`). They only start when the matching `--profile` flag is on the command.

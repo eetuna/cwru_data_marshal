@@ -110,7 +110,7 @@ Scanner and reconstruction data do not use HTTP. They use the MRD TCP protocol o
 | `/health` | GET | Health check |
 | `/pose` | POST | Submit position/orientation data |
 | `/pose` | GET | Get current pose |
-| `/image/latest` | GET | Get latest reconstructed image file path |
+| `/image/latest` | GET | Get the latest closed live-image snapshot path |
 | `/dump/scanner` | GET | List scanner archive files |
 | `/dump/recon` | GET | List reconstruction archive files |
 
@@ -313,9 +313,13 @@ print(f"Latest ECG: {len(bio.get('data', []))} samples from {bio.get('source')}"
 pose = requests.get(f"{MRI}/pose").json()
 print(f"Current pose: {pose.get('pose', {}).get('p')}")
 
-# Get latest MRI frame
-frame = requests.get(f"{MRI}/image/latest").json()
-print(f"Latest frame: {frame.get('path')} at {frame.get('ts')}")
+# Get latest MRI snapshot pointer
+resp = requests.get(f"{MRI}/image/latest")
+if resp.status_code == 200:
+    frame = resp.json()
+    print(f"Latest frame: {frame.get('path')}")
+elif resp.status_code == 204:
+    print("Latest frame: none yet")
 
 # Poll for new frames
 import time
@@ -394,11 +398,13 @@ int main() {
         std::cout << "Robot write successful\n";
     }
 
-    // Get latest MRI frame
+    // Get latest MRI snapshot pointer
     res = mri.Get("/image/latest");
     if (res && res->status == 200) {
         json frame = json::parse(res->body);
         std::cout << "Latest frame: " << frame["path"] << "\n";
+    } else if (res && res->status == 204) {
+        std::cout << "Latest frame: none yet\n";
     }
 
     return 0;
@@ -468,7 +474,7 @@ curl -X POST http://localhost:8080/pose \
 # Get current pose
 curl http://localhost:8080/pose
 
-# Get latest MRI frame
+# Get latest MRI snapshot pointer
 curl http://localhost:8080/image/latest
 ```
 

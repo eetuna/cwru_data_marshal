@@ -345,21 +345,16 @@ Expected: scanner-side H5 appears under `dump/from_scanner/` and `live/from_scan
 
 For more dump cases, including image-input dump and failure behavior, see [DUMP_QUICK_START.md](DUMP_QUICK_START.md).
 
-### Clearing the Latest Frame Cache (Session End)
+### `GET /image/latest` Behavior
 
-Marshal caches the most recent stored frame in memory so `GET /image/latest` can serve it instantly. The cache is sticky for the lifetime of the marshal process - after a producer stops, the last frame keeps showing up until marshal is restarted or the cache is explicitly cleared.
+Marshal does not expose a DELETE route or a sticky in-memory latest-frame cache.
 
-To explicitly clear it, call:
+Current behavior:
 
-```bash
-curl -X DELETE http://localhost:8080/image/latest
-```
-
-Effects:
-
-- Next `GET /image/latest` returns `204 No Content` until the next frame is POSTed.
-- HDF5 files on disk when `--dump` is enabled, `/dump/scanner` history, WebSocket subscribers, and every other marshal state are unaffected - only the in-memory "latest" cache is wiped.
-- The coordinator safety poller (`clients/bridge/coordinator.py`) is unaffected: it ignores non-200 responses and only acts on observed fault envelopes, so a cleared cache just means it waits for the next real frame.
+- Before the current scan has published any live IMAGE, `GET /image/latest` returns `204 No Content`.
+- After the first live IMAGE arrives, `GET /image/latest` returns the path to the closed `live/from_*/latest_image.h5` companion file for whichever lane most recently published an image.
+- On reconstruction failure, `GET /image/latest` returns `{"path": "...latest_error.png", "error": true}`.
+- The open per-scan history file `live/from_*/scan_<ts>.h5` is not the live-reader contract.
 
 Typical callers:
 
