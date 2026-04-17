@@ -15,6 +15,7 @@
 #include <cstring>
 #include <cmath>
 #include <filesystem>
+#include <hdf5.h>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -35,30 +36,35 @@ static size_t curl_write_cb(void* ptr, size_t size, size_t nmemb, std::string* d
     return size * nmemb;
 }
 
-std::string http_get(CURL* curl, const std::string& url) {
+struct HttpGetResult {
+    bool ok{false};
+    long status_code{0};
     std::string body;
+};
+
+static HttpGetResult http_get(CURL* curl, const std::string& url) {
+    HttpGetResult result;
     curl_easy_reset(curl);
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &result.body);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 2L);
-    curl_easy_perform(curl);
-    return body;
-}
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 
-// Compute bytes per pixel from ISMRMRD data_type enum
-static size_t itemsize_for_data_type(uint16_t dt) {
-    switch (dt) {
-        case ISMRMRD::ISMRMRD_USHORT:   return 2;
-        case ISMRMRD::ISMRMRD_SHORT:    return 2;
-        case ISMRMRD::ISMRMRD_UINT:     return 4;
-        case ISMRMRD::ISMRMRD_INT:      return 4;
-        case ISMRMRD::ISMRMRD_FLOAT:    return 4;
-        case ISMRMRD::ISMRMRD_DOUBLE:   return 8;
-        case ISMRMRD::ISMRMRD_CXFLOAT:  return 8;
-        case ISMRMRD::ISMRMRD_CXDOUBLE: return 16;
-        default: return 4;
+    const auto rc = curl_easy_perform(curl);
+    if (rc != CURLE_OK) {
+        std::cerr << "viz http error: " << curl_easy_strerror(rc) << "\n";
+        return result;
     }
+
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &result.status_code);
+    result.ok = (result.status_code >= 200 && result.status_code < 300)
+             || result.status_code == 204;
+    if (!result.ok) {
+        std::cerr << "viz http status error: " << result.status_code << "\n";
+    }
+    return result;
 }
 
 // Extract float pixels from any ISMRMRD data type (magnitude for complex)
@@ -117,6 +123,28 @@ static void extract_float_pixels(const void* src, size_t npixels, uint16_t data_
     }
 }
 
+struct ScopedH5Handle {
+    using Closer = herr_t (*)(hid_t);
+
+    hid_t id{-1};
+    Closer closer{nullptr};
+
+    ScopedH5Handle() = default;
+    ScopedH5Handle(hid_t handle, Closer close_fn)
+        : id(handle), closer(close_fn)
+    {}
+
+    ScopedH5Handle(const ScopedH5Handle&) = delete;
+    ScopedH5Handle& operator=(const ScopedH5Handle&) = delete;
+
+    ~ScopedH5Handle()
+    {
+        if (id >= 0 && closer) closer(id);
+    }
+
+    explicit operator bool() const noexcept { return id >= 0; }
+};
+
 struct SliceImage {
     uint16_t nx{0}, ny{0};
     uint16_t slice_idx{0};
@@ -149,62 +177,80 @@ static void append_image_slices(const ISMRMRD::Image<T>& img,
     }
 }
 
+template <typename T>
+static bool read_dataset_image_typed(ISMRMRD::Dataset& ds,
+                                     uint32_t index,
+                                     std::vector<SliceImage>& slices_out) {
+    ISMRMRD::Image<T> img;
+    ds.readImage("image_0", index, img);
+    append_image_slices(img, slices_out);
+    return true;
+}
+
 static bool read_dataset_image(ISMRMRD::Dataset& ds,
                                uint32_t index,
                                uint16_t data_type,
                                std::vector<SliceImage>& slices_out) {
     switch (data_type) {
     case ISMRMRD::ISMRMRD_USHORT: {
-        ISMRMRD::Image<uint16_t> img;
-        ds.readImage("image_0", index, img);
-        append_image_slices(img, slices_out);
-        return true;
+        return read_dataset_image_typed<uint16_t>(ds, index, slices_out);
     }
     case ISMRMRD::ISMRMRD_SHORT: {
-        ISMRMRD::Image<int16_t> img;
-        ds.readImage("image_0", index, img);
-        append_image_slices(img, slices_out);
-        return true;
+        return read_dataset_image_typed<int16_t>(ds, index, slices_out);
     }
     case ISMRMRD::ISMRMRD_UINT: {
-        ISMRMRD::Image<uint32_t> img;
-        ds.readImage("image_0", index, img);
-        append_image_slices(img, slices_out);
-        return true;
+        return read_dataset_image_typed<uint32_t>(ds, index, slices_out);
     }
     case ISMRMRD::ISMRMRD_INT: {
-        ISMRMRD::Image<int32_t> img;
-        ds.readImage("image_0", index, img);
-        append_image_slices(img, slices_out);
-        return true;
+        return read_dataset_image_typed<int32_t>(ds, index, slices_out);
     }
     case ISMRMRD::ISMRMRD_FLOAT: {
-        ISMRMRD::Image<float> img;
-        ds.readImage("image_0", index, img);
-        append_image_slices(img, slices_out);
-        return true;
+        return read_dataset_image_typed<float>(ds, index, slices_out);
     }
     case ISMRMRD::ISMRMRD_DOUBLE: {
-        ISMRMRD::Image<double> img;
-        ds.readImage("image_0", index, img);
-        append_image_slices(img, slices_out);
-        return true;
+        return read_dataset_image_typed<double>(ds, index, slices_out);
     }
     case ISMRMRD::ISMRMRD_CXFLOAT: {
-        ISMRMRD::Image<complex_float_t> img;
-        ds.readImage("image_0", index, img);
-        append_image_slices(img, slices_out);
-        return true;
+        return read_dataset_image_typed<complex_float_t>(ds, index, slices_out);
     }
     case ISMRMRD::ISMRMRD_CXDOUBLE: {
-        ISMRMRD::Image<complex_double_t> img;
-        ds.readImage("image_0", index, img);
-        append_image_slices(img, slices_out);
-        return true;
+        return read_dataset_image_typed<complex_double_t>(ds, index, slices_out);
     }
     default:
         return false;
     }
+}
+
+static bool read_image_data_type(const std::string& path,
+                                 uint32_t index,
+                                 uint16_t& data_type) {
+    ScopedH5Handle file(H5Fopen(path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT), H5Fclose);
+    if (!file) return false;
+
+    ScopedH5Handle dataset(H5Dopen2(file.id, "/dataset/image_0/header", H5P_DEFAULT), H5Dclose);
+    if (!dataset) return false;
+
+    ScopedH5Handle file_type(H5Dget_type(dataset.id), H5Tclose);
+    ScopedH5Handle native_type(H5Tget_native_type(file_type.id, H5T_DIR_ASCEND), H5Tclose);
+    ScopedH5Handle file_space(H5Dget_space(dataset.id), H5Sclose);
+    if (!file_type || !native_type || !file_space) return false;
+
+    hsize_t start[1] = {index};
+    hsize_t count[1] = {1};
+    if (H5Sselect_hyperslab(file_space.id, H5S_SELECT_SET, start, nullptr, count, nullptr) < 0) {
+        return false;
+    }
+
+    ScopedH5Handle mem_space(H5Screate_simple(1, count, nullptr), H5Sclose);
+    if (!mem_space) return false;
+
+    ISMRMRD::ImageHeader header{};
+    if (H5Dread(dataset.id, native_type.id, mem_space.id, file_space.id, H5P_DEFAULT, &header) < 0) {
+        return false;
+    }
+
+    data_type = header.data_type;
+    return true;
 }
 
 static bool read_latest_h5(const std::string& path, std::vector<SliceImage>& slices_out) {
@@ -215,10 +261,13 @@ static bool read_latest_h5(const std::string& path, std::vector<SliceImage>& sli
         if (n == 0 || n > 256) return false;
 
         for (uint32_t i = 0; i < n; ++i) {
-            ISMRMRD::Image<float> probe;
-            ds.readImage("image_0", i, probe);
-            if (!read_dataset_image(ds, i, probe.getHead().data_type, slices_out)) {
-                std::cerr << "viz unsupported data_type: " << probe.getHead().data_type << "\n";
+            uint16_t data_type = 0;
+            if (!read_image_data_type(path, i, data_type)) {
+                std::cerr << "viz failed to read image header for index " << i << "\n";
+                return false;
+            }
+            if (!read_dataset_image(ds, i, data_type, slices_out)) {
+                std::cerr << "viz unsupported data_type: " << data_type << "\n";
             }
         }
     } catch (const std::exception& e) {
@@ -264,16 +313,24 @@ int main(int argc, char** argv) {
     auto fps_start = std::chrono::steady_clock::now();
     double current_fps = 0.0;
     uint64_t total_frames = 0;
+    auto next_poll = std::chrono::steady_clock::now();
+    std::string latest_response;
 
     while (true) {
         bool showing_error = false;
 
         // 1. Poll GET /image/latest
-        std::string resp = http_get(curl, http_url + "/image/latest");
+        auto now = std::chrono::steady_clock::now();
+        if (now >= next_poll) {
+            auto http = http_get(curl, http_url + "/image/latest");
+            if (http.ok) latest_response = std::move(http.body);
+            else latest_response.clear();
+            next_poll = now + std::chrono::milliseconds(100);
+        }
 
-        if (!resp.empty()) {
+        if (!latest_response.empty()) {
             try {
-                auto j = nlohmann::json::parse(resp);
+                auto j = nlohmann::json::parse(latest_response);
                 std::string path = j.value("path", "");
                 bool is_error = j.value("error", false);
 
