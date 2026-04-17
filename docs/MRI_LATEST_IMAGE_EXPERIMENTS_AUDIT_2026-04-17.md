@@ -83,3 +83,34 @@ git checkout perf/latest-image-shared-buffers    # or any of the four
 git diff 837a101..HEAD -- src/latest_image_writer.cpp
 git checkout 837a101                              # back to base
 ```
+
+## Docker image → branch mapping
+
+Five `cwru/mri-marshal:*` tags existed at audit time. Mapping determined
+by `strings` on `/opt/mri/build/marshal` against unique symbols from each
+experiment branch.
+
+| Image tag                           | Built (UTC)        | Matches branch                    | Evidence                                                   |
+|-------------------------------------|--------------------|-----------------------------------|------------------------------------------------------------|
+| `cwru/mri-marshal:v0-benchmark`     | 2026-04-15 23:53   | base `837a101`                    | No `publish_latest_result`, no timing symbols, no cadence  |
+| `cwru/mri-marshal:candidate-benchmark` | 2026-04-15 22:49 | `perf/latest-file-reuse` (`f7bb797`) | Has `publish_latest_result`, no timing, no cadence      |
+| `cwru/mri-marshal:slot-benchmark`   | 2026-04-16 00:11   | `perf/latest-file-reuse` (`f7bb797`) | Same signature set as candidate-benchmark                |
+| `cwru/mri-marshal:diag-hotpath`     | 2026-04-16 00:24   | intermediate slot-reuse WIP (between `f7bb797` and `0c30408`) | Has `publish_latest_result` + `timing latest_promote_ms`, **no** `cadence latest_writer` |
+| `cwru/mri-marshal:diag-cadence`     | 2026-04-16 00:33   | `perf/latest-slot-reuse` (`0c30408`) | Has all three: `publish_latest_result`, `timing latest_promote_ms`, `cadence latest_writer` |
+
+**Not represented by any image:**
+- `perf/latest-image-shared-buffers` (no image built — `max_in_flight_jobs` symbol absent from all 5)
+- `perf/latest-bulk-prealloc` (branch committed Apr 17 15:48, after all images were built)
+
+**Observations:**
+- The tag `:slot-benchmark` is **misleading** — its binary matches the
+  file-reuse branch, not the slot-reuse branch. Likely built before
+  `0c30408` landed and never re-tagged.
+- `:diag-hotpath` is an intermediate WIP build that is not captured as a
+  named git branch. The code state it was built from lives only inside
+  this image — if that behavior matters, extract the binary before
+  deleting this tag.
+
+`cwru/mri-marshal:latest` and the `cwru/mri-marshal:*-benchmark|diag-*`
+tags share the same ~536 MB layers so the incremental disk cost is
+lower than the reported 1.89 GB per tag.
