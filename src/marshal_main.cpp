@@ -220,8 +220,13 @@ static void http_session(std::shared_ptr<tcp::socket> sock, MarshalState& state)
     try {
         beast::flat_buffer buffer;
         for (;;) {
-            http::request<http::string_body> req;
-            http::read(*sock, buffer, req);
+            // MEDIUM #11: use a parser with body_limit set BEFORE http::read
+            // so oversized bodies are rejected as they stream, not buffered
+            // in full and then checked in the handler.
+            http::request_parser<http::string_body> parser;
+            parser.body_limit(state.max_body_bytes);
+            http::read(*sock, buffer, parser);
+            auto req = parser.release();
 
             http::response<http::string_body> res;
             bool got_response = false;
@@ -237,9 +242,13 @@ static void http_session(std::shared_ptr<tcp::socket> sock, MarshalState& state)
             }
         }
     } catch (const beast::system_error& e) {
-        if (e.code() != http::error::end_of_stream &&
-            e.code() != net::error::operation_aborted)
+        // MEDIUM #11: body_too_large is an expected rejection, not a bug.
+        if (e.code() == http::error::body_limit) {
+            LOG_WARN("HTTP body exceeded max_body_bytes; connection closed");
+        } else if (e.code() != http::error::end_of_stream &&
+                   e.code() != net::error::operation_aborted) {
             LOG_WARN("HTTP session error: " << e.what());
+        }
     } catch (const std::exception& e) {
         LOG_WARN("HTTP session error: " << e.what());
     }

@@ -171,6 +171,12 @@ if(BUILD_TESTING)
   target_include_directories(test_wire_guards PRIVATE include)
   add_test(NAME test_wire_guards COMMAND test_wire_guards)
 
+  # MEDIUM #11: HTTP body_limit must reject oversized bodies during read.
+  add_executable(test_http_body_limit tests/test_http_body_limit.cpp)
+  target_link_libraries(test_http_body_limit PRIVATE
+    Catch2::Catch2WithMain Boost::system Threads::Threads)
+  add_test(NAME test_http_body_limit COMMAND test_http_body_limit)
+
   # HIGH #10: DumpRecorder must expose overflow status.
   add_executable(test_dump_overflow
     tests/test_dump_overflow.cpp
