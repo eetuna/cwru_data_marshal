@@ -444,10 +444,18 @@ struct LatestImageWriter::Job {
 };
 
 struct LatestImageWriter::Impl {
+    // MEDIUM #14: bound the queue. Latest-image publication is naturally
+    // coalescible: a newer job for the same destination supersedes any
+    // older pending job for that destination. If the cap is hit and no
+    // coalesce opportunity exists, drop the oldest and log once.
+    static constexpr size_t kMaxQueuedJobs = 64;
+
     std::mutex mtx;
     std::condition_variable cv;
     std::deque<Job> jobs;
     bool stopping{false};
+    std::atomic<bool> drop_logged{false};
+    std::atomic<uint64_t> dropped_count{0};
     std::thread worker;
 
     Impl()
@@ -468,6 +476,27 @@ struct LatestImageWriter::Impl {
     {
         {
             std::lock_guard<std::mutex> lk(mtx);
+            // Coalesce: if any pending job already targets this dest, replace
+            // its payload with the newer one. This keeps latency bounded
+            // and matches "publish the newest snapshot" semantics.
+            for (auto& pending : jobs) {
+                if (pending.dest == job.dest) {
+                    pending.xml = std::move(job.xml);
+                    pending.images = std::move(job.images);
+                    pending.completion = std::move(job.completion);
+                    cv.notify_one();
+                    return;
+                }
+            }
+            if (jobs.size() >= kMaxQueuedJobs) {
+                // No coalesce opportunity and queue full: drop the oldest.
+                jobs.pop_front();
+                dropped_count.fetch_add(1);
+                if (!drop_logged.exchange(true)) {
+                    LOG_WARN("LatestImageWriter queue exceeded " << kMaxQueuedJobs
+                             << " jobs; dropping oldest pending");
+                }
+            }
             jobs.push_back(std::move(job));
         }
         cv.notify_one();

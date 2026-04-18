@@ -9,6 +9,7 @@
 #include "logging.hpp"
 #include "live_image_recorder.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 #include <ismrmrd/ismrmrd.h>
@@ -59,12 +60,29 @@ LiveImageRecorder::~LiveImageRecorder()
     if (worker_.joinable()) worker_.join();
 }
 
-void LiveImageRecorder::enqueue(std::function<void()> fn)
+void LiveImageRecorder::enqueue(std::function<void()> fn, bool droppable)
 {
     {
         std::lock_guard<std::mutex> lk(mtx_);
         if (stopping_) return;
-        queue_.push_back(Job{std::move(fn)});
+        // MEDIUM #15: bound the queue. Skip the cap check if the job is
+        // non-droppable (e.g. close_scan barrier). On overflow, drop the
+        // oldest droppable job; if none exist, admit anyway (never drop
+        // the barrier).
+        if (droppable && queue_.size() >= kMaxQueuedJobs) {
+            auto it = std::find_if(queue_.begin(), queue_.end(),
+                                   [](const Job& j) { return j.droppable; });
+            if (it != queue_.end()) {
+                queue_.erase(it);
+                dropped_count_.fetch_add(1);
+                if (!drop_logged_.exchange(true)) {
+                    LOG_WARN("LiveImageRecorder queue exceeded " << kMaxQueuedJobs
+                             << " jobs in " << lane_dir_.string()
+                             << "; dropping oldest pending image");
+                }
+            }
+        }
+        queue_.push_back(Job{std::move(fn), droppable});
     }
     cv_.notify_one();
 }
@@ -94,10 +112,12 @@ void LiveImageRecorder::close_scan()
         if (stopping_) {
             done->set_value();
         } else {
+            // MEDIUM #15: close_scan is a barrier; mark non-droppable so the
+            // bounded-queue path never removes it.
             queue_.push_back(Job{[this, done] {
                 close_scan_on_worker();
                 done->set_value();
-            }});
+            }, /*droppable=*/false});
         }
     }
     cv_.notify_one();

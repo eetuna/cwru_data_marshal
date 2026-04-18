@@ -171,6 +171,19 @@ if(BUILD_TESTING)
   target_include_directories(test_wire_guards PRIVATE include)
   add_test(NAME test_wire_guards COMMAND test_wire_guards)
 
+  # MEDIUM #14/#15: bounded queues for latest + live writers.
+  add_executable(test_bounded_queues
+    tests/test_bounded_queues.cpp
+    src/mrd_sink.cpp
+    src/dump_recorder.cpp
+    src/live_image_recorder.cpp
+    src/latest_image_writer.cpp
+  )
+  target_link_libraries(test_bounded_queues PRIVATE
+    Catch2::Catch2WithMain Boost::system Threads::Threads
+    nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target})
+  add_test(NAME test_bounded_queues COMMAND test_bounded_queues)
+
   # MEDIUM #11: HTTP body_limit must reject oversized bodies during read.
   add_executable(test_http_body_limit tests/test_http_body_limit.cpp)
   target_link_libraries(test_http_body_limit PRIVATE
