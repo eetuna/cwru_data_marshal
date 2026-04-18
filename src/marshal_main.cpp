@@ -188,20 +188,37 @@ static std::vector<uint8_t> build_recon_failure_image_body()
 
 namespace {
 
+// LOW/NIT #19: checked CLI parse. Rejects trailing garbage and out-of-range
+// values (std::stoi throws on invalid input — we catch and treat as false).
+bool checked_parse_uint16(const std::string& s, uint16_t& out) {
+    try {
+        size_t pos = 0;
+        long v = std::stol(s, &pos);
+        if (pos != s.size()) return false;      // trailing non-numeric
+        if (v < 0 || v > 65535) return false;
+        out = static_cast<uint16_t>(v);
+        return true;
+    } catch (...) { return false; }
+}
+
+bool checked_parse_size(const std::string& s, std::size_t& out) {
+    try {
+        size_t pos = 0;
+        unsigned long long v = std::stoull(s, &pos);
+        if (pos != s.size()) return false;
+        out = static_cast<std::size_t>(v);
+        return true;
+    } catch (...) { return false; }
+}
+
 bool parse_host_port(const std::string& input, std::string& host, uint16_t& port)
 {
     auto p = input.find(':');
     if (p == std::string::npos || p == 0 || p + 1 >= input.size())
         return false;
     host = input.substr(0, p);
-    try {
-        int parsed = std::stoi(input.substr(p + 1));
-        if (parsed <= 0 || parsed > 65535) return false;
-        port = static_cast<uint16_t>(parsed);
-        return true;
-    } catch (...) {
-        return false;
-    }
+    // LOW/NIT #19: reject trailing garbage in the port field.
+    return checked_parse_uint16(input.substr(p + 1), port) && port != 0;
 }
 
 } // namespace
@@ -268,22 +285,36 @@ int main(int argc, char** argv)
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
+        // LOW/NIT #19: checked parsing for every numeric flag.
         if (a == "--http" && i + 1 < argc)
             http_bind = argv[++i];
-        else if (a == "--ws-port" && i + 1 < argc)
-            ws_port = static_cast<uint16_t>(std::stoi(argv[++i]));
-        else if (a == "--mrd-port" && i + 1 < argc)
-            mrd_port = static_cast<uint16_t>(std::stoi(argv[++i]));
-        else if (a == "--recon-host" && i + 1 < argc)
+        else if (a == "--ws-port" && i + 1 < argc) {
+            if (!checked_parse_uint16(argv[++i], ws_port)) {
+                LOG_ERROR("--ws-port: invalid value '" << argv[i] << "'");
+                return 1;
+            }
+        } else if (a == "--mrd-port" && i + 1 < argc) {
+            if (!checked_parse_uint16(argv[++i], mrd_port)) {
+                LOG_ERROR("--mrd-port: invalid value '" << argv[i] << "'");
+                return 1;
+            }
+        } else if (a == "--recon-host" && i + 1 < argc)
             recon_host = argv[++i];
-        else if (a == "--recon-port" && i + 1 < argc)
-            recon_port = static_cast<uint16_t>(std::stoi(argv[++i]));
-        else if (a == "--dump-dir" && i + 1 < argc)
+        else if (a == "--recon-port" && i + 1 < argc) {
+            if (!checked_parse_uint16(argv[++i], recon_port)) {
+                LOG_ERROR("--recon-port: invalid value '" << argv[i] << "'");
+                return 1;
+            }
+        } else if (a == "--dump-dir" && i + 1 < argc)
             dump_dir = argv[++i];
         else if (a == "--dump")
             dump_enabled = true;
-        else if (a == "--max-body-size" && i + 1 < argc)
-            max_body_size = std::stoull(argv[++i]);
+        else if (a == "--max-body-size" && i + 1 < argc) {
+            if (!checked_parse_size(argv[++i], max_body_size)) {
+                LOG_ERROR("--max-body-size: invalid value '" << argv[i] << "'");
+                return 1;
+            }
+        }
     }
 
     std::string http_host;

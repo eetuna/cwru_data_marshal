@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -102,6 +103,12 @@ bool parse_latest_wire_image(const std::vector<uint8_t>& image,
     const size_t pixel_off = attr_off + static_cast<size_t>(attr_len);
     parsed.attributes.assign(reinterpret_cast<const char*>(image.data() + attr_off),
                              static_cast<size_t>(attr_len));
+    // LOW/NIT #20: attribute_string_len is uint32_t. Reject attributes
+    // ≥ 4 GiB rather than silently truncating. Wire_guards already caps at
+    // 16 MiB upstream; this is a defense in depth.
+    if (parsed.attributes.size() > std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
     parsed.header.attribute_string_len = static_cast<uint32_t>(parsed.attributes.size());
     parsed.pixel_data = image.data() + pixel_off;
     parsed.pixel_bytes = image.size() - pixel_off;

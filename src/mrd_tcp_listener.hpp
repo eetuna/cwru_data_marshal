@@ -572,7 +572,9 @@ private:
                 case MRD_MESSAGE_ISMRMRD_WAVEFORM: {
                     ISMRMRD::WaveformHeader whdr;
                     if (!read_exact(*sock, &whdr, WAVEFORM_HEADER_BYTES)) goto done;
-                    size_t data_bytes = size_t(whdr.number_of_samples) * whdr.channels * 4;
+                    // LOW/NIT #21: use sizeof(uint32_t) to match marshal_http.hpp:95
+                    // and make any future wire-format change stand out.
+                    size_t data_bytes = size_t(whdr.number_of_samples) * whdr.channels * sizeof(uint32_t);
                     std::vector<uint8_t> wf_data(data_bytes);
                     if (!read_exact(*sock, wf_data.data(), data_bytes)) goto done;
 
