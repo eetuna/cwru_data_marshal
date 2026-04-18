@@ -377,3 +377,88 @@ typically ≤ 3); `number_of_samples` is `uint16_t`. Max product ≤
 4. Add a return value / exception from `dump_recorder::enqueue` so the
    caller can decide to block, drop, or escalate (HIGH #7).
 5. Reassess MEDIUM / LOW items after the above land.
+
+---
+
+## Docs audit — 2026-04-18
+
+Same verification-pass method as the code audit above. Round 1: two
+parallel auditors (one for umbrella `docs/`, one for inner worktree
+docs). Round 2: independent verification agent per flagged doc.
+
+**Scope:** all non-archive docs in umbrella `docs/` and inner worktree
+docs/.
+
+### Umbrella `docs/` (15 files)
+
+| Doc                                                        | Status |
+|------------------------------------------------------------|--------|
+| README.md (repo root)                                      | KEEP   |
+| docs/API_REFERENCE.md                                      | KEEP   |
+| docs/ARCHITECTURE.md                                       | KEEP   |
+| **docs/DEVELOPER_GUIDE.md**                                | **UPDATE** |
+| docs/DUMP_QUICK_START.md                                   | KEEP   |
+| docs/EXTERNAL_CLIENT_GUIDE.md                              | KEEP   |
+| docs/MANUAL_TERMINAL_SETUP.md                              | KEEP   |
+| docs/MRI_LATEST_IMAGE_DIAGNOSIS_AND_OPTIONS_2026-04-16.md  | KEEP   |
+| docs/MRI_LATEST_IMAGE_EXECUTIVE_SUMMARY_2026-04-16.md      | KEEP   |
+| docs/MRI_LATEST_IMAGE_EXPERIMENTS_AUDIT_2026-04-17.md      | KEEP   |
+| docs/MRI_MARSHAL_BUG_AUDIT_2026-04-18.md                   | KEEP (this doc) |
+| docs/MRI_MARSHAL_PROTOCOL_CONTRACT.md                      | KEEP   |
+| docs/MRI_OPTION6_PIPELINE_REFACTOR_PLAN_2026-04-18.md      | KEEP   |
+| docs/QUICK_START.md                                        | KEEP   |
+| docs/RECONSTRUCTION_INTERFACE.md                           | KEEP   |
+
+### Inner worktree (`.worktrees/mri_data_marshal/`) — 4 files
+
+| Doc                                          | Status |
+|----------------------------------------------|--------|
+| README.md                                    | KEEP   |
+| docs/README.md                               | KEEP   |
+| .devcontainer/README.devcontainer.md         | KEEP   |
+| clients/mocks/README.md                      | KEEP   |
+
+### Confirmed action: `docs/DEVELOPER_GUIDE.md` update
+
+**Issue:** stale branch architecture. Two inconsistent sections in the
+same file.
+
+Lines 9-12 (branch diagram):
+```
+main                          <- Umbrella branch
+├── mri-data-marshal          <- MRI marshal server + clients
+└── robot-data-marshal        <- Robot marshal server + clients
+```
+
+Lines 24-26 (table, contradicts diagram):
+```
+| main                       | Docs, Dockerfiles, compose files, scripts |
+| audit/live-atomic-rename   | MRI marshal server (C++) ...              |
+| robot-data-marshal         | Robot marshal server (C++) ...            |
+```
+
+Current git state (verified via `git branch` + `git worktree list`):
+- **Active umbrella:** `audit/mri-marshal-protocol-fixes-umbrella`
+- **Inner worktree on:** `perf/latest-bulk-prealloc` (was `audit/live-atomic-rename`)
+- Experiment branches: `perf/latest-{image-shared-buffers,file-reuse,slot-reuse,bulk-prealloc}`
+- `main`, `mri-data-marshal`, `robot-data-marshal` branches still exist but are not the current workflow
+
+**Recommended action:** rewrite lines 8-26 of DEVELOPER_GUIDE.md to reflect
+the `audit/*` umbrella pattern + experiment branches in worktrees, and
+mark the old `main` / `mri-data-marshal` / `robot-data-marshal` layout as
+historical context.
+
+### False positive dropped in verification
+
+- **`.devcontainer/README.devcontainer.md`** was flagged as "stale"
+  (80 days old, 9 lines). Verified: content matches
+  `.devcontainer/devcontainer.json` exactly (`context="."`,
+  `dockerfile="Dockerfile"`). Short + old ≠ stale when content is
+  factually correct. No action.
+
+### Cross-document consistency
+
+No contradictions found between protocol/architecture/API docs. No
+references to SWMR (correctly absent — last SWMR branch is
+`feature/kspace-streamer-real-recon`, tip 2026-04-09). No archive docs
+referenced as authoritative by non-archive docs.
