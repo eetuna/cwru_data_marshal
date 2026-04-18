@@ -360,7 +360,15 @@ private:
     bool read_len_prefixed_body(std::vector<uint8_t>& body) {
         uint32_t len = 0;
         if (!read_exact(&len, 4)) return false;
-        body.resize(4 + len);
+        // MEDIUM #12: cap the length so a hostile recon can't force a
+        // multi-GB allocation before we've even typed the message.
+        size_t body_size = 0;
+        if (!validate_len_prefix_body(len, body_size)) {
+            LOG_WARN("Recon len-prefixed body rejected: len "
+                     << len << " exceeds cap");
+            return false;
+        }
+        body.resize(body_size);
         std::memcpy(body.data(), &len, 4);
         if (len > 0 && !read_exact(body.data() + 4, len)) return false;
         return true;

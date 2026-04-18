@@ -352,7 +352,12 @@ private:
                 case MRD_MESSAGE_CONFIG_TEXT: {
                     uint32_t len = 0;
                     if (!read_exact(*sock, &len, 4)) goto done;
-                    std::vector<uint8_t> body(4 + len);
+                    size_t body_size = 0;
+                    if (!validate_len_prefix_body(len, body_size)) {
+                        LOG_WARN("CONFIG_TEXT rejected: len " << len << " exceeds cap");
+                        goto done;
+                    }
+                    std::vector<uint8_t> body(body_size);
                     std::memcpy(body.data(), &len, 4);
                     if (len > 0 && !read_exact(*sock, body.data() + 4, len)) goto done;
                     const auto* payload = body.data() + 4;
@@ -376,7 +381,12 @@ private:
                 case MRD_MESSAGE_METADATA_XML_TEXT: {
                     uint32_t len = 0;
                     if (!read_exact(*sock, &len, 4)) goto done;
-                    std::vector<uint8_t> body(4 + len);
+                    size_t body_size = 0;
+                    if (!validate_len_prefix_body(len, body_size)) {
+                        LOG_WARN("METADATA_XML_TEXT rejected: len " << len << " exceeds cap");
+                        goto done;
+                    }
+                    std::vector<uint8_t> body(body_size);
                     std::memcpy(body.data(), &len, 4);
                     if (len > 0 && !read_exact(*sock, body.data() + 4, len)) goto done;
                     const auto* payload = body.data() + 4;
@@ -445,7 +455,12 @@ private:
                 case MRD_MESSAGE_TEXT: {
                     uint32_t len = 0;
                     if (!read_exact(*sock, &len, 4)) goto done;
-                    std::vector<uint8_t> body(4 + len);
+                    size_t body_size = 0;
+                    if (!validate_len_prefix_body(len, body_size)) {
+                        LOG_WARN("TEXT rejected: len " << len << " exceeds cap");
+                        goto done;
+                    }
+                    std::vector<uint8_t> body(body_size);
                     std::memcpy(body.data(), &len, 4);
                     if (len > 0 && !read_exact(*sock, body.data() + 4, len)) goto done;
                     std::string text(reinterpret_cast<const char*>(body.data() + 4), len);
