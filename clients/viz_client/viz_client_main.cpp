@@ -261,13 +261,10 @@ static bool read_latest_h5(const std::string& path, std::vector<SliceImage>& sli
         if (n == 0 || n > 256) return false;
 
         for (uint32_t i = 0; i < n; ++i) {
-            uint16_t data_type = 0;
-            if (!read_image_data_type(path, i, data_type)) {
-                std::cerr << "viz failed to read image header for index " << i << "\n";
-                return false;
-            }
-            if (!read_dataset_image(ds, i, data_type, slices_out)) {
-                std::cerr << "viz unsupported data_type: " << data_type << "\n";
+            ISMRMRD::Image<float> probe;
+            ds.readImage("image_0", i, probe);
+            if (!read_dataset_image(ds, i, probe.getHead().data_type, slices_out)) {
+                std::cerr << "viz unsupported data_type: " << probe.getHead().data_type << "\n";
             }
         }
     } catch (const std::exception& e) {

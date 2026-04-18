@@ -32,6 +32,7 @@
 #include "mrd_io.hpp"
 #include "mrd_tcp_listener.hpp"
 #include "recon_forwarder.hpp"
+#include "session_registry.hpp"
 
 namespace fs = std::filesystem;
 
@@ -214,13 +215,13 @@ namespace http  = beast::http;
 namespace net   = boost::asio;
 using tcp = net::ip::tcp;
 
-static void http_session(tcp::socket sock, MarshalState& state)
+static void http_session(std::shared_ptr<tcp::socket> sock, MarshalState& state)
 {
     try {
         beast::flat_buffer buffer;
         for (;;) {
             http::request<http::string_body> req;
-            http::read(sock, buffer, req);
+            http::read(*sock, buffer, req);
 
             http::response<http::string_body> res;
             bool got_response = false;
@@ -231,12 +232,13 @@ static void http_session(tcp::socket sock, MarshalState& state)
             });
 
             if (got_response) {
-                http::write(sock, res);
+                http::write(*sock, res);
                 if (!res.keep_alive()) break;
             }
         }
     } catch (const beast::system_error& e) {
-        if (e.code() != http::error::end_of_stream)
+        if (e.code() != http::error::end_of_stream &&
+            e.code() != net::error::operation_aborted)
             LOG_WARN("HTTP session error: " << e.what());
     } catch (const std::exception& e) {
         LOG_WARN("HTTP session error: " << e.what());
@@ -374,6 +376,10 @@ int main(int argc, char** argv)
     tcp::acceptor acceptor{ioc, {net::ip::make_address(http_host), http_port}};
     acceptor.set_option(net::socket_base::reuse_address(true));
 
+    // Tracked HTTP sessions so shutdown can cancel sockets + join threads
+    // before MarshalState is destroyed. See MRI_MARSHAL_BUGS_FINAL #1-3.
+    mrd::SessionRegistry http_sessions;
+
     // MRD TCP listener for real scanner (--mrd-port)
     std::unique_ptr<mrd::MrdTcpListener> mrd_listener;
     if (mrd_port > 0) {
@@ -393,25 +399,56 @@ int main(int argc, char** argv)
         LOG_INFO("WebSocket server on port " << ws_port);
     }
 
-    // Accept loop (spawn thread per connection)
+    // Accept loop: each session is tracked so shutdown can cancel + join.
     std::function<void()> do_accept;
     do_accept = [&]() {
         acceptor.async_accept([&](beast::error_code ec, tcp::socket sock) {
             if (!ec) {
-                std::thread([s = std::move(sock), &state]() mutable {
-                    http_session(std::move(s), state);
-                }).detach();
+                if (http_sessions.shutting_down()) {
+                    boost::system::error_code ignore;
+                    sock.shutdown(tcp::socket::shutdown_both, ignore);
+                    sock.close(ignore);
+                } else {
+                    auto sock_ptr = std::make_shared<tcp::socket>(std::move(sock));
+                    // Pre-register with a placeholder id; capture by value into the
+                    // thread so it can unregister itself on normal exit.
+                    std::shared_ptr<uint64_t> session_id = std::make_shared<uint64_t>(0);
+                    mrd::TrackedSession ts;
+                    ts.cancel = [sock_ptr]() {
+                        boost::system::error_code ignore;
+                        sock_ptr->shutdown(tcp::socket::shutdown_both, ignore);
+                        sock_ptr->close(ignore);
+                    };
+                    ts.thread = std::thread([sock_ptr, &state, session_id, &http_sessions]() mutable {
+                        http_session(sock_ptr, state);
+                        http_sessions.unregister_session(*session_id);
+                    });
+                    *session_id = http_sessions.register_session(std::move(ts));
+                    if (*session_id == 0) {
+                        // Registry already shutting down — cancel immediately.
+                        boost::system::error_code ignore;
+                        sock_ptr->shutdown(tcp::socket::shutdown_both, ignore);
+                        sock_ptr->close(ignore);
+                    }
+                }
             }
-            do_accept();
+            if (!http_sessions.shutting_down()) do_accept();
         });
     };
     do_accept();
 
-    // Graceful shutdown
+    // Graceful shutdown. Order matters:
+    //   1. stop accepting new connections (HTTP + MRD)
+    //   2. cancel + join in-flight sessions so they stop touching MarshalState
+    //   3. stop the recon forwarder (joins its reader thread)
+    //   4. flush live lanes + close scan state
+    //   5. stop the io_context
     net::signal_set signals(ioc, SIGINT, SIGTERM);
     signals.async_wait([&](const boost::system::error_code&, int signum) {
         LOG_INFO("Received signal " << signum << ", shutting down...");
         acceptor.close();
+        if (mrd_listener) mrd_listener->stop();
+        http_sessions.shutdown_and_join();
         if (forwarder) forwarder->stop();
         mrd::flush_all_live_lanes(state);
         state.close_scan();
@@ -419,6 +456,11 @@ int main(int argc, char** argv)
     });
 
     ioc.run();
+
+    // In case ioc.run() returned without the signal handler firing (e.g.
+    // acceptor error), still drain HTTP sessions before state destructs.
+    http_sessions.shutdown_and_join();
+    if (mrd_listener) mrd_listener->stop();
 
     LOG_INFO("Server stopped");
     return 0;

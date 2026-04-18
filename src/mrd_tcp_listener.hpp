@@ -46,6 +46,7 @@
 #include "mrd_stream_tags.hpp"
 #include "mrd_type_detector.hpp"
 #include "recon_forwarder.hpp"
+#include "session_registry.hpp"
 
 namespace net = boost::asio;
 using tcp = net::ip::tcp;
@@ -63,6 +64,33 @@ public:
         acceptor_.set_option(net::socket_base::reuse_address(true));
         LOG_INFO("MRD TCP listener on port " << port);
         do_accept();
+    }
+
+    ~MrdTcpListener() {
+        stop();
+    }
+
+    // Called on graceful shutdown. Closes the acceptor + any active scanner
+    // socket, then joins the session thread. Safe to call multiple times.
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lk(scanner_mtx_);
+            if (stopping_) {
+                // Already stopped; still make sure sessions are joined.
+            } else {
+                stopping_ = true;
+            }
+        }
+        boost::system::error_code ignore;
+        acceptor_.close(ignore);
+        {
+            std::lock_guard<std::mutex> lk(scanner_mtx_);
+            if (scanner_socket_) {
+                scanner_socket_->shutdown(tcp::socket::shutdown_both, ignore);
+                scanner_socket_->close(ignore);
+            }
+        }
+        sessions_.shutdown_and_join();
     }
 
     // Push a recon MRD message back to the scanner over the existing scan socket.
@@ -98,6 +126,8 @@ private:
     mutable std::mutex scanner_mtx_;
     std::shared_ptr<tcp::socket> scanner_socket_;
     std::atomic<bool> session_active_{false};
+    bool stopping_{false};           // protected by scanner_mtx_
+    SessionRegistry sessions_;
 
     static bool write_exact_fd(int fd, const void* buf, size_t n) {
         const auto* p = static_cast<const uint8_t*>(buf);
@@ -120,14 +150,40 @@ private:
                 LOG_INFO("Scanner connected from " << sock.remote_endpoint());
                 {
                     std::lock_guard<std::mutex> lk(scanner_mtx_);
-                    scanner_socket_ = std::make_shared<tcp::socket>(std::move(sock));
+                    if (stopping_) {
+                        boost::system::error_code ignore;
+                        sock.shutdown(tcp::socket::shutdown_both, ignore);
+                        sock.close(ignore);
+                    } else {
+                        scanner_socket_ = std::make_shared<tcp::socket>(std::move(sock));
+                    }
                 }
-                auto socket_ptr = scanner_socket_;
-                std::thread([this, socket_ptr]() {
-                    handle_session(socket_ptr);
-                }).detach();
+                if (!sessions_.shutting_down()) {
+                    auto socket_ptr = scanner_socket_;
+                    std::shared_ptr<uint64_t> session_id = std::make_shared<uint64_t>(0);
+                    TrackedSession ts;
+                    ts.cancel = [socket_ptr]() {
+                        if (!socket_ptr) return;
+                        boost::system::error_code ignore;
+                        socket_ptr->shutdown(tcp::socket::shutdown_both, ignore);
+                        socket_ptr->close(ignore);
+                    };
+                    ts.thread = std::thread([this, socket_ptr, session_id]() {
+                        handle_session(socket_ptr);
+                        sessions_.unregister_session(*session_id);
+                    });
+                    *session_id = sessions_.register_session(std::move(ts));
+                    if (*session_id == 0) {
+                        ts.cancel();  // shutting down, just close
+                    }
+                }
             }
-            do_accept();
+            // Re-arm only if still accepting
+            {
+                std::lock_guard<std::mutex> lk(scanner_mtx_);
+                if (stopping_) return;
+            }
+            if (acceptor_.is_open()) do_accept();
         });
     }
 
