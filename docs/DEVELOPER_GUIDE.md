@@ -7,12 +7,26 @@ How the repository is organized, how to work with branches and worktrees, and ho
 ## Branch Architecture
 
 ```
-main                          <- Umbrella branch (docs, Docker configs, scripts - no application code)
-├── mri-data-marshal          <- MRI marshal server + MRI clients (image streamer, viz, k-space)
-└── robot-data-marshal        <- Robot marshal server + robot clients (catheter, controller, planning)
+audit/mri-marshal-protocol-fixes-umbrella   <- active umbrella (docs, Dockerfiles, scripts, compose)
+├── audit/live-atomic-rename                <- MRI marshal baseline (v0 snapshot at 837a101)
+│   ├── perf/latest-image-shared-buffers    <- latest-image experiment #1 (bounded backpressure)
+│   ├── perf/latest-file-reuse              <- latest-image experiment #2
+│   ├── perf/latest-slot-reuse              <- latest-image experiment #3
+│   └── perf/latest-bulk-prealloc           <- latest-image experiment #4 (benchmark winner)
+└── robot_data_marshal_with_catheter_system_components  <- Robot marshal + robot clients
 ```
 
-`main` does **not** contain the marshal server source code or any client code. It is an umbrella/orchestration branch that holds:
+Active fix branches (bug-audit follow-up 2026-04-18):
+- `fix/marshal-bug-audit-2026-04-18` on umbrella: compose / docs / scripts edits
+- `fix/marshal-source-2026-04-18` on inner worktree: source fixes
+
+**Historical note.** An older layout named `main` as the umbrella and
+`mri-data-marshal` / `robot-data-marshal` as the domain branches. Those
+branches still exist (see `git branch -a`) but are no longer the active
+development targets.
+
+The umbrella does **not** contain the marshal server source code or any
+client code. It holds:
 - Documentation (`docs/`, `README.md`)
 - Dockerfiles (`docker/`)
 - Docker Compose files (`docker-compose.*.yml`)
@@ -21,14 +35,14 @@ main                          <- Umbrella branch (docs, Docker configs, scripts 
 
 | Branch | What it contains | Who works on it |
 |--------|-----------------|-----------------|
-| `main` | Docs, Dockerfiles, compose files, scripts (no source code) | Everyone (shared) |
-| `audit/live-atomic-rename` | MRI marshal server (C++), streamers, viz client, pose client | MRI team |
-| `robot-data-marshal` | Robot marshal server (C++), catheter tracking, controller, planning, front-end, surface tracking | Robot team |
+| `audit/mri-marshal-protocol-fixes-umbrella` | Docs, Dockerfiles, compose files, scripts (no source code) | Everyone (shared) |
+| `audit/live-atomic-rename` / `perf/latest-*` | MRI marshal server (C++), streamers, viz client, pose client | MRI team |
+| `robot_data_marshal_with_catheter_system_components` | Robot marshal server (C++), catheter tracking, controller, planning, front-end, surface tracking | Robot team |
 
 **Rules:**
-- Docs, Dockerfiles, and scripts go into `main`, then merge `main` into domain branches
-- Domain branches never merge back into `main` -- they only diverge with their own code
-- New domain (e.g. ultrasound) = new branch off `main`
+- Docs, Dockerfiles, and scripts go into the umbrella, then merge into domain branches
+- Domain branches never merge back into the umbrella -- they only diverge with their own code
+- New domain (e.g. ultrasound) = new branch off the umbrella
 
 ---
 

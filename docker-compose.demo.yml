@@ -45,9 +45,9 @@ services:
       - /session-data
       - --dump
       - --recon-host
-      - ${DUMP_RECON_HOST-mock-recon}
+      - ${DUMP_RECON_HOST:-mock-recon}
       - --recon-port
-      - ${DUMP_RECON_PORT-9002}
+      - ${DUMP_RECON_PORT:-9002}
     volumes:
       - ${SESSION_DATA_DIR:-./session-data}:/session-data
     ports:
@@ -120,7 +120,7 @@ services:
   kspace-streamer:
     image: cwru/kspace-streamer:latest
     container_name: cwru-kspace-streamer
-    command: ["./build/kspace_streamer", "--host", "mri-marshal", "--port", "9100", "--ecg", "--interval", "${KSPACE_INTERVAL:-0.5}", "--slices", "${KSPACE_SLICES:-5}"]
+    command: ["./build/kspace_streamer", "--host", "mri-marshal", "--port", "9100", "--ecg", "--interval", "${KSPACE_INTERVAL:-0.033}", "--slices", "${KSPACE_SLICES:-5}"]
     depends_on:
       mri-marshal:
         condition: service_healthy
@@ -130,7 +130,7 @@ services:
   kspace-streamer-dump:
     image: cwru/kspace-streamer:latest
     container_name: cwru-kspace-streamer-dump
-    command: ["./build/kspace_streamer", "--host", "mri-marshal-dump", "--port", "9100", "--ecg", "--interval", "${KSPACE_INTERVAL:-0.5}", "--slices", "${KSPACE_SLICES:-5}"]
+    command: ["./build/kspace_streamer", "--host", "mri-marshal-dump", "--port", "9100", "--ecg", "--interval", "${KSPACE_INTERVAL:-0.033}", "--slices", "${KSPACE_SLICES:-5}"]
     depends_on:
       mri-marshal-dump:
         condition: service_healthy
