@@ -243,7 +243,9 @@ void DumpRecorder::append_recon_image(std::vector<uint8_t> body)
         uint64_t attr_len = 0;
         std::memcpy(&attr_len, body.data() + IMAGE_HEADER_BYTES, sizeof(uint64_t));
         const size_t attr_off = IMAGE_HEADER_BYTES + sizeof(uint64_t);
-        if (body.size() < attr_off + attr_len) return;
+        // MEDIUM #13: overflow-safe bound check.
+        if (body.size() < attr_off) return;
+        if (attr_len > body.size() - attr_off) return;
         const size_t pixel_off = attr_off + static_cast<size_t>(attr_len);
         ensure_recon_sink_on_worker();
         if (!recon_sink_) return;

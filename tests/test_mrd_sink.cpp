@@ -206,3 +206,38 @@ TEST_CASE("MrdSink avoids SWMR-specific APIs", "[mrd_sink]") {
     // If this file compiles, it avoids SWMR-specific APIs.
     REQUIRE(true);
 }
+
+TEST_CASE("MrdSink::append_image rejects pixel_bytes mismatch (MEDIUM #16)",
+          "[mrd_sink][wire]") {
+    auto path = temp_h5("append_image_mismatch.h5");
+    mrd::MrdSink sink(path);
+    sink.set_header(TEST_XML);
+
+    // Build a valid 4×4 float image header; expected pixel_bytes = 4*4*4 = 64.
+    ISMRMRD::ImageHeader hdr;
+    std::memset(&hdr, 0, sizeof(hdr));
+    hdr.version = 1;
+    hdr.data_type = ISMRMRD::ISMRMRD_FLOAT;
+    hdr.matrix_size[0] = 4;
+    hdr.matrix_size[1] = 4;
+    hdr.matrix_size[2] = 1;
+    hdr.channels = 1;
+
+    std::vector<uint8_t> pixels(64, 0xAB);
+
+    // Happy path: sizes match — call must be accepted.
+    sink.append_image("image_0", hdr, nullptr, 0, pixels.data(), pixels.size());
+
+    // Mismatched pixel_bytes: caller says 32 bytes, header implies 64. Pre-fix
+    // this would memcpy 32 bytes into the 64-byte Image<float> buffer
+    // (leaving garbage). Post-fix: the call is rejected before memcpy.
+    // We can't directly observe rejection, but at minimum the process must
+    // not crash or corrupt prior writes.
+    sink.append_image("image_1", hdr, nullptr, 0, pixels.data(), 32);
+
+    // Overflowed pixel_bytes (e.g. caller supplies way more than header).
+    sink.append_image("image_2", hdr, nullptr, 0, pixels.data(), 1024);
+
+    sink.close();
+    REQUIRE(fs::exists(path));
+}

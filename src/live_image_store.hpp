@@ -62,11 +62,16 @@ inline bool parse_wire_image(const uint8_t* data, size_t size, ParsedWireImage& 
     uint64_t attr_len = 0;
     std::memcpy(&attr_len, data + IMAGE_HEADER_BYTES, sizeof(uint64_t));
     const size_t attr_off = IMAGE_HEADER_BYTES + sizeof(uint64_t);
-    if (size < attr_off + attr_len) return false;
+    // MEDIUM #13: `attr_off + attr_len` could wrap on malicious input. Use
+    // the overflow-safe form: size must be >= attr_off, and attr_len must
+    // not exceed the remaining bytes.
+    if (size < attr_off) return false;
+    if (attr_len > size - attr_off) return false;
+    const size_t attr_len_s = static_cast<size_t>(attr_len);
     out.attr = reinterpret_cast<const char*>(data + attr_off);
-    out.attr_len = static_cast<size_t>(attr_len);
-    out.pixels = data + attr_off + static_cast<size_t>(attr_len);
-    out.pixel_bytes = size - (attr_off + static_cast<size_t>(attr_len));
+    out.attr_len = attr_len_s;
+    out.pixels = data + attr_off + attr_len_s;
+    out.pixel_bytes = size - attr_off - attr_len_s;
     return true;
 }
 

@@ -9,6 +9,7 @@
 #include "logging.hpp"
 #include "mrd_sink.hpp"
 #include "mrd_stream_tags.hpp"
+#include "wire_guards.hpp"
 
 #include <cerrno>
 #include <cstring>
@@ -109,6 +110,24 @@ void MrdSink::append_image(const std::string& varname, const ISMRMRD::ImageHeade
 {
     std::lock_guard<std::mutex> lk(mtx_);
     if (!dataset_) return;
+
+    // MEDIUM #16: recompute expected pixel_bytes from the header and reject
+    // if it doesn't match the caller-supplied pixel_bytes. Pre-fix this
+    // function trusted both inputs, so a caller with an overflowed
+    // pixel_bytes computation could memcpy past the Image<T> buffer.
+    size_t expected_pixel_bytes = 0;
+    if (!compute_pixel_bytes(hdr.matrix_size[0], hdr.matrix_size[1],
+                             hdr.matrix_size[2], hdr.channels,
+                             ISMRMRD::ismrmrd_sizeof_data_type(hdr.data_type),
+                             expected_pixel_bytes)) {
+        LOG_WARN("append_image rejected: invalid header dimensions");
+        return;
+    }
+    if (expected_pixel_bytes != pixel_bytes) {
+        LOG_WARN("append_image rejected: pixel_bytes mismatch (caller "
+                 << pixel_bytes << ", header implies " << expected_pixel_bytes << ")");
+        return;
+    }
 
     // Dispatch on data_type to construct the correctly-typed Image<T>
     switch (hdr.data_type) {

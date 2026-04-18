@@ -17,6 +17,7 @@
 #include <ismrmrd/ismrmrd.h>
 
 #include "logging.hpp"
+#include "wire_guards.hpp"
 #include "mrd_sink.hpp"
 #include "mrd_stream_tags.hpp"
 
@@ -94,7 +95,9 @@ bool parse_latest_wire_image(const std::vector<uint8_t>& image,
     uint64_t attr_len = 0;
     std::memcpy(&attr_len, image.data() + IMAGE_HEADER_BYTES, sizeof(uint64_t));
     const size_t attr_off = IMAGE_HEADER_BYTES + sizeof(uint64_t);
-    if (image.size() < attr_off + attr_len) return false;
+    // MEDIUM #13: overflow-safe bound check.
+    if (image.size() < attr_off) return false;
+    if (attr_len > image.size() - attr_off) return false;
 
     const size_t pixel_off = attr_off + static_cast<size_t>(attr_len);
     parsed.attributes.assign(reinterpret_cast<const char*>(image.data() + attr_off),
@@ -339,8 +342,16 @@ bool write_latest_image_h5_file_bulk(const std::filesystem::path& path,
     attribute_ptrs.reserve(parsed_images.size());
 
     const size_t per_image_bytes = parsed_images.front().pixel_bytes;
+    // MEDIUM #17: checked multiplication for the aggregate buffer. Prior
+    // code computed per_image_bytes * count unchecked; an overflowed
+    // product would resize to a tiny buffer and the following memcpys
+    // would overrun it.
+    size_t aggregate_bytes = 0;
+    if (!checked_mul(per_image_bytes, parsed_images.size(), aggregate_bytes)) {
+        throw std::runtime_error("Latest H5 bulk write: pixel buffer size overflow");
+    }
     std::vector<uint8_t> pixel_bytes;
-    pixel_bytes.resize(per_image_bytes * parsed_images.size());
+    pixel_bytes.resize(aggregate_bytes);
 
     size_t pixel_offset = 0;
     for (const auto& image : parsed_images) {

@@ -27,7 +27,9 @@ bool append_wire_image(MrdSink& sink, const uint8_t* data, size_t size)
     uint64_t attr_len = 0;
     std::memcpy(&attr_len, data + IMAGE_HEADER_BYTES, sizeof(uint64_t));
     const size_t attr_off = IMAGE_HEADER_BYTES + sizeof(uint64_t);
-    if (size < attr_off + attr_len) return false;
+    // MEDIUM #13: overflow-safe bound check.
+    if (size < attr_off) return false;
+    if (attr_len > size - attr_off) return false;
     const size_t pixel_off = attr_off + static_cast<size_t>(attr_len);
 
     sink.append_image("image_" + std::to_string(hdr->image_series_index),
