@@ -7,8 +7,8 @@ captures the PR description we would post when opening the merge.
 
 | Branch | Parent | Tip | Scope |
 |---|---|---|---|
-| `fix/marshal-source-2026-04-18` | `perf/latest-bulk-prealloc` @ `1822829` | `f68ef4b` | Source fixes inside the MRI marshal (`.worktrees/mri_data_marshal/`) |
-| `fix/marshal-bug-audit-2026-04-18` | `audit/mri-marshal-protocol-fixes-umbrella` @ `45c6d6e` | `d0ec988` | Ops/docs edits in the umbrella |
+| `fix/marshal-source-2026-04-18` | `perf/latest-bulk-prealloc` @ `dd726e7` | `b1519b2` | Source fixes inside the MRI marshal (`.worktrees/mri_data_marshal/`) |
+| `fix/marshal-bug-audit-2026-04-18` | `audit/mri-marshal-protocol-fixes-umbrella` @ `618d1b1` | `b00c134` | Ops/docs edits in the umbrella |
 
 Both branches are intended to be reviewed together — the source fixes
 reference caps/helpers that also shape the expected ops envelope.
@@ -17,41 +17,48 @@ reference caps/helpers that also shape the expected ops envelope.
 
 Closes **all 21 source findings** and **6 ops/docs items** from
 [docs/MRI_MARSHAL_BUGS_FINAL_2026-04-18.md](MRI_MARSHAL_BUGS_FINAL_2026-04-18.md).
-Every finding has been verified PROVEN_FIXED by an independent
-parallel-agent verification pass (10 agents, 21 items). No finding
-downgraded to PARTIALLY_FIXED.
+After a codex audit (preserved in the addendum below) and a follow-up
+source commit implementing real enqueue-time backpressure for HIGH #10,
+all 21 findings are **PROVEN_FIXED**.
 
-Test suite grew from 5 binaries / 92 assertions to **12 binaries / 162
-assertions**. All pass. Bench (`scripts/bench_fps.sh DURATION=15
-KSPACE_INTERVAL=0.025`) remained at 40–45 FPS across every commit; no
-FPS regression.
+Test suite grew from 5 binaries / 92 assertions to **12 binaries / 4269
+assertions** (the expansion is driven by the HIGH #10 overflow test
+which asserts per-iteration across a 4096-job flood). All tests pass.
+Bench (`scripts/bench_fps.sh DURATION=15 KSPACE_INTERVAL=0.025`) stayed
+in the **40–45 FPS band** across every commit; no FPS regression.
+Per-commit numbers are not reproducible from repo artifacts — bench
+logs are ephemeral; check out each commit and rerun `bench_fps.sh` to
+reproduce on your host.
 
 ## Per-finding commit table
 
-### Source fixes on `fix/marshal-source-2026-04-18`
+### Source fixes on `fix/marshal-source-2026-04-18` (tip `b1519b2`)
 
 | Commit | Finding(s) | Subject |
 |---|---|---|
-| `805010c` | CRITICAL #1, #2, #3 | tracked sessions + joined shutdown; viz probe-read (the real one that commit `1822829` claimed but didn't stage) |
-| `d577343` | HIGH #4 | async scanner writer — unblocks recon reader |
-| `051ffc2` | HIGH #5, #6, #7 | checked arithmetic + caps for wire-parsed image sizes |
-| `420f2ee` | HIGH #8 | reject concurrent scanner connections |
-| `6c671b8` | HIGH #9 | gate recon_group_is_complete on header_received |
-| `bbcd683` | HIGH #10 | expose dump overflow to caller via accessors |
-| `450e4d9` | MEDIUM #11 | set Beast `body_limit` on parser before `http::read` |
-| `cfe673a` | MEDIUM #12 | cap length-prefix body size before allocation |
-| `9e1d0b6` | MEDIUM #13, #16, #17 | checked arithmetic in parser/sink/bulk |
-| `37ba2c2` | MEDIUM #14, #15 | bounded queues for LatestImageWriter + LiveImageRecorder |
-| `c3b1f89` | MEDIUM #18 | log exceptions in push-message callbacks |
-| `f68ef4b` | LOW/NIT #19, #20, #21 | checked CLI parse, attr_string_len clamp, waveform notation |
+| `41d810a` | CRITICAL #1, #2, #3 | tracked sessions + joined shutdown; real viz probe-read (the one commit `dd726e7` claimed but didn't stage) |
+| `46d1df1` | HIGH #4 | async scanner writer — unblocks recon reader |
+| `a4b4a24` | HIGH #5, #6, #7 | checked arithmetic + caps for wire-parsed image sizes |
+| `04f3be9` | HIGH #8 | reject concurrent scanner connections |
+| `b94c003` | HIGH #9 | gate recon_group_is_complete on header_received |
+| `363b046` | HIGH #10 (v1) | dump overflow observability (accessors + CLOSE log) — superseded by `b1519b2` |
+| `970d799` | MEDIUM #11 | set Beast `body_limit` on parser before `http::read` |
+| `311306a` | MEDIUM #12 | cap length-prefix body size before allocation |
+| `b57d73a` | MEDIUM #13, #16, #17 | checked arithmetic in parser/sink/bulk |
+| `4f8c646` | MEDIUM #14, #15 | bounded queues for LatestImageWriter + LiveImageRecorder |
+| `99be4d6` | MEDIUM #18 | log exceptions in push-message callbacks |
+| `60e705c` | LOW/NIT #19, #20, #21 | checked CLI parse, attr_string_len clamp, waveform notation |
+| **`b1519b2`** | **HIGH #10 (v2)** | **real enqueue-time backpressure — `DumpEnqueueResult` API (post-codex)** |
 
-### Ops/docs fixes on `fix/marshal-bug-audit-2026-04-18`
+### Ops/docs fixes on `fix/marshal-bug-audit-2026-04-18` (tip `b00c134`)
 
 | Commit | Item(s) | Subject |
 |---|---|---|
-| `b3e2658` | (setup) | add `VIZ_INTERVAL`; pass `--interval` to viz-client; `KSPACE_INTERVAL` → 30 FPS |
-| `45c6d6e` | (setup) | commit outstanding audit artifacts |
-| `d0ec988` | #22, #23, R2, #24 | compose defaults, `scripts/bench_fps.sh` dedup, `DEVELOPER_GUIDE.md` refresh |
+| `9b31095` | (setup) | add `VIZ_INTERVAL`; pass `--interval` to viz-client; `KSPACE_INTERVAL` → 30 FPS |
+| `6fe2b5c` | (setup) | commit outstanding audit artifacts (codex source audit, Option 6 plan, correction note) |
+| `f15596c` | #22, #23, R2, #24 | compose defaults, `scripts/bench_fps.sh` dedup, `DEVELOPER_GUIDE.md` refresh |
+| `3f6a0b1` | (doc) | export PR description (this file) |
+| `b00c134` | (doc) | respond to codex addendum with source fix + SHA refresh |
 
 Deferred (follow-up, not blocking this PR):
 - **R1** `scripts/demo-docker.sh` ↔ `scripts/demo-persistent.sh` dedup (a real refactor, not a fix)
@@ -121,51 +128,44 @@ test_scanner_pushback              2 assertions /  2 cases   (NEW — HIGH #4)
 test_scanner_race                  3 assertions /  1 case    (NEW — HIGH #8)
 test_wire_guards                  44 assertions /  6 cases   (NEW — HIGH #5/#6/#7)
 test_recon_group_header           10 assertions /  1 case    (NEW — HIGH #9)
-test_dump_overflow                 4 assertions /  2 cases   (NEW — HIGH #10)
+test_dump_overflow              4111 assertions /  4 cases   (NEW — HIGH #10)
 test_http_body_limit               2 assertions /  2 cases   (NEW — MEDIUM #11)
 test_bounded_queues                4 assertions /  2 cases   (NEW — MEDIUM #14/#15)
 
-TOTAL                            162 assertions / 42 cases   (all pass)
+TOTAL                           4269 assertions / 44 cases   (all pass)
+Note: test_dump_overflow's high assertion count is from per-iteration
+REQUIRE inside the overflow-flood loop (codex blocker-1 fix for HIGH #10).
 ```
 
 ### Bench (at `KSPACE_INTERVAL=0.025`, 40 Hz target)
 
-| Stage | mean FPS |
-|---|---|
-| Baseline (before fixes) | 43.26 |
-| After CRITICAL #1–3 | 42.38 |
-| After HIGH #4 | 43.12 |
-| After HIGH #5–7 | 43.96 |
-| After HIGH #8 | 43.14 |
-| After HIGH #9 | 43.08 |
-| After HIGH #10 | 41.85 |
-| After MEDIUM #11 | 42.50 |
-| After MEDIUM #12 | 44.76 |
-| After MEDIUM #13/#16/#17 | 40.49 |
-| After MEDIUM #14/#15 | 44.44 |
-| After MEDIUM #18 | 42.13 |
-| After LOW/NIT #19/#20/#21 | 43.03 |
-
-No commit introduced a measurable FPS regression. Mean stays in a 40–45
-band across all 12 source-fix commits.
+Bench was run after each commit during development. Reported means stayed
+in the **40–45 FPS band** across all 12 source-fix commits plus the HIGH
+#10 v2 backpressure commit. Minimum observed was 40.49 FPS (after MEDIUM
+#13/#16/#17), maximum 44.76 FPS (after MEDIUM #12). No commit showed a
+measurable FPS regression vs the pre-fix 43.26 FPS baseline. **Exact
+per-commit numbers are not reproducible from repo artifacts alone —
+bench logs live in `/tmp/bench_fps_logs.*` and are not committed. Check
+out each commit and rerun `bench_fps.sh` to compare on your host.**
 
 ### Independent verification (agents)
 
-10 parallel read-only agents, one per finding (or per cluster), each
-given only the finding text + commit hash + instruction to read the
-post-fix source and walk the adversarial path. All 21 findings came back
-**PROVEN_FIXED** with quoted code. No residual race windows, no missed
-OOB paths.
+Multiple rounds of parallel read-only agents verified each finding
+against the actual committed source. The first round (pre-codex) marked
+all 21 PROVEN_FIXED — codex subsequently found #10 was observability-
+only, downgraded it to PARTIALLY_FIXED, and a follow-up commit
+(`b1519b2`) landed the real enqueue-time backpressure. The current state
+is all 21 PROVEN_FIXED.
 
 Notable calls:
 - **HIGH #9** race on scan close — verified: the `header_received` load
   runs inside `scan_mtx`, which also protects the close-scan reset. No
   window where an image is mis-grouped.
-- **HIGH #10** backpressure semantic — clarified: the accessors provide
-  observability, not a control channel. Runtime backpressure on
-  `DumpRecorder::enqueue` would require redesigning the enqueue return
-  type; that is out of scope. The fix lets the operator see drops
-  post-scan via `LOG_WARN` on CLOSE.
+- **HIGH #10** backpressure: now a real return-type contract. Public
+  methods on `DumpRecorder` return `DumpEnqueueResult { Accepted,
+  Dropped, Stopped }`. MRD listener logs `DUMP drop at enqueue time`
+  once per kind at the moment of drop, independent of CLOSE-time
+  summary log.
 - **MEDIUM #14** drop-vs-coalesce order — verified: coalesce check
   precedes drop-oldest, so fast producers with the same dest never
   trigger the drop path.
@@ -176,10 +176,12 @@ Notable calls:
   shutdown under in-flight requests, which is the specific path CRITICAL
   #1–3 fix. Shutdown correctness is argued from call-graph inspection
   (joined thread order); a race stress test remains a follow-up.
-- `HIGH #10` is observability-only. If the live MRD path's rate
-  genuinely exceeds what the dump writer can sustain, records will still
-  drop — operators must read logs or check `dump_complete="false"` on
-  close.
+- `HIGH #10` now returns a `DumpEnqueueResult` at enqueue-time
+  (`Accepted` / `Dropped` / `Stopped`) — callers see drops at the moment
+  they happen. If the live MRD path's rate genuinely exceeds what the
+  dump writer can sustain, records will still drop (that is the nature
+  of bounded queues), but callers can react in-stream. The CLOSE-time
+  summary log and `dump_complete="false"` attribute remain.
 - Frame-size caps in `wire_guards.hpp` are generous (512 MiB aggregate,
   8192 per dim, 256 channels, 16 MiB attrs). If a real MRI deployment
   legitimately exceeds those, reject logs will fire and the cap needs to
