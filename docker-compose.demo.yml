@@ -142,7 +142,7 @@ services:
   viz-client:
     image: cwru/viz-client:latest
     container_name: cwru-viz-client
-    command: ["./build/viz_client", "--http", "http://mri-marshal:8080"]
+    command: ["./build/viz_client", "--http", "http://mri-marshal:8080", "--interval", "${VIZ_INTERVAL:-0.033}"]
     environment:
       - DISPLAY=${DISPLAY:-:0}
       - XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir
