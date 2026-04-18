@@ -165,6 +165,12 @@ if(BUILD_TESTING)
     nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target} CURL::libcurl)
   add_test(NAME test_ws_client COMMAND test_ws_client)
 
+  # HIGH #5/#6/#7: wire size overflow guards.
+  add_executable(test_wire_guards tests/test_wire_guards.cpp)
+  target_link_libraries(test_wire_guards PRIVATE Catch2::Catch2WithMain)
+  target_include_directories(test_wire_guards PRIVATE include)
+  add_test(NAME test_wire_guards COMMAND test_wire_guards)
+
   # HIGH #4 regression: scanner pushback must not block the recon reader.
   add_executable(test_scanner_pushback
     tests/test_scanner_pushback.cpp

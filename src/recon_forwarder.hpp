@@ -37,6 +37,7 @@
 #include <ismrmrd/waveform.h>
 
 #include "mrd_stream_tags.hpp"
+#include "wire_guards.hpp"
 #include "logging.hpp"
 
 namespace net = boost::asio;
@@ -388,19 +389,41 @@ private:
 
         const auto* ihdr = reinterpret_cast<const ISMRMRD::ImageHeader*>(hdr_buf.data());
 
-        uint64_t attr_len = 0;
-        if (!read_exact(&attr_len, 8)) return false;
+        uint64_t attr_len_raw = 0;
+        if (!read_exact(&attr_len_raw, 8)) return false;
 
-        size_t npixels = static_cast<size_t>(ihdr->matrix_size[0])
-                       * ihdr->matrix_size[1]
-                       * std::max<uint16_t>(ihdr->matrix_size[2], 1)
-                       * std::max<uint16_t>(ihdr->channels, 1);
-        size_t pixel_bytes = npixels * ISMRMRD::ismrmrd_sizeof_data_type(ihdr->data_type);
-        size_t total = IMAGE_HEADER_BYTES + 8 + attr_len + pixel_bytes;
+        // HIGH #5/#7: validate sizes before any allocation. On recon side,
+        // unlike the scanner path, the body is resized with `total` before
+        // the attr read, so an overflowed `total` would produce a true OOB
+        // write at read_exact into body.data() + off.
+        size_t attr_len = 0;
+        if (!validate_attr_len(attr_len_raw, attr_len)) {
+            LOG_WARN("Recon image rejected: attr_len " << attr_len_raw
+                     << " exceeds cap");
+            return false;
+        }
+        size_t pixel_bytes = 0;
+        if (!compute_pixel_bytes(ihdr->matrix_size[0],
+                                 ihdr->matrix_size[1],
+                                 ihdr->matrix_size[2],
+                                 ihdr->channels,
+                                 ISMRMRD::ismrmrd_sizeof_data_type(ihdr->data_type),
+                                 pixel_bytes)) {
+            LOG_WARN("Recon image rejected: invalid pixel-size product");
+            return false;
+        }
+        size_t total = 0;
+        if (!compute_image_body_total(IMAGE_HEADER_BYTES, attr_len,
+                                       pixel_bytes, total)) {
+            LOG_WARN("Recon image rejected: body total overflow or cap");
+            return false;
+        }
+
+        uint64_t attr_len_wire = static_cast<uint64_t>(attr_len);
         body.resize(total);
         size_t off = 0;
         std::memcpy(body.data() + off, hdr_buf.data(), IMAGE_HEADER_BYTES); off += IMAGE_HEADER_BYTES;
-        std::memcpy(body.data() + off, &attr_len, 8); off += 8;
+        std::memcpy(body.data() + off, &attr_len_wire, 8); off += 8;
         if (attr_len > 0 && !read_exact(body.data() + off, attr_len)) return false;
         off += attr_len;
         if (pixel_bytes > 0 && !read_exact(body.data() + off, pixel_bytes)) return false;

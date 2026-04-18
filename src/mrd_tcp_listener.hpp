@@ -49,6 +49,7 @@
 #include "mrd_type_detector.hpp"
 #include "recon_forwarder.hpp"
 #include "session_registry.hpp"
+#include "wire_guards.hpp"
 
 namespace net = boost::asio;
 using tcp = net::ip::tcp;
@@ -462,23 +463,47 @@ private:
                     std::vector<uint8_t> hdr_buf(IMAGE_HEADER_BYTES);
                     if (!read_exact(*sock, hdr_buf.data(), IMAGE_HEADER_BYTES)) goto done;
                     auto* ihdr = reinterpret_cast<const ISMRMRD::ImageHeader*>(hdr_buf.data());
-                    uint64_t attr_len = 0;
-                    if (!read_exact(*sock, &attr_len, 8)) goto done;
+                    uint64_t attr_len_raw = 0;
+                    if (!read_exact(*sock, &attr_len_raw, 8)) goto done;
+
+                    // HIGH #5/#6/#7: validate sizes before any allocation.
+                    size_t attr_len = 0;
+                    if (!validate_attr_len(attr_len_raw, attr_len)) {
+                        LOG_WARN("IMAGE rejected: attr_len "
+                                 << attr_len_raw << " exceeds cap");
+                        goto done;
+                    }
+                    size_t pixel_bytes = 0;
+                    if (!compute_pixel_bytes(ihdr->matrix_size[0],
+                                             ihdr->matrix_size[1],
+                                             ihdr->matrix_size[2],
+                                             ihdr->channels,
+                                             ISMRMRD::ismrmrd_sizeof_data_type(ihdr->data_type),
+                                             pixel_bytes)) {
+                        LOG_WARN("IMAGE rejected: invalid pixel-size product "
+                                 << "dim=[" << ihdr->matrix_size[0] << ","
+                                 << ihdr->matrix_size[1] << ","
+                                 << ihdr->matrix_size[2] << "] ch="
+                                 << ihdr->channels);
+                        goto done;
+                    }
+                    size_t total = 0;
+                    if (!compute_image_body_total(IMAGE_HEADER_BYTES,
+                                                  attr_len, pixel_bytes, total)) {
+                        LOG_WARN("IMAGE rejected: body total overflow or cap");
+                        goto done;
+                    }
+
                     std::vector<uint8_t> attr(attr_len);
                     if (attr_len > 0 && !read_exact(*sock, attr.data(), attr_len)) goto done;
-                    size_t pixel_bytes = size_t(ihdr->matrix_size[0])
-                                       * ihdr->matrix_size[1]
-                                       * std::max<uint16_t>(ihdr->matrix_size[2], 1)
-                                       * std::max<uint16_t>(ihdr->channels, 1)
-                                       * ISMRMRD::ismrmrd_sizeof_data_type(ihdr->data_type);
                     std::vector<uint8_t> pixels(pixel_bytes);
                     if (!read_exact(*sock, pixels.data(), pixel_bytes)) goto done;
 
-                    size_t total = IMAGE_HEADER_BYTES + 8 + attr_len + pixel_bytes;
+                    uint64_t attr_len_wire = static_cast<uint64_t>(attr_len);
                     std::vector<uint8_t> body(total);
                     size_t o = 0;
                     std::memcpy(body.data()+o, hdr_buf.data(), IMAGE_HEADER_BYTES); o += IMAGE_HEADER_BYTES;
-                    std::memcpy(body.data()+o, &attr_len, 8); o += 8;
+                    std::memcpy(body.data()+o, &attr_len_wire, 8); o += 8;
                     if (attr_len > 0) { std::memcpy(body.data()+o, attr.data(), attr_len); o += attr_len; }
                     std::memcpy(body.data()+o, pixels.data(), pixel_bytes);
 
