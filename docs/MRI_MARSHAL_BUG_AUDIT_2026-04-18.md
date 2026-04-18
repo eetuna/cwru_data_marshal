@@ -561,3 +561,118 @@ correction #1) was itself wrong. Net: Codex correctly refined 3.75 of 4
 items. Its pass added real signal — without it, Findings #1, #4, #5, #7
 would remain stated in stronger-than-warranted terms, and Finding #8
 would still be listed as a real bug.
+
+---
+
+## Codex correction to Claude verification — 2026-04-18
+
+The Claude verification section above is preserved verbatim for audit
+history, but one sub-claim in its #1 row does not match the current
+production call path.
+
+Claude says HTTP reaches `publish_latest_snapshot()` through:
+
+```text
+HTTP's handle_recon_image -> append_live_image(state, Recon, ...) -> publish_latest_snapshot
+```
+
+Re-check result: **not true for production HTTP routes.**
+
+Evidence:
+- `handle_recon_image()` is defined in `marshal_http.hpp`, but the file
+  comment says it is called from the `ReconForwarder` MRD TCP callback.
+- The production call site is `marshal_main.cpp:337`, inside the recon
+  return callback.
+- `handle_http_request()` dispatches only query/control endpoints:
+  `/image/latest`, `/transform`, `/pose`, `/dump/scanner`, `/dump/recon`,
+  and `/health`.
+- Tests call `handle_recon_image()` directly, but production HTTP routes do
+  not.
+
+Corrected interpretation:
+- Codex's original sub-claim that current HTTP handlers do not call
+  `publish_latest_snapshot()` is **RIGHT**.
+- The latest-image enqueue hazard is from MRD/recon data paths, especially
+  detached MRD sessions during shutdown.
+- Detached HTTP sessions remain a separate `MarshalState&` UAF risk, but
+  current production HTTP routes do not enqueue latest-image work.
+
+---
+
+## Re-verification of Codex's final correction — 2026-04-18
+
+Three parallel agents independently traced the call graph for
+`publish_latest_snapshot()` against the actual source. Unanimous result:
+Codex's final correction is **RIGHT**, my earlier rebuttal was **WRONG**.
+
+### Call-graph evidence
+
+Direct caller of `publish_latest_snapshot()`:
+- `src/live_image_store.hpp:172` — inside `append_live_image()`
+
+Callers of `append_live_image()`:
+- `src/marshal_http.hpp:87` — inside `handle_recon_image()` (MRD callback helper, not an HTTP route)
+- `src/mrd_tcp_listener.hpp:360` — IMAGE message handler on the MRD scanner session
+
+Callers of `handle_recon_image()`:
+- `src/marshal_main.cpp:337` — inside the `on_message` lambda of the
+  `ReconForwarder` MRD-TCP callback (production)
+- `tests/test_http_handlers.cpp` (multiple lines) — tests only
+
+HTTP dispatcher (`handle_http_request()` in `src/marshal_http.hpp:252`)
+routes:
+- `GET /image/latest` → `handle_get_image_latest()` (reads state only)
+- `GET/PUT /transform`
+- `GET/POST /pose`
+- `GET /dump/scanner`, `GET /dump/recon`
+- `GET /health`
+
+**None of these HTTP handlers call `append_live_image` or
+`publish_latest_snapshot`.**
+
+### Why my earlier rebuttal was wrong
+
+`handle_recon_image` is *defined* in `marshal_http.hpp`, but it is **not
+routed** from any HTTP endpoint. It is a helper used exclusively by the
+MRD recon-return callback (production) and unit tests. I conflated "file
+where function is declared" with "HTTP is a caller." Codex's first
+correction sub-claim 3 was correct from the start.
+
+### Corrected interpretation of Finding #1
+
+Cleanly separate the three critical findings:
+
+- **#1 — UAF on latest-image publish path.** Hazard is from **detached
+  MRD TCP scanner session threads** and **detached MRD recon-return
+  threads** enqueuing new `publish_latest_snapshot` work during or after
+  `MarshalState` teardown. No HTTP path reaches this.
+- **#2 — UAF on HTTP session path.** Detached HTTP session threads hold
+  `&state` and can access `state` for `/image/latest`, `/transform`,
+  `/pose`, `/dump/*`, `/health` after `main()` returns. They do NOT
+  enqueue latest-image work, but they still reference destroyed state.
+- **#3 — UAF on MRD TCP listener.** Detached MRD sessions (both scanner
+  and, indirectly, recon-return) hold references through `this` and via
+  `MarshalState&`. Overlaps with #1's enqueue hazard and adds its own
+  post-destruction access hazard.
+
+### Pattern of mistakes across the verification chain
+
+- Round 1 had ~28% false-positive rate (7/25 findings dropped in Round 2).
+- Round 2 itself (my first verification) had ~30% overstatement rate
+  (4/14 findings corrected by Codex, 1 dropped entirely).
+- My Round 3 re-verification of Codex **added one new error** — wrongly
+  marking Codex sub-claim 3 as wrong. Codex's Round 4 correction put it
+  back. This round-4 re-verification (3 parallel agents) confirmed
+  Codex's position with unanimous call-graph evidence.
+
+Each layer of review caught ~25–30% of the prior layer's errors, but
+each layer also introduced occasional new errors of its own. The final
+state only stabilised after call-graph level evidence was collected.
+This is a demonstration that confidence should scale with the depth of
+independent verification, not the number of passes alone.
+
+### Final net — unchanged from previous section
+
+**13 CONFIRMED bugs** (no count change from Round 3). The rewording in
+this section is purely about the **mechanism** of Finding #1 and the
+clean separation of #1/#2/#3 by call path.
