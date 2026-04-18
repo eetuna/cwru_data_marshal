@@ -5,6 +5,44 @@
 **Branch audited:** `perf/latest-bulk-prealloc` (tip `1822829`) at `.worktrees/mri_data_marshal`
 **Method:** two-pass audit. Round 1 produced 25 candidate findings via three parallel auditors. Round 2 ran a fresh verification agent per finding with no prior context, requiring quoted-code evidence. Only findings verified twice are listed as CONFIRMED. False positives kept at bottom for independent re-investigation by another agent (e.g. codex).
 
+## Codex independent verification pass
+
+**Date:** 2026-04-18
+**Reviewer:** Codex
+**Result:** mostly confirmed, with corrections below.
+
+- Branch metadata is correct: umbrella `audit/mri-marshal-protocol-fixes-umbrella`
+  at `2a89f86`, inner MRI worktree `perf/latest-bulk-prealloc` at `1822829`.
+- Findings #2, #3, #5, #6, #9, #10, #11, #12, #13, #14 and the docs
+  `DEVELOPER_GUIDE.md` action are supported by the current code/docs.
+- Finding #1 is directionally valid as a lifetime/shutdown hazard, but the
+  mechanism is overstated. `LatestImageWriter` is owned by `MarshalState`,
+  and its destructor drains queued jobs before the `MarshalState` subobjects
+  used by the completion lambda are destroyed. The stronger evidence is the
+  detached MRD/HTTP session lifetime, plus recon callbacks during shutdown:
+  detached threads can still access `MarshalState`, and MRD/recon paths can
+  enqueue new latest-image work while `main()` is returning and `state`
+  destruction has begun. Also, current HTTP handlers do not call
+  `publish_latest_snapshot()`; MRD/recon paths do.
+- Finding #4 is a real missing bounds/overflow check, but the stated "read
+  past bounds" impact is not precise for the scanner-side path. A wrapped
+  `pixel_bytes` value causes an undersized read/allocation and protocol
+  desynchronization/DoS risk; additional overflow in aggregate body sizing
+  would be needed for a direct OOB write.
+- Finding #7 is a confirmed lossy behavior with no caller-visible backpressure
+  or return value. It is not fully silent at runtime: the first overflow logs a
+  warning and the final HDF5 gets `dump_complete="false"`.
+- Finding #8 is not confirmed as written. `LiveImageRecorder` catches
+  `std::exception` from jobs, and normal destruction enqueues the close job
+  before setting `stopping_`. A hang would require the worker to be stuck in a
+  blocking operation, `close_scan()` to be called from the worker thread, or
+  another abnormal condition; a worker "death" from an uncaught non-`std`
+  exception would normally terminate the process, not leave the destructor
+  waiting forever.
+- The confirmed redundancies are supported: the two `bench_fps.sh` copies are
+  byte-identical, the demo scripts duplicate compose setup/monitoring flow, and
+  the streamer Dockerfiles share a large common prefix.
+
 ---
 
 ## CONFIRMED bugs
@@ -462,3 +500,64 @@ No contradictions found between protocol/architecture/API docs. No
 references to SWMR (correctly absent — last SWMR branch is
 `feature/kspace-streamer-real-recon`, tip 2026-04-09). No archive docs
 referenced as authoritative by non-archive docs.
+
+---
+
+## Verification of Codex's corrections — 2026-04-18
+
+After Codex added its independent verification pass (top of this doc), a
+third round of parallel agents verified each of Codex's 4 corrections
+against the actual code. Results:
+
+| Codex correction | Verdict after re-verification |
+|------------------|-------------------------------|
+| #1 (lambda UAF mechanism) | **MOSTLY RIGHT** — Codex's 3 sub-claims: (a) LatestImageWriter destructor drains jobs first → RIGHT, (b) real hazard is detached session threads enqueuing during teardown → RIGHT, (c) "HTTP handlers do NOT call `publish_latest_snapshot`" → **WRONG**. HTTP's `handle_recon_image` → `append_live_image(state, Recon, ...)` → `publish_latest_snapshot`. Both HTTP and MRD paths reach it. |
+| #2 (pixel_bytes not OOB write) | **RIGHT** — verified both `mrd_tcp_listener.hpp:335-341` and `recon_forwarder.hpp:394-406`. `std::vector<uint8_t>(pixel_bytes)` + `read_exact(..., pixel_bytes)` uses the wrapped-small value for both alloc and read count. No OOB write. Impact is undersized allocation + protocol desync/DoS. |
+| #3 (dump not silent) | **RIGHT** — first overflow logs via `LOG_WARN` guarded by `drop_logged_.exchange(true)` (`dump_recorder.cpp:47-48`). Close path writes `dump_complete="false"` to HDF5 (`dump_recorder.cpp:142`). Silent only to caller API (void return). |
+| #4 (close_scan hang) | **RIGHT** — worker catches `std::exception`; non-std exception triggers `std::terminate` (process crash, not destructor hang). Destructor enqueues close job before setting `stopping_` so happy path always fulfils the promise. No realistic hang path. **Finding #8 dropped.** |
+
+### Net effect of all verification passes
+
+Round-1 candidate findings: **25**. After Round-2 verification (6 parallel
+agents, each claim independently evidenced): **14 CONFIRMED**. After
+Codex's correction pass + Round-3 re-verification of Codex: **13
+CONFIRMED**.
+
+**Changes from this third pass:**
+
+- **Finding #1** — mechanism reworded: the UAF is not about in-flight
+  jobs seeing a destroyed state. `LatestImageWriter`'s destructor drains
+  queued jobs before the sub-members the lambda touches are destroyed.
+  The real hazard is **detached MRD and HTTP session threads enqueuing
+  NEW work after `main()` has begun tearing down `MarshalState`**. Same
+  class of UAF, different mechanism.
+- **Finding #4** / **#5** — impact downgraded from "OOB read past bounds"
+  to "undersized allocation → protocol desynchronization → DoS". Still
+  HIGH (attacker-influenced wire fields → service disruption), no direct
+  memory-corruption write.
+- **Finding #7** — wording changed from "silent drop" to "dropped without
+  caller-visible backpressure; warns once on first overflow; HDF5 records
+  `dump_complete="false"` on close".
+- **Finding #8** — **dropped as false positive.** `close_scan()` has no
+  realistic hang path given the existing exception handling and
+  enqueue-before-stopping semantics.
+- Findings #2, #3, #6, #9, #10, #11, #12, #13, #14 — no change.
+
+### Final bug count — 13 CONFIRMED
+
+- 3 CRITICAL (#1 reworded, #2, #3)
+- 4 HIGH (#4, #5 impact downgraded; #6, #7 reworded)
+- 3 MEDIUM (#9, #10, #11 — #8 dropped)
+- 3 LOW/NIT (#12, #13, #14)
+
+Plus 3 confirmed redundancies (demo scripts, bench_fps duplicate, streamer
+Dockerfile prefix).
+
+### Notes on Codex's accuracy
+
+Codex reviewed the audit's 14 findings and challenged 4 of them. Three
+challenges held on re-verification; one challenge (a sub-claim within
+correction #1) was itself wrong. Net: Codex correctly refined 3.75 of 4
+items. Its pass added real signal — without it, Findings #1, #4, #5, #7
+would remain stated in stronger-than-warranted terms, and Finding #8
+would still be listed as a real bug.
