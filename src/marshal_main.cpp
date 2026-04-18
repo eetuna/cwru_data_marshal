@@ -332,17 +332,28 @@ int main(int argc, char** argv)
 
             if (state.recon_failure_reported.exchange(true) == false) {
                 auto body = build_recon_failure_image_body();
+                // MEDIUM #18: log exceptions instead of silently swallowing.
                 try {
                     state.mrd_push_message(mrd::MRD_MESSAGE_ISMRMRD_IMAGE,
                                            body.data(), body.size());
-                } catch (...) {}
+                } catch (const std::exception& e) {
+                    LOG_WARN("mrd_push_message (recon failure) threw: " << e.what());
+                } catch (...) {
+                    LOG_WARN("mrd_push_message (recon failure) threw unknown exception");
+                }
             }
         };
 
         // Recon return callback: archive IMAGE messages for non-scanner clients,
         // and push every MRD return message back to the scanner.
         auto on_message = [&state](uint16_t tag, const void* data, size_t len) {
-            try { state.mrd_push_message(tag, data, len); } catch (...) {}
+            // MEDIUM #18: log exceptions instead of silently swallowing.
+            try { state.mrd_push_message(tag, data, len); }
+            catch (const std::exception& e) {
+                LOG_WARN("mrd_push_message (tag " << tag << ") threw: " << e.what());
+            } catch (...) {
+                LOG_WARN("mrd_push_message (tag " << tag << ") threw unknown exception");
+            }
 
             if (tag == mrd::MRD_MESSAGE_ISMRMRD_IMAGE) {
                 handle_recon_image(state, data, len);
