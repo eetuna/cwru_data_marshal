@@ -102,6 +102,15 @@ inline void publish_latest_snapshot(MarshalState& state,
 inline bool recon_group_is_complete(const MarshalState& state,
                                     const ReconLatestGroupState& group)
 {
+    // HIGH #9: gate on header_received. If a recon image somehow arrives
+    // before the XML header has been parsed (reconnect, malformed stream),
+    // recon_expected_slices is still its default 0 and the old `<= 1` check
+    // would publish a single slice as a "complete" multislice result.
+    if (!state.header_received.load(std::memory_order_acquire)) {
+        // No header yet: we cannot know the expected slice count. Do not
+        // publish prematurely; treat as incomplete so the group buffers.
+        return false;
+    }
     if (state.recon_expected_slices <= 1) return true;
     return group.seen_slices.size() >= state.recon_expected_slices;
 }

@@ -171,6 +171,19 @@ if(BUILD_TESTING)
   target_include_directories(test_wire_guards PRIVATE include)
   add_test(NAME test_wire_guards COMMAND test_wire_guards)
 
+  # HIGH #9: recon_group_is_complete must wait for the XML header.
+  add_executable(test_recon_group_header
+    tests/test_recon_group_header.cpp
+    src/mrd_sink.cpp
+    src/dump_recorder.cpp
+    src/live_image_recorder.cpp
+    src/latest_image_writer.cpp
+  )
+  target_link_libraries(test_recon_group_header PRIVATE
+    Catch2::Catch2WithMain Boost::system Threads::Threads
+    nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target} CURL::libcurl)
+  add_test(NAME test_recon_group_header COMMAND test_recon_group_header)
+
   # HIGH #8 regression: second concurrent scanner must be rejected.
   add_executable(test_scanner_race
     tests/test_scanner_race.cpp

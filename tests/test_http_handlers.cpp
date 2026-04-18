@@ -138,6 +138,7 @@ TEST_CASE("Latest image path follows most recently updated lane", "[http][latest
     MarshalState state; init_state(state);
     state.latest_writer.reset();
     state.current_xml_header = TEST_XML;
+    state.header_received.store(true);  // simulate post-XML-header state
     state.current_scan_filename = "scan_test.h5";
 
     auto recon_first = make_wire_image(3, 0, 3.0f);
@@ -167,6 +168,7 @@ TEST_CASE("Latest recon multislice grows within one series", "[http][latest][mul
     MarshalState state; init_state(state);
     state.latest_writer.reset();
     state.current_xml_header = TEST_XML;
+    state.header_received.store(true);  // simulate post-XML-header state
     state.current_scan_filename = "scan_multislice.h5";
     state.recon_expected_slices = 2;
 
@@ -190,6 +192,7 @@ TEST_CASE("Latest recon series rollover replaces the prior logical result", "[ht
     MarshalState state; init_state(state);
     state.latest_writer.reset();
     state.current_xml_header = TEST_XML;
+    state.header_received.store(true);  // simulate post-XML-header state
     state.current_scan_filename = "scan_series_rollover.h5";
     state.recon_expected_slices = 2;
 
@@ -221,6 +224,7 @@ TEST_CASE("Latest recon preserves a single true 3D image", "[http][latest][3d]")
     MarshalState state; init_state(state);
     state.latest_writer.reset();
     state.current_xml_header = TEST_XML;
+    state.header_received.store(true);  // simulate post-XML-header state
     state.current_scan_filename = "scan_3d.h5";
 
     auto volume = make_wire_image(9, 0, 4.0f, 5);
