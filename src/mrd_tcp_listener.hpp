@@ -20,8 +20,10 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -63,6 +65,7 @@ public:
     {
         acceptor_.set_option(net::socket_base::reuse_address(true));
         LOG_INFO("MRD TCP listener on port " << port);
+        writer_thread_ = std::thread(&MrdTcpListener::writer_loop, this);
         do_accept();
     }
 
@@ -91,27 +94,38 @@ public:
             }
         }
         sessions_.shutdown_and_join();
+
+        // Stop the async writer thread.
+        {
+            std::lock_guard<std::mutex> lk(writer_mtx_);
+            writer_stopping_ = true;
+        }
+        writer_cv_.notify_all();
+        if (writer_thread_.joinable()) writer_thread_.join();
     }
 
-    // Push a recon MRD message back to the scanner over the existing scan socket.
+    // Enqueue a recon MRD message to push back to the scanner. Non-blocking;
+    // the actual blocking ::send runs on writer_thread_.
+    // HIGH #4: caller (recon reader) used to block on ::send here, which could
+    // deadlock shutdown if the scanner socket was stuck.
     void push_message_to_scanner(uint16_t tag, const void* data, size_t len) {
-        std::lock_guard<std::mutex> lk(scanner_mtx_);
-        if (!scanner_socket_ || !scanner_socket_->is_open()) {
-            LOG_WARN("No scanner connected, cannot push MRD message");
-            return;
+        std::vector<uint8_t> payload;
+        if (len > 0) {
+            payload.assign(static_cast<const uint8_t*>(data),
+                           static_cast<const uint8_t*>(data) + len);
         }
-        int fd = scanner_socket_->native_handle();
-        if (fd < 0) {
-            LOG_WARN("No scanner fd, cannot push MRD message");
-            return;
+        std::lock_guard<std::mutex> lk(writer_mtx_);
+        if (writer_stopping_) return;
+        // Bounded: drop oldest if over cap. Log once.
+        if (writer_queue_.size() >= kWriterQueueMax) {
+            writer_queue_.pop_front();
+            if (!writer_drop_logged_.exchange(true)) {
+                LOG_WARN("Scanner writer queue full (" << kWriterQueueMax
+                         << "); dropping oldest frames");
+            }
         }
-        if (write_exact_fd(fd, &tag, sizeof(tag)) &&
-            (len == 0 || write_exact_fd(fd, data, len))) {
-            LOG_DEBUG("Pushed MRD message to scanner tag=" << tag
-                      << " (" << len << " bytes)");
-        } else {
-            LOG_WARN("Failed to push MRD message to scanner");
-        }
+        writer_queue_.push_back({tag, std::move(payload)});
+        writer_cv_.notify_one();
     }
 
     bool has_scanner() const {
@@ -120,6 +134,13 @@ public:
     }
 
 private:
+    static constexpr size_t kWriterQueueMax = 1024;
+
+    struct WriterJob {
+        uint16_t tag;
+        std::vector<uint8_t> payload;  // empty if no body
+    };
+
     tcp::acceptor acceptor_;
     MarshalState& state_;
     ReconForwarder* forwarder_;
@@ -128,6 +149,14 @@ private:
     std::atomic<bool> session_active_{false};
     bool stopping_{false};           // protected by scanner_mtx_
     SessionRegistry sessions_;
+
+    // Async writer: decouples recon-reader from blocking ::send to scanner.
+    std::mutex writer_mtx_;
+    std::condition_variable writer_cv_;
+    std::deque<WriterJob> writer_queue_;
+    bool writer_stopping_{false};
+    std::atomic<bool> writer_drop_logged_{false};
+    std::thread writer_thread_;
 
     static bool write_exact_fd(int fd, const void* buf, size_t n) {
         const auto* p = static_cast<const uint8_t*>(buf);
@@ -142,6 +171,55 @@ private:
             done += static_cast<size_t>(rc);
         }
         return true;
+    }
+
+    void writer_loop() {
+        while (true) {
+            WriterJob job;
+            {
+                std::unique_lock<std::mutex> lk(writer_mtx_);
+                writer_cv_.wait(lk, [this] {
+                    return writer_stopping_ || !writer_queue_.empty();
+                });
+                if (writer_queue_.empty()) {
+                    // Woken by stop with no work.
+                    if (writer_stopping_) return;
+                    continue;
+                }
+                job = std::move(writer_queue_.front());
+                writer_queue_.pop_front();
+            }
+
+            // Grab the fd under scanner_mtx_, but release before the blocking
+            // ::send so other callers aren't serialized on it.
+            int fd = -1;
+            std::shared_ptr<tcp::socket> sock_hold;
+            {
+                std::lock_guard<std::mutex> lk(scanner_mtx_);
+                if (scanner_socket_ && scanner_socket_->is_open()) {
+                    fd = scanner_socket_->native_handle();
+                    sock_hold = scanner_socket_;  // keep alive while we send
+                }
+            }
+            if (fd < 0) {
+                LOG_DEBUG("Scanner writer: no scanner connected, drop tag=" << job.tag);
+                continue;
+            }
+            if (!write_exact_fd(fd, &job.tag, sizeof(job.tag)) ||
+                (!job.payload.empty() &&
+                 !write_exact_fd(fd, job.payload.data(), job.payload.size()))) {
+                LOG_WARN("Scanner writer: failed to push MRD message tag=" << job.tag);
+                // Socket is broken; close it so the session exits.
+                boost::system::error_code ignore;
+                if (sock_hold) {
+                    sock_hold->shutdown(tcp::socket::shutdown_both, ignore);
+                    sock_hold->close(ignore);
+                }
+            } else {
+                LOG_DEBUG("Scanner writer: pushed tag=" << job.tag
+                          << " (" << job.payload.size() << " bytes)");
+            }
+        }
     }
 
     void do_accept() {
