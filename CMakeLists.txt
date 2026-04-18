@@ -171,6 +171,17 @@ if(BUILD_TESTING)
   target_include_directories(test_wire_guards PRIVATE include)
   add_test(NAME test_wire_guards COMMAND test_wire_guards)
 
+  # HIGH #10: DumpRecorder must expose overflow status.
+  add_executable(test_dump_overflow
+    tests/test_dump_overflow.cpp
+    src/mrd_sink.cpp
+    src/dump_recorder.cpp
+  )
+  target_link_libraries(test_dump_overflow PRIVATE
+    Catch2::Catch2WithMain Boost::system Threads::Threads
+    nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target})
+  add_test(NAME test_dump_overflow COMMAND test_dump_overflow)
+
   # HIGH #9: recon_group_is_complete must wait for the XML header.
   add_executable(test_recon_group_header
     tests/test_recon_group_header.cpp

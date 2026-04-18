@@ -424,6 +424,18 @@ private:
                         forwarder_->wait_for_close(std::chrono::milliseconds(2000));
                         forwarder_->end_session();
                     }
+                    // HIGH #10: surface dump overflow to the operator via log
+                    // before close_scan() tears the recorder down. Previously
+                    // this was only visible as the dump_complete="false" HDF5
+                    // attribute after the fact.
+                    if (state_.dump_enabled && state_.dump_recorder
+                        && state_.dump_recorder->had_overflow()) {
+                        LOG_WARN("DUMP incomplete: dropped "
+                                 << state_.dump_recorder->dropped_record_count()
+                                 << " records / "
+                                 << state_.dump_recorder->dropped_byte_count()
+                                 << " bytes during this scan");
+                    }
                     flush_all_live_lanes(state_);
                     state_.close_scan();
                     session_active_.store(false);

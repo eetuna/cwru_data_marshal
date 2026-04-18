@@ -55,6 +55,19 @@ public:
     void append_recon_image(std::vector<uint8_t> body);
     void append_recon_waveform(std::vector<uint8_t> body);
 
+    // Caller-visible backpressure signal (HIGH #10).
+    // Pre-fix, callers were fire-and-forget: enqueue() silently dropped
+    // overflowing records, only surfaced as dump_complete="false" in the
+    // closed HDF5 attribute. These accessors let the caller (mrd_tcp_listener)
+    // inspect runtime state and take action (e.g. slow down, escalate).
+    bool had_overflow() const noexcept { return drop_logged_.load(); }
+    uint64_t dropped_record_count() const noexcept {
+        return dropped_records_.load();
+    }
+    uint64_t dropped_byte_count() const noexcept {
+        return dropped_bytes_.load();
+    }
+
 private:
     struct Job {
         size_t bytes{0};
