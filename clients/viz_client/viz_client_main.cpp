@@ -286,14 +286,19 @@ int main(int argc, char** argv) {
     std::cerr << std::unitbuf;
 
     std::string http_url = "http://localhost:8080";
+    double interval_s = 0.033;  // default 30 Hz
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if ((arg == "--http" || arg == "-http") && i + 1 < argc)
             http_url = argv[++i];
+        else if ((arg == "--interval" || arg == "-interval") && i + 1 < argc)
+            interval_s = std::stod(argv[++i]);
     }
+    auto poll_gap = std::chrono::milliseconds(static_cast<long>(interval_s * 1000.0));
 
     std::cout << "=== viz_client ===\n";
     std::cout << "HTTP URL: " << http_url << "\n";
+    std::cout << "Poll interval: " << interval_s << "s\n";
     std::cout << "Controls: UP/DOWN = scroll spatial slices, ESC = exit\n\n";
 
     CURL* curl = curl_easy_init();
@@ -325,7 +330,7 @@ int main(int argc, char** argv) {
             auto http = http_get(curl, http_url + "/image/latest");
             if (http.ok) latest_response = std::move(http.body);
             else latest_response.clear();
-            next_poll = now + std::chrono::milliseconds(100);
+            next_poll = now + poll_gap;
         }
 
         if (!latest_response.empty()) {
