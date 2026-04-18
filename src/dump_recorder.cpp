@@ -34,11 +34,12 @@ DumpRecorder::~DumpRecorder()
         worker_.join();
 }
 
-void DumpRecorder::enqueue(size_t bytes, std::function<void()> fn)
+DumpEnqueueResult DumpRecorder::enqueue(size_t bytes, std::function<void()> fn)
 {
+    DumpEnqueueResult result = DumpEnqueueResult::Accepted;
     {
         std::lock_guard<std::mutex> lk(mtx_);
-        if (stopping_) return;
+        if (stopping_) return DumpEnqueueResult::Stopped;
         if (queue_.size() >= kMaxQueuedJobs || queued_bytes_ + bytes > kMaxQueuedBytes) {
             dropped_records_.fetch_add(queue_.size() + 1);
             dropped_bytes_.fetch_add(queued_bytes_ + bytes);
@@ -47,12 +48,13 @@ void DumpRecorder::enqueue(size_t bytes, std::function<void()> fn)
             if (!drop_logged_.exchange(true)) {
                 LOG_WARN("Dump queue full; marking dump incomplete and dropping pending records to keep live MRD path moving");
             }
-            return;
+            return DumpEnqueueResult::Dropped;
         }
         queued_bytes_ += bytes;
         queue_.push_back(Job{bytes, std::move(fn)});
     }
     cv_.notify_one();
+    return result;
 }
 
 void DumpRecorder::worker_loop()
@@ -79,10 +81,10 @@ void DumpRecorder::worker_loop()
     close_scan_on_worker();
 }
 
-void DumpRecorder::start_scan(std::string filename, std::string xml)
+DumpEnqueueResult DumpRecorder::start_scan(std::string filename, std::string xml)
 {
     const size_t bytes = filename.size() + xml.size();
-    enqueue(bytes, [this, filename = std::move(filename), xml = std::move(xml)] {
+    return enqueue(bytes, [this, filename = std::move(filename), xml = std::move(xml)] {
         close_scan_on_worker();
         current_filename_ = filename;
         current_xml_ = xml;
@@ -155,45 +157,45 @@ void DumpRecorder::ensure_recon_sink_on_worker()
         recon_sink_->set_header(current_xml_);
 }
 
-void DumpRecorder::set_scanner_config_file(std::string config)
+DumpEnqueueResult DumpRecorder::set_scanner_config_file(std::string config)
 {
-    enqueue(config.size(), [this, config = std::move(config)] {
+    return enqueue(config.size(), [this, config = std::move(config)] {
         if (!scanner_sink_) return;
         scanner_sink_->write_string_dataset("config_file", config);
     });
 }
 
-void DumpRecorder::set_scanner_config_text(std::string config)
+DumpEnqueueResult DumpRecorder::set_scanner_config_text(std::string config)
 {
-    enqueue(config.size(), [this, config = std::move(config)] {
+    return enqueue(config.size(), [this, config = std::move(config)] {
         if (!scanner_sink_) return;
         scanner_sink_->write_string_dataset("config", config);
     });
 }
 
-void DumpRecorder::append_scanner_text(std::string text)
+DumpEnqueueResult DumpRecorder::append_scanner_text(std::string text)
 {
-    enqueue(text.size(), [this, text = std::move(text)] {
+    return enqueue(text.size(), [this, text = std::move(text)] {
         if (!scanner_sink_) return;
         scanner_sink_->write_string_dataset("text_" + std::to_string(scanner_text_count_++), text);
     });
 }
 
-void DumpRecorder::append_recon_text(std::string text)
+DumpEnqueueResult DumpRecorder::append_recon_text(std::string text)
 {
-    enqueue(text.size(), [this, text = std::move(text)] {
+    return enqueue(text.size(), [this, text = std::move(text)] {
         ensure_recon_sink_on_worker();
         if (!recon_sink_) return;
         recon_sink_->write_string_dataset("text_" + std::to_string(recon_text_count_++), text);
     });
 }
 
-void DumpRecorder::append_scanner_acquisition(const ISMRMRD::AcquisitionHeader& hdr,
-                                              std::vector<uint8_t> traj,
-                                              std::vector<uint8_t> samples)
+DumpEnqueueResult DumpRecorder::append_scanner_acquisition(const ISMRMRD::AcquisitionHeader& hdr,
+                                                            std::vector<uint8_t> traj,
+                                                            std::vector<uint8_t> samples)
 {
     const size_t bytes = traj.size() + samples.size() + sizeof(hdr);
-    enqueue(bytes, [this, hdr, traj = std::move(traj), samples = std::move(samples)] {
+    return enqueue(bytes, [this, hdr, traj = std::move(traj), samples = std::move(samples)] {
         if (!scanner_sink_) return;
         ISMRMRD::Acquisition acq(hdr.number_of_samples,
                                  hdr.active_channels,
@@ -207,12 +209,12 @@ void DumpRecorder::append_scanner_acquisition(const ISMRMRD::AcquisitionHeader& 
     });
 }
 
-void DumpRecorder::append_scanner_image(const ISMRMRD::ImageHeader& hdr,
-                                        std::vector<uint8_t> attr,
-                                        std::vector<uint8_t> pixels)
+DumpEnqueueResult DumpRecorder::append_scanner_image(const ISMRMRD::ImageHeader& hdr,
+                                                     std::vector<uint8_t> attr,
+                                                     std::vector<uint8_t> pixels)
 {
     const size_t bytes = attr.size() + pixels.size() + sizeof(hdr);
-    enqueue(bytes, [this, hdr, attr = std::move(attr), pixels = std::move(pixels)] {
+    return enqueue(bytes, [this, hdr, attr = std::move(attr), pixels = std::move(pixels)] {
         if (!scanner_sink_) return;
         const std::string varname = "image_" + std::to_string(hdr.image_series_index);
         scanner_sink_->append_image(varname, hdr,
@@ -221,11 +223,11 @@ void DumpRecorder::append_scanner_image(const ISMRMRD::ImageHeader& hdr,
     });
 }
 
-void DumpRecorder::append_scanner_waveform(const ISMRMRD::WaveformHeader& hdr,
-                                           std::vector<uint8_t> data)
+DumpEnqueueResult DumpRecorder::append_scanner_waveform(const ISMRMRD::WaveformHeader& hdr,
+                                                        std::vector<uint8_t> data)
 {
     const size_t bytes = data.size() + sizeof(hdr);
-    enqueue(bytes, [this, hdr, data = std::move(data)] {
+    return enqueue(bytes, [this, hdr, data = std::move(data)] {
         if (!scanner_sink_) return;
         ISMRMRD::Waveform wf(hdr.number_of_samples, hdr.channels);
         std::memcpy(&wf.head, &hdr, WAVEFORM_HEADER_BYTES);
@@ -235,9 +237,9 @@ void DumpRecorder::append_scanner_waveform(const ISMRMRD::WaveformHeader& hdr,
     });
 }
 
-void DumpRecorder::append_recon_image(std::vector<uint8_t> body)
+DumpEnqueueResult DumpRecorder::append_recon_image(std::vector<uint8_t> body)
 {
-    enqueue(body.size(), [this, body = std::move(body)] {
+    return enqueue(body.size(), [this, body = std::move(body)] {
         if (body.size() < IMAGE_HEADER_BYTES + sizeof(uint64_t)) return;
         const auto* hdr = reinterpret_cast<const ISMRMRD::ImageHeader*>(body.data());
         uint64_t attr_len = 0;
@@ -258,9 +260,9 @@ void DumpRecorder::append_recon_image(std::vector<uint8_t> body)
     });
 }
 
-void DumpRecorder::append_recon_waveform(std::vector<uint8_t> body)
+DumpEnqueueResult DumpRecorder::append_recon_waveform(std::vector<uint8_t> body)
 {
-    enqueue(body.size(), [this, body = std::move(body)] {
+    return enqueue(body.size(), [this, body = std::move(body)] {
         if (body.size() < WAVEFORM_HEADER_BYTES) return;
         const auto* hdr = reinterpret_cast<const ISMRMRD::WaveformHeader*>(body.data());
         const size_t data_bytes = size_t(hdr->number_of_samples) * hdr->channels * sizeof(uint32_t);

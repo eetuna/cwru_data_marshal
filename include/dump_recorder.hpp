@@ -27,6 +27,15 @@
 
 namespace mrd {
 
+// HIGH #10: enqueue-time backpressure signal. Every public append_* and
+// set_* method returns this so the caller sees drops at the moment they
+// happen rather than only via post-hoc accessors at CLOSE.
+enum class DumpEnqueueResult {
+    Accepted,    // job is queued
+    Dropped,     // queue overflow: caller may throttle / escalate
+    Stopped,     // recorder is shutting down; no further writes accepted
+};
+
 class DumpRecorder {
 public:
     explicit DumpRecorder(std::filesystem::path dump_dir);
@@ -35,31 +44,29 @@ public:
     DumpRecorder(const DumpRecorder&) = delete;
     DumpRecorder& operator=(const DumpRecorder&) = delete;
 
-    void start_scan(std::string filename, std::string xml);
+    DumpEnqueueResult start_scan(std::string filename, std::string xml);
     void close_scan();
 
-    void set_scanner_config_file(std::string config);
-    void set_scanner_config_text(std::string config);
-    void append_scanner_text(std::string text);
-    void append_recon_text(std::string text);
+    DumpEnqueueResult set_scanner_config_file(std::string config);
+    DumpEnqueueResult set_scanner_config_text(std::string config);
+    DumpEnqueueResult append_scanner_text(std::string text);
+    DumpEnqueueResult append_recon_text(std::string text);
 
-    void append_scanner_acquisition(const ISMRMRD::AcquisitionHeader& hdr,
-                                    std::vector<uint8_t> traj,
-                                    std::vector<uint8_t> samples);
-    void append_scanner_image(const ISMRMRD::ImageHeader& hdr,
-                              std::vector<uint8_t> attr,
-                              std::vector<uint8_t> pixels);
-    void append_scanner_waveform(const ISMRMRD::WaveformHeader& hdr,
-                                 std::vector<uint8_t> data);
+    DumpEnqueueResult append_scanner_acquisition(const ISMRMRD::AcquisitionHeader& hdr,
+                                                 std::vector<uint8_t> traj,
+                                                 std::vector<uint8_t> samples);
+    DumpEnqueueResult append_scanner_image(const ISMRMRD::ImageHeader& hdr,
+                                           std::vector<uint8_t> attr,
+                                           std::vector<uint8_t> pixels);
+    DumpEnqueueResult append_scanner_waveform(const ISMRMRD::WaveformHeader& hdr,
+                                              std::vector<uint8_t> data);
 
-    void append_recon_image(std::vector<uint8_t> body);
-    void append_recon_waveform(std::vector<uint8_t> body);
+    DumpEnqueueResult append_recon_image(std::vector<uint8_t> body);
+    DumpEnqueueResult append_recon_waveform(std::vector<uint8_t> body);
 
-    // Caller-visible backpressure signal (HIGH #10).
-    // Pre-fix, callers were fire-and-forget: enqueue() silently dropped
-    // overflowing records, only surfaced as dump_complete="false" in the
-    // closed HDF5 attribute. These accessors let the caller (mrd_tcp_listener)
-    // inspect runtime state and take action (e.g. slow down, escalate).
+    // Post-hoc accessors (retained). Callers that want fine-grained runtime
+    // signal use the DumpEnqueueResult return values above; these give the
+    // cumulative view for CLOSE-time logging.
     bool had_overflow() const noexcept { return drop_logged_.load(); }
     uint64_t dropped_record_count() const noexcept {
         return dropped_records_.load();
@@ -95,7 +102,7 @@ private:
     static constexpr size_t kMaxQueuedBytes = 256ULL * 1024ULL * 1024ULL;
     static constexpr size_t kMaxQueuedJobs = 4096;
 
-    void enqueue(size_t bytes, std::function<void()> fn);
+    DumpEnqueueResult enqueue(size_t bytes, std::function<void()> fn);
     void worker_loop();
     void close_scan_on_worker();
     void ensure_recon_sink_on_worker();

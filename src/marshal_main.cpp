@@ -24,6 +24,7 @@
 
 #include <boost/asio.hpp>
 
+#include "dump_recorder.hpp"
 #include "marshal_http.hpp"
 #include "marshal_state.hpp"
 #include "marshal_ws.hpp"
@@ -401,7 +402,12 @@ int main(int argc, char** argv)
                         if (nul != std::string::npos) text.resize(nul);
                     }
                 }
-                state.dump_recorder->append_recon_text(text);
+                // HIGH #10: enqueue returns a result; log dropped at
+                // callsite rather than only via post-hoc accessor.
+                auto r = state.dump_recorder->append_recon_text(text);
+                if (r == mrd::DumpEnqueueResult::Dropped) {
+                    LOG_WARN("DUMP drop at enqueue (recon_text)");
+                }
             }
         };
 

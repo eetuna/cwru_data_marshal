@@ -159,6 +159,22 @@ private:
     std::atomic<bool> writer_drop_logged_{false};
     std::thread writer_thread_;
 
+    // HIGH #10: act on DumpRecorder enqueue result at the moment of drop.
+    // Log once per kind to avoid flooding. Returns true if accepted.
+    template <typename Kind>
+    bool check_dump_result(Kind kind_name, DumpEnqueueResult r) {
+        if (r == DumpEnqueueResult::Accepted) return true;
+        if (r == DumpEnqueueResult::Dropped) {
+            if (!dump_dropped_logged_.exchange(true)) {
+                LOG_WARN("DUMP drop at enqueue time (" << kind_name
+                         << "); caller-visible backpressure signal");
+            }
+        }
+        // DumpEnqueueResult::Stopped is expected during shutdown; no log.
+        return false;
+    }
+    std::atomic<bool> dump_dropped_logged_{false};
+
     static bool write_exact_fd(int fd, const void* buf, size_t n) {
         const auto* p = static_cast<const uint8_t*>(buf);
         size_t done = 0;
@@ -343,7 +359,8 @@ private:
                         state_.config_received.store(true);
                     }
                     if (state_.dump_enabled && state_.dump_recorder) {
-                        state_.dump_recorder->set_scanner_config_file(config);
+                        check_dump_result("config_file",
+                            state_.dump_recorder->set_scanner_config_file(config));
                     }
                     send_or_buffer_recon(MRD_MESSAGE_CONFIG_FILE, body);
                     break;
@@ -372,7 +389,8 @@ private:
                         state_.config_received.store(true);
                     }
                     if (state_.dump_enabled && state_.dump_recorder) {
-                        state_.dump_recorder->set_scanner_config_text(config);
+                        check_dump_result("config_text",
+                            state_.dump_recorder->set_scanner_config_text(config));
                     }
                     send_or_buffer_recon(MRD_MESSAGE_CONFIG_TEXT, body);
                     break;
@@ -419,7 +437,8 @@ private:
                         state_.recon_expected_slices = nz;
                     }
                     if (state_.dump_enabled && state_.dump_recorder) {
-                        state_.dump_recorder->start_scan(scan_file, xml);
+                        check_dump_result("start_scan",
+                            state_.dump_recorder->start_scan(scan_file, xml));
                     }
                     reset_live_outputs_for_new_scan(state_);
                     state_.header_received.store(true);
@@ -468,7 +487,8 @@ private:
                     if (nul != std::string::npos) text.resize(nul);
                     LOG_INFO("TEXT: " << text);
                     if (state_.dump_enabled && state_.dump_recorder) {
-                        state_.dump_recorder->append_scanner_text(text);
+                        check_dump_result("scanner_text",
+                            state_.dump_recorder->append_scanner_text(text));
                     }
                     if (ensure_recon_session()) {
                         forwarder_->post_frame(MRD_MESSAGE_TEXT, body);
@@ -497,8 +517,10 @@ private:
                                 samples.data(), sample_bytes);
 
                     if (state_.dump_enabled && state_.dump_recorder) {
-                        state_.dump_recorder->append_scanner_acquisition(
-                            ahdr, std::vector<uint8_t>(traj), std::vector<uint8_t>(samples));
+                        check_dump_result("scanner_acquisition",
+                            state_.dump_recorder->append_scanner_acquisition(
+                                ahdr, std::vector<uint8_t>(traj),
+                                std::vector<uint8_t>(samples)));
                     }
 
                     // Forward raw bytes to recon with correct tag
@@ -559,8 +581,10 @@ private:
                     LOG_DEBUG("IMAGE from scanner: "
                               << ihdr->matrix_size[0] << "x" << ihdr->matrix_size[1]);
                     if (state_.dump_enabled && state_.dump_recorder) {
-                        state_.dump_recorder->append_scanner_image(
-                            *ihdr, std::vector<uint8_t>(attr), std::vector<uint8_t>(pixels));
+                        check_dump_result("scanner_image",
+                            state_.dump_recorder->append_scanner_image(
+                                *ihdr, std::vector<uint8_t>(attr),
+                                std::vector<uint8_t>(pixels)));
                     }
                     // Scanner-origin IMAGE is already reconstructed image data.
                     // Save/expose it for file-reading clients; do not send it to
@@ -583,8 +607,9 @@ private:
                     std::memcpy(body.data() + WAVEFORM_HEADER_BYTES, wf_data.data(), data_bytes);
 
                     if (state_.dump_enabled && state_.dump_recorder) {
-                        state_.dump_recorder->append_scanner_waveform(
-                            whdr, std::vector<uint8_t>(wf_data));
+                        check_dump_result("scanner_waveform",
+                            state_.dump_recorder->append_scanner_waveform(
+                                whdr, std::vector<uint8_t>(wf_data)));
                     }
                     if (ensure_recon_session()) {
                         forwarder_->post_frame(MRD_MESSAGE_ISMRMRD_WAVEFORM, body);
