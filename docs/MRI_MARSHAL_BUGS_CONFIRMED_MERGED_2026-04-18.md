@@ -213,3 +213,15 @@ Preserved in the source audit docs for history:
 12. Ops/docs items last.
 
 Performance impact of all fixes: zero measurable FPS hit (all fixes are shutdown-only, per-frame O(1) checks, or bounded allocation gates).
+
+---
+
+## Final-pass correction note
+
+Do not change the existing finding list based on this note alone; this is an addendum on wording/verification precision.
+
+- The claim "Every item below was verified twice by independent agents" is too strong. Many items were independently verified, but some wire-size/parser items were source-verified locally and did not receive a completed second independent agent pass.
+- Finding #2 is misworded: `ReconForwarder` reader is not detached; it is joined. The stronger unmanaged lifetime risk is from detached MRD scanner sessions and detached HTTP sessions.
+- Finding #6 is too strong as an unqualified "true OOB write." Scanner-side code allocates `attr(attr_len)` before constructing the aggregate body, so huge malicious values likely fail first as allocation DoS. The unchecked aggregate size math still remains a real risk, but it should be stated with that qualification.
+- Recommended fix order item #9 has wrong numbering: parser/sink/bulk issues are #13/#16/#17, not #14/#15.
+- "Zero measurable FPS hit" is too absolute. The safer claim is expected negligible impact if implemented as O(1) checks and bounded queues, with FPS benchmark validation.
