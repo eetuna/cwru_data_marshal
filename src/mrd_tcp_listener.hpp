@@ -226,34 +226,56 @@ private:
     void do_accept() {
         acceptor_.async_accept([this](boost::system::error_code ec, tcp::socket sock) {
             if (!ec) {
-                LOG_INFO("Scanner connected from " << sock.remote_endpoint());
+                std::shared_ptr<tcp::socket> accepted_socket;
+                bool reject_concurrent = false;
+                bool shutting = false;
                 {
                     std::lock_guard<std::mutex> lk(scanner_mtx_);
                     if (stopping_) {
-                        boost::system::error_code ignore;
-                        sock.shutdown(tcp::socket::shutdown_both, ignore);
-                        sock.close(ignore);
+                        shutting = true;
+                    } else if (scanner_socket_ && scanner_socket_->is_open()) {
+                        // HIGH #8: another scanner is already connected. Do not
+                        // overwrite scanner_socket_ — that would strand the
+                        // first session's pushback path on a dead fd. Reject
+                        // the newcomer cleanly instead.
+                        reject_concurrent = true;
                     } else {
                         scanner_socket_ = std::make_shared<tcp::socket>(std::move(sock));
+                        accepted_socket = scanner_socket_;
                     }
                 }
-                if (!sessions_.shutting_down()) {
-                    auto socket_ptr = scanner_socket_;
-                    std::shared_ptr<uint64_t> session_id = std::make_shared<uint64_t>(0);
-                    TrackedSession ts;
-                    ts.cancel = [socket_ptr]() {
-                        if (!socket_ptr) return;
-                        boost::system::error_code ignore;
-                        socket_ptr->shutdown(tcp::socket::shutdown_both, ignore);
-                        socket_ptr->close(ignore);
-                    };
-                    ts.thread = std::thread([this, socket_ptr, session_id]() {
-                        handle_session(socket_ptr);
-                        sessions_.unregister_session(*session_id);
-                    });
-                    *session_id = sessions_.register_session(std::move(ts));
-                    if (*session_id == 0) {
-                        ts.cancel();  // shutting down, just close
+
+                if (shutting) {
+                    boost::system::error_code ignore;
+                    sock.shutdown(tcp::socket::shutdown_both, ignore);
+                    sock.close(ignore);
+                } else if (reject_concurrent) {
+                    LOG_WARN("Rejecting concurrent scanner connection from "
+                             << sock.remote_endpoint()
+                             << " — another session is active");
+                    boost::system::error_code ignore;
+                    sock.shutdown(tcp::socket::shutdown_both, ignore);
+                    sock.close(ignore);
+                } else {
+                    LOG_INFO("Scanner connected from " << accepted_socket->remote_endpoint());
+                    if (!sessions_.shutting_down()) {
+                        auto socket_ptr = accepted_socket;
+                        std::shared_ptr<uint64_t> session_id = std::make_shared<uint64_t>(0);
+                        TrackedSession ts;
+                        ts.cancel = [socket_ptr]() {
+                            if (!socket_ptr) return;
+                            boost::system::error_code ignore;
+                            socket_ptr->shutdown(tcp::socket::shutdown_both, ignore);
+                            socket_ptr->close(ignore);
+                        };
+                        ts.thread = std::thread([this, socket_ptr, session_id]() {
+                            handle_session(socket_ptr);
+                            sessions_.unregister_session(*session_id);
+                        });
+                        *session_id = sessions_.register_session(std::move(ts));
+                        if (*session_id == 0) {
+                            ts.cancel();  // shutting down, just close
+                        }
                     }
                 }
             }

@@ -171,6 +171,19 @@ if(BUILD_TESTING)
   target_include_directories(test_wire_guards PRIVATE include)
   add_test(NAME test_wire_guards COMMAND test_wire_guards)
 
+  # HIGH #8 regression: second concurrent scanner must be rejected.
+  add_executable(test_scanner_race
+    tests/test_scanner_race.cpp
+    src/mrd_sink.cpp
+    src/dump_recorder.cpp
+    src/live_image_recorder.cpp
+    src/latest_image_writer.cpp
+  )
+  target_link_libraries(test_scanner_race PRIVATE
+    Catch2::Catch2WithMain Boost::system Threads::Threads
+    nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target} CURL::libcurl)
+  add_test(NAME test_scanner_race COMMAND test_scanner_race)
+
   # HIGH #4 regression: scanner pushback must not block the recon reader.
   add_executable(test_scanner_pushback
     tests/test_scanner_pushback.cpp
