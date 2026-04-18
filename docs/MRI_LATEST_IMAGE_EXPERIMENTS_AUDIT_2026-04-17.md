@@ -114,3 +114,65 @@ experiment branch.
 `cwru/mri-marshal:latest` and the `cwru/mri-marshal:*-benchmark|diag-*`
 tags share the same ~536 MB layers so the incremental disk cost is
 lower than the reported 1.89 GB per tag.
+
+## Native FPS benchmark results — 2026-04-18
+
+Run via `scripts/bench_fps.sh` on inner worktree (`.worktrees/mri_data_marshal`),
+`KSPACE_INTERVAL=0.025` (40 Hz scanner target), 30 s samples. All four processes
+(marshal, mock_recon, kspace_streamer, viz_client) run natively — no docker.
+
+| Branch                                 | Pass 1 mean | Pass 2 mean | Median | Stdev      |
+|----------------------------------------|------------:|------------:|-------:|-----------:|
+| `audit/live-atomic-rename` (v0, 837a101) | 40.48       | 34.31       | ~37.4  | 2.71 / 3.92 |
+| `perf/latest-image-shared-buffers`       | 37.59       | —           | 38.2   | 4.20       |
+| `perf/latest-file-reuse`                 | 39.58       | —           | 40.2   | 2.27       |
+| `perf/latest-slot-reuse`                 | 33.64       | —           | 35.8   | 8.25 ⚠     |
+| `perf/latest-bulk-prealloc` ⭐            | **43.26**   | **40.07**   | ~41.9  | 1.16 / 2.97 |
+
+**Winner: `perf/latest-bulk-prealloc`.** Highest mean on both passes, highest
+minimum, lowest variance, stayed above the 40 Hz ceiling. Matches design intent
+(preallocated datasets + bulk H5 writes amortize per-frame open/close cost).
+
+**Losers:**
+- `slot-reuse` — worst mean, worst min (9.11 FPS), worst stdev. Confirms the
+  diagnosis doc's own conclusion that slot-reuse was not a breakthrough.
+- `shared-buffers` — adds bounded backpressure but trailed v0 slightly and ran
+  noisier.
+
+**v0 variance** — 6 FPS swing between passes (40 → 34) under similar conditions
+suggests the v0 marshal's throughput is more sensitive to host/disk state than
+bulk-prealloc. That variance is hidden by the diagnosis doc's "short sample"
+measurements.
+
+### Viz client bug found during benchmarking
+
+The `read_image_data_type()` function in `perf/latest-bulk-prealloc`'s
+`viz_client_main.cpp` (raw-HDF5 header read via `H5Dread` into
+`ISMRMRD::ImageHeader`) triggered `*** stack smashing detected ***` on the
+native host build (libhdf5 1.10, gcc with stack protector). The HDF5 header on
+disk and the struct are both 198 bytes — sizes match — but something in the
+compound-read path overran the canary.
+
+Mitigation committed on top of `ba80258` as `1822829`:
+- Revert `read_latest_h5` loop to v0's probe approach
+  (`ISMRMRD::Image<float>` probe → typed dispatch). Adds one extra H5 read per
+  frame but is version-safe.
+- Original raw-HDF5 path preserved in commit `ba80258` for future
+  investigation.
+
+Also added in `1822829`:
+- `--interval <seconds>` CLI flag on viz_client (default 0.033 s / 30 Hz)
+- `scripts/bench_fps.sh` — the native benchmark harness used to produce the
+  numbers above. Spawns marshal + mock_recon + kspace_streamer + viz_client as
+  host processes on ports 28080/29100/29002 (isolated from the docker stack
+  on 8080/9100/9002). Collects `[FPS DEBUG]` from viz_client stderr, skips the
+  first warmup sample, prints mean/median/min/max/stdev.
+
+### How to re-run
+
+```bash
+cd .worktrees/mri_data_marshal
+git checkout perf/latest-bulk-prealloc    # or any of the 4 experiment branches
+cmake --build build                       # ~5 s incremental
+DURATION=30 KSPACE_INTERVAL=0.025 ./scripts/bench_fps.sh
+```
