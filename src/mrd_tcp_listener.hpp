@@ -107,27 +107,50 @@ public:
 
     // Enqueue a recon MRD message to push back to the scanner. Non-blocking;
     // the actual blocking ::send runs on writer_thread_.
-    // HIGH #4: caller (recon reader) used to block on ::send here, which could
-    // deadlock shutdown if the scanner socket was stuck.
+    //
+    // HIGH #4: caller (recon reader) used to block on ::send here, which
+    // could deadlock shutdown if the scanner socket was stuck.
+    //
+    // 2026-04-19: the contract (MRI_MARSHAL_PROTOCOL_CONTRACT_2026-04-19.md)
+    // says recon return messages are pushed back to the scanner
+    // unconditionally. The previous 1024-entry drop-oldest cap violated
+    // that. Queue is now unbounded; the ONLY case where we skip a
+    // message is when the writer is stopping (shutdown). Growth is
+    // visible via a one-shot high-watermark warning + /debug/sinks
+    // telemetry; it does not cause drops.
     void push_message_to_scanner(uint16_t tag, const void* data, size_t len) {
         std::vector<uint8_t> payload;
         if (len > 0) {
             payload.assign(static_cast<const uint8_t*>(data),
                            static_cast<const uint8_t*>(data) + len);
         }
-        std::lock_guard<std::mutex> lk(writer_mtx_);
-        if (writer_stopping_) return;
-        // Bounded: drop oldest if over cap. Log once.
-        if (writer_queue_.size() >= kWriterQueueMax) {
-            writer_queue_.pop_front();
-            if (!writer_drop_logged_.exchange(true)) {
-                LOG_WARN("Scanner writer queue full (" << kWriterQueueMax
-                         << "); dropping oldest frames");
-            }
+        size_t size_after = 0;
+        {
+            std::lock_guard<std::mutex> lk(writer_mtx_);
+            if (writer_stopping_) return;
+            writer_queue_.push_back({tag, std::move(payload)});
+            size_after = writer_queue_.size();
+            writer_queue_peak_.store(
+                std::max<size_t>(writer_queue_peak_.load(), size_after));
         }
-        writer_queue_.push_back({tag, std::move(payload)});
         writer_cv_.notify_one();
+
+        if (size_after >= kWriterHighWatermark &&
+            !writer_drop_logged_.exchange(true)) {
+            LOG_WARN("Scanner writer queue depth " << size_after
+                     << " >= " << kWriterHighWatermark
+                     << "; scanner TCP is falling behind. Queue is "
+                     << "unbounded; memory will grow until the scanner "
+                     << "catches up or the session closes.");
+        }
     }
+
+    // Observability for /debug/sinks-style telemetry. writer_queue_peak
+    // is sticky for the connection lifetime; had_overflow stays true
+    // once the high-watermark has been crossed even if the queue
+    // later drains.
+    size_t writer_queue_peak() const noexcept { return writer_queue_peak_.load(); }
+    bool   writer_had_high_watermark() const noexcept { return writer_drop_logged_.load(); }
 
     bool has_scanner() const {
         std::lock_guard<std::mutex> lk(scanner_mtx_);
@@ -135,7 +158,11 @@ public:
     }
 
 private:
-    static constexpr size_t kWriterQueueMax = 1024;
+    // Non-blocking watermark for the scanner writer queue. Crossing
+    // this does NOT drop records; it logs a one-shot warning and
+    // updates writer_drop_logged_ (kept that name for backwards
+    // compat, but it no longer means anything was dropped).
+    static constexpr size_t kWriterHighWatermark = 10000;
 
     struct WriterJob {
         uint16_t tag;
@@ -156,7 +183,11 @@ private:
     std::condition_variable writer_cv_;
     std::deque<WriterJob> writer_queue_;
     bool writer_stopping_{false};
+    // Name kept for backwards compat; post-2026-04-19 it means
+    // "high-watermark warning has fired" rather than "records were
+    // dropped." Pushback is now unbounded.
     std::atomic<bool> writer_drop_logged_{false};
+    std::atomic<size_t> writer_queue_peak_{0};
     std::thread writer_thread_;
 
     // HIGH #10: act on DumpRecorder enqueue result at the moment of drop.
