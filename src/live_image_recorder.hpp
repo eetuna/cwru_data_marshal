@@ -42,7 +42,11 @@ public:
                          std::vector<uint8_t> body);
     void close_scan();
 
-    // MEDIUM #15: runtime-visible backpressure on unbounded queue.
+    // Pre-fix (MEDIUM #15): bounded queue, dropped oldest droppable
+    // pending lambda on overflow. That violated the lossless-retention
+    // contract. Post-fix (2026-04-19): queue is unbounded, live
+    // history never drops. dropped_count() and had_overflow() are
+    // retained for backwards compat; they stay zero under normal ops.
     bool had_overflow() const noexcept { return drop_logged_.load(); }
     uint64_t dropped_count() const noexcept { return dropped_count_.load(); }
 
@@ -53,14 +57,23 @@ public:
         uint32_t img{0};
         uint32_t wf{0};
         bool sink_open{false};
+        // Runtime queue depth. Useful on /debug/sinks to see if the
+        // live path is falling behind. Expected to stay near 0 under
+        // the observed ~65 records/s live rate vs the ~1000/s HDF5
+        // append ceiling.
+        uint64_t queued_jobs{0};
+        // Sticky high-watermark signal. Set (once) when queued_jobs
+        // crosses kHighWatermarkJobs; does NOT gate any drop.
+        bool high_watermark_hit{false};
     };
     CounterSnapshot counters() const;
 
 private:
-    // MEDIUM #15: bound the queue. Live archive writes cannot be coalesced
-    // (each is a distinct append), so on overflow we drop the oldest
-    // pending lambda. The close_scan job is NEVER dropped.
-    static constexpr size_t kMaxQueuedJobs = 4096;
+    // Non-blocking watermark threshold. If the queue grows past this
+    // without being drained, log a single warning and surface it via
+    // /debug/sinks. No drop. If the live path is healthy at ~65
+    // records/s this watermark is orders of magnitude above normal.
+    static constexpr size_t kHighWatermarkJobs = 10000;
 
     struct Job {
         std::function<void()> fn;
@@ -75,6 +88,9 @@ private:
     bool stopping_{false};
     std::atomic<bool> drop_logged_{false};
     std::atomic<uint64_t> dropped_count_{0};
+    // High-watermark surface (see kHighWatermarkJobs). Sticky: set
+    // once per scan, reset at close_scan_on_worker.
+    std::atomic<bool> high_watermark_hit_{false};
 
     std::string current_filename_;
     std::unique_ptr<MrdSink> sink_;

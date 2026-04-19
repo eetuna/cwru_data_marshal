@@ -9,7 +9,6 @@
 #include "logging.hpp"
 #include "live_image_recorder.hpp"
 
-#include <algorithm>
 #include <cstring>
 
 #include <ismrmrd/ismrmrd.h>
@@ -78,29 +77,29 @@ LiveImageRecorder::~LiveImageRecorder()
 
 void LiveImageRecorder::enqueue(std::function<void()> fn, bool droppable)
 {
+    size_t queue_size_after = 0;
     {
         std::lock_guard<std::mutex> lk(mtx_);
         if (stopping_) return;
-        // MEDIUM #15: bound the queue. Skip the cap check if the job is
-        // non-droppable (e.g. close_scan barrier). On overflow, drop the
-        // oldest droppable job; if none exist, admit anyway (never drop
-        // the barrier).
-        if (droppable && queue_.size() >= kMaxQueuedJobs) {
-            auto it = std::find_if(queue_.begin(), queue_.end(),
-                                   [](const Job& j) { return j.droppable; });
-            if (it != queue_.end()) {
-                queue_.erase(it);
-                dropped_count_.fetch_add(1);
-                if (!drop_logged_.exchange(true)) {
-                    LOG_WARN("LiveImageRecorder queue exceeded " << kMaxQueuedJobs
-                             << " jobs in " << lane_dir_.string()
-                             << "; dropping oldest pending image");
-                }
-            }
-        }
+        // Lossless: no drop under queue pressure. The contract says
+        // live history must never drop records. Under normal live-mode
+        // rates (~65 records/s vs ~1000/s HDF5 ceiling) the queue
+        // stays near-empty. If it ever grows dramatically we log a
+        // one-shot high-watermark warning but still admit the job.
         queue_.push_back(Job{std::move(fn), droppable});
+        queue_size_after = queue_.size();
     }
     cv_.notify_one();
+
+    if (queue_size_after >= kHighWatermarkJobs &&
+        !high_watermark_hit_.exchange(true)) {
+        LOG_WARN("LiveImageRecorder queue depth " << queue_size_after
+                 << " >= " << kHighWatermarkJobs << " on lane "
+                 << lane_dir_.string()
+                 << "; live HDF5 worker is falling behind. "
+                 << "This does NOT drop records; memory will grow until "
+                 << "the worker catches up.");
+    }
 }
 
 void LiveImageRecorder::append_image(std::string filename,
@@ -188,6 +187,8 @@ LiveImageRecorder::CounterSnapshot LiveImageRecorder::counters() const
         snap.wf = sink_->waveform_count();
         snap.sink_open = true;
     }
+    snap.queued_jobs = queue_.size();
+    snap.high_watermark_hit = high_watermark_hit_.load();
     return snap;
 }
 
@@ -198,6 +199,8 @@ void LiveImageRecorder::close_scan_on_worker()
         sink_.reset();
     }
     current_filename_.clear();
+    // Reset per-scan watermark so the next scan starts clean.
+    high_watermark_hit_.store(false);
 }
 
 void LiveImageRecorder::ensure_sink_on_worker(const std::string& filename,

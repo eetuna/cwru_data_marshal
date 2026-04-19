@@ -182,5 +182,9 @@ elif mode == "live":
     fr = l.get("from_reconstruction", {})
     print(f"  live/from_scanner.img         = {fs.get('img', 0):>10}")
     print(f"  live/from_scanner.wf          = {fs.get('wf', 0):>10}  retention = {pct(fs.get('wf',0), sent_wf)}")
+    print(f"  live/from_scanner.dropped     = {fs.get('dropped', 0)}")
+    print(f"  live/from_scanner.queued_jobs = {fs.get('queued_jobs', 0)}  hwm_hit={fs.get('high_watermark_hit', False)}")
     print(f"  live/from_reconstruction.img  = {fr.get('img', 0):>10}  retention = {pct(fr.get('img',0), sent_recon_img)}")
+    print(f"  live/from_reconstruction.dropped = {fr.get('dropped', 0)}")
+    print(f"  live/from_reconstruction.queued_jobs = {fr.get('queued_jobs', 0)}  hwm_hit={fr.get('high_watermark_hit', False)}")
 PY

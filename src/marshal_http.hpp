@@ -307,21 +307,33 @@ static auto handle_get_debug_sinks(const http::request<Body>& req, MarshalState&
         j["dump"]["conversion_status"] = status;
     }
     if (!state.dump_enabled) {
+        auto live_lane_json = [](const mrd::LiveImageRecorder::CounterSnapshot& c,
+                                 uint64_t dropped) {
+            nlohmann::json o;
+            o["acq"] = c.acq;
+            o["img"] = c.img;
+            o["wf"]  = c.wf;
+            o["open"] = c.sink_open;
+            // Post-fix: dropped should stay 0 under the lossless
+            // contract. Retained for visibility.
+            o["dropped"] = dropped;
+            // Live queue depth and high-watermark surface: new with
+            // the lossless-live change (no more drop-oldest). If the
+            // watermark fires, the HDF5 worker is behind; memory
+            // grows until it catches up.
+            o["queued_jobs"] = c.queued_jobs;
+            o["high_watermark_hit"] = c.high_watermark_hit;
+            return o;
+        };
         if (state.scanner_live.recorder) {
-            auto c = state.scanner_live.recorder->counters();
-            j["live"]["from_scanner"] = {
-                {"acq", c.acq}, {"img", c.img},
-                {"wf", c.wf}, {"open", c.sink_open}};
-            j["live"]["from_scanner"]["dropped"] =
-                state.scanner_live.recorder->dropped_count();
+            j["live"]["from_scanner"] = live_lane_json(
+                state.scanner_live.recorder->counters(),
+                state.scanner_live.recorder->dropped_count());
         }
         if (state.recon_live.recorder) {
-            auto c = state.recon_live.recorder->counters();
-            j["live"]["from_reconstruction"] = {
-                {"acq", c.acq}, {"img", c.img},
-                {"wf", c.wf}, {"open", c.sink_open}};
-            j["live"]["from_reconstruction"]["dropped"] =
-                state.recon_live.recorder->dropped_count();
+            j["live"]["from_reconstruction"] = live_lane_json(
+                state.recon_live.recorder->counters(),
+                state.recon_live.recorder->dropped_count());
         }
     }
     return json_response(req, http::status::ok, j);
