@@ -279,15 +279,32 @@ static auto handle_get_debug_sinks(const http::request<Body>& req, MarshalState&
 
     if (state.dump_enabled && state.dump_recorder) {
         auto c = state.dump_recorder->counters();
-        j["dump"]["from_scanner"] = {
-            {"acq", c.scanner.acq}, {"img", c.scanner.img},
-            {"wf", c.scanner.wf}, {"open", c.scanner.open}};
-        j["dump"]["from_reconstruction"] = {
-            {"acq", c.recon.acq}, {"img", c.recon.img},
-            {"wf", c.recon.wf}, {"open", c.recon.open}};
+        auto lane_json = [](const mrd::DumpRecorder::LaneSnapshot& l) {
+            nlohmann::json o;
+            o["spool_records"] = l.spool_records;
+            o["spool_bytes"]   = l.spool_bytes;
+            o["spool_open"]    = l.spool_open;
+            o["write_error"]   = l.write_error;
+            o["converted_acq"] = l.converted_acq;
+            o["converted_img"] = l.converted_img;
+            o["converted_wf"]  = l.converted_wf;
+            o["conversion_ok"] = l.conversion_ok;
+            return o;
+        };
+        j["dump"]["from_scanner"]        = lane_json(c.scanner);
+        j["dump"]["from_reconstruction"] = lane_json(c.recon);
         j["dump"]["dropped_records"] = c.dropped_records;
-        j["dump"]["dropped_bytes"] = c.dropped_bytes;
-        j["dump"]["had_overflow"] = c.had_overflow;
+        j["dump"]["dropped_bytes"]   = c.dropped_bytes;
+        j["dump"]["had_overflow"]    = c.had_overflow;
+        const char* status = "idle";
+        switch (c.status) {
+            case mrd::DumpRecorder::ConversionStatus::Idle:       status = "idle"; break;
+            case mrd::DumpRecorder::ConversionStatus::Spooling:   status = "spooling"; break;
+            case mrd::DumpRecorder::ConversionStatus::Converting: status = "converting"; break;
+            case mrd::DumpRecorder::ConversionStatus::Complete:   status = "complete"; break;
+            case mrd::DumpRecorder::ConversionStatus::Failed:     status = "failed"; break;
+        }
+        j["dump"]["conversion_status"] = status;
     }
     if (!state.dump_enabled) {
         if (state.scanner_live.recorder) {

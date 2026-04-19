@@ -102,13 +102,33 @@ sleep "$DURATION"
 wait "$SAMPLER_PID" 2>/dev/null || true
 
 echo ""
-echo "=== final /debug/sinks ==="
-FINAL=$(curl -fsS "http://localhost:$HTTP_PORT/debug/sinks" 2>/dev/null)
-echo "$FINAL" | python3 -m json.tool 2>/dev/null || echo "$FINAL"
+echo "=== /debug/sinks during scan (spool counts) ==="
+SPOOL=$(curl -fsS "http://localhost:$HTTP_PORT/debug/sinks" 2>/dev/null)
+echo "$SPOOL" | python3 -m json.tool 2>/dev/null || echo "$SPOOL"
 
 # Stop kspace_streamer cleanly so its volume counter is final.
 kill "$KSPACE_PID" 2>/dev/null || true
 sleep 1
+
+# In dump mode the converter runs on marshal shutdown (SIGTERM). Wait
+# for it to finish, then re-read /debug/sinks for the post-convert
+# counters BEFORE marshal exits.
+echo ""
+echo "=== triggering dump convert via SIGTERM ==="
+kill -TERM "$MARSHAL_PID" 2>/dev/null || true
+# Poll for conversion_status = complete or failed.
+for i in $(seq 1 60); do
+    STATUS=$(curl -fsS "http://localhost:$HTTP_PORT/debug/sinks" 2>/dev/null \
+        | python3 -c 'import sys,json;print(json.load(sys.stdin).get("dump",{}).get("conversion_status","?"))' 2>/dev/null)
+    [ "$STATUS" = "complete" ] || [ "$STATUS" = "failed" ] && break
+    sleep 1
+done
+
+echo ""
+echo "=== /debug/sinks after convert ==="
+FINAL=$(curl -fsS "http://localhost:$HTTP_PORT/debug/sinks" 2>/dev/null)
+echo "$FINAL" | python3 -m json.tool 2>/dev/null || echo "$FINAL"
+wait "$MARSHAL_PID" 2>/dev/null || true
 
 echo ""
 echo "=== sender counts ==="
@@ -145,9 +165,14 @@ if mode == "dump":
     d = final.get("dump", {})
     fs = d.get("from_scanner", {})
     fr = d.get("from_reconstruction", {})
-    print(f"  dump/from_scanner.acq         = {fs.get('acq', 0):>10}  retention = {pct(fs.get('acq',0), sent_acq)}")
-    print(f"  dump/from_scanner.wf          = {fs.get('wf', 0):>10}  retention = {pct(fs.get('wf',0), sent_wf)}")
-    print(f"  dump/from_reconstruction.img  = {fr.get('img', 0):>10}  retention = {pct(fr.get('img',0), sent_recon_img)}")
+    # Post-convert counters are the retention metric. spool_records is
+    # useful as a "what arrived" signal; converted_* is "what made the
+    # final HDF5 artifact".
+    print(f"  status                        = {d.get('conversion_status', '?')}")
+    print(f"  dump/from_scanner.spool_recs  = {fs.get('spool_records', 0):>10}")
+    print(f"  dump/from_scanner.converted_acq = {fs.get('converted_acq', 0):>10}  retention = {pct(fs.get('converted_acq',0), sent_acq)}")
+    print(f"  dump/from_scanner.converted_wf  = {fs.get('converted_wf', 0):>10}  retention = {pct(fs.get('converted_wf',0), sent_wf)}")
+    print(f"  dump/from_recon.converted_img = {fr.get('converted_img', 0):>10}  retention = {pct(fr.get('converted_img',0), sent_recon_img)}")
     print(f"  dropped_records               = {d.get('dropped_records', 0)}")
     print(f"  dropped_bytes                 = {d.get('dropped_bytes', 0)}")
     print(f"  had_overflow                  = {d.get('had_overflow', False)}")

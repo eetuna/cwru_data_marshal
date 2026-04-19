@@ -1,7 +1,18 @@
 /*
  * File: include/dump_recorder.hpp
  * Project: CWRU Data Marshal - MRI Marshal
- * Purpose: Async canonical ISMRMRD H5 dump recorder.
+ * Purpose: Async raw-MRD spool recorder for dump mode.
+ *
+ * Hot path: reader thread enqueues a lightweight job; per-lane worker
+ * thread pops the job and writes the wire bytes to a flat append-only
+ * spool file (see SpoolWriter). On close_scan the spool is converted
+ * to the canonical ISMRMRD HDF5 file (see SpoolConverter).
+ *
+ * The live HDF5 append path that used to run here per-record was a
+ * ~1000/s ceiling; scanner at 50 Hz x 5 slices x 128 lines pushes
+ * ~32,000/s. Spool write is ~disk-bandwidth bound, so the worker
+ * keeps up with the scanner and the dropped-records path does not
+ * trigger under normal operation. The contract requires no drops.
  */
 
 #pragma once
@@ -13,7 +24,6 @@
 #include <deque>
 #include <filesystem>
 #include <functional>
-#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -23,27 +33,34 @@
 #include <ismrmrd/ismrmrd.h>
 #include <ismrmrd/waveform.h>
 
-#include "mrd_sink.hpp"
+#include "spool_writer.hpp"
 
 namespace mrd {
 
-// HIGH #10: enqueue-time backpressure signal. Every public append_* and
-// set_* method returns this so the caller sees drops at the moment they
-// happen rather than only via post-hoc accessors at CLOSE.
 enum class DumpEnqueueResult {
     Accepted,    // job is queued
-    Dropped,     // queue overflow: caller may throttle / escalate
+    Dropped,     // spool write failed / disk error (hard error signal)
     Stopped,     // recorder is shutting down; no further writes accepted
 };
 
 class DumpRecorder {
 public:
-    explicit DumpRecorder(std::filesystem::path dump_dir);
+    // delete_spool_after_convert controls cleanup policy:
+    //   false (default) -- keep the .spool file next to the .h5 file
+    //     after successful conversion for forensic recovery.
+    //   true -- delete the .spool after the converter returns ok().
+    explicit DumpRecorder(std::filesystem::path dump_dir,
+                          bool delete_spool_after_convert = false);
     ~DumpRecorder();
 
     DumpRecorder(const DumpRecorder&) = delete;
     DumpRecorder& operator=(const DumpRecorder&) = delete;
 
+    // start_scan sets the filename and XML header that later records
+    // will reference. If spool records already arrived before this
+    // call (CONFIG_FILE, CONFIG_TEXT, TEXT) they are already captured
+    // in the spool; METADATA_XML is just another record and the
+    // converter handles ordering.
     DumpEnqueueResult start_scan(std::string filename, std::string xml);
     void close_scan();
 
@@ -64,99 +81,98 @@ public:
     DumpEnqueueResult append_recon_image(std::vector<uint8_t> body);
     DumpEnqueueResult append_recon_waveform(std::vector<uint8_t> body);
 
-    // Post-hoc accessors. The CLOSE-time view sums both lanes.
+    // Post-hoc accessors. With spool, dropped_records is only nonzero
+    // on disk-write failure (enq_fail / spool_error). Under healthy
+    // operation both are zero.
     bool had_overflow() const noexcept;
     uint64_t dropped_record_count() const noexcept;
     uint64_t dropped_byte_count() const noexcept;
 
-    // Snapshot of per-sink message counters for /debug/sinks.
-    struct SinkCounters {
-        uint32_t acq{0};
-        uint32_t img{0};
-        uint32_t wf{0};
-        bool open{false};
+    enum class ConversionStatus {
+        Idle,        // no scan seen
+        Spooling,    // scan in progress
+        Converting,  // close_scan underway
+        Complete,    // last scan converted successfully
+        Failed,      // last scan conversion failed
+    };
+
+    struct LaneSnapshot {
+        uint64_t spool_records{0};
+        uint64_t spool_bytes{0};
+        bool spool_open{false};
+        std::string write_error;
+        // Post-conversion counters (0 until ConversionStatus::Complete).
+        uint32_t converted_acq{0};
+        uint32_t converted_img{0};
+        uint32_t converted_wf{0};
+        bool conversion_ok{false};
     };
     struct CounterSnapshot {
-        SinkCounters scanner;
-        SinkCounters recon;
+        LaneSnapshot scanner;
+        LaneSnapshot recon;
         uint64_t dropped_records{0};
         uint64_t dropped_bytes{0};
         bool had_overflow{false};
+        ConversionStatus status{ConversionStatus::Idle};
     };
     CounterSnapshot counters() const;
 
 private:
-    // P5: per-lane queue + worker. Scanner-side and recon-side traffic
-    // ran through one shared worker pre-fix; a slow HDF5 write to one
-    // sink blocked all writes to the other. Each lane now owns its
-    // queue, mutex, cv, worker, sink, and drop counters.
     struct Lane {
-        // Job lifecycle. Barrier jobs (start_scan side-effects, close_scan)
-        // are non-droppable; data jobs are droppable so the overflow path
-        // can shed oldest-first without ever evicting a barrier.
-        struct Job {
-            size_t bytes{0};
-            std::function<void()> fn;
-            bool droppable{true};
+        // Queue entry captures wire bytes to write to the spool. The
+        // reader thread builds this; worker pops and calls SpoolWriter.
+        struct Record {
+            uint16_t tag{0};
+            std::vector<uint8_t> body;
         };
 
-        std::filesystem::path lane_dir;          // directory under dump_dir
-        std::string component_tag;               // for log messages
+        std::filesystem::path lane_dir;   // directory under dump_dir
+        std::string component_tag;        // "scanner" or "recon" for logs
 
         std::thread worker;
         mutable std::mutex mtx;
         std::condition_variable cv;
-        std::deque<Job> queue;
-        size_t queued_bytes{0};
+        std::deque<Record> queue;
         bool stopping{false};
 
+        // Hard-error counters (spool write failed). Normal queue
+        // pressure does NOT increment these; contract says no drops.
         std::atomic<bool> drop_logged{false};
         std::atomic<uint64_t> dropped_records{0};
         std::atomic<uint64_t> dropped_bytes{0};
 
-        std::string current_filename;
-        std::string current_xml;
-        std::unique_ptr<MrdSink> sink;
-        uint32_t text_count{0};
+        // Spool for the current scan (owned by the worker thread).
+        std::unique_ptr<SpoolWriter> spool;
+        std::string current_filename;   // "scan_<ts>.h5" (final) / .spool
+        std::string current_xml;        // set by start_scan
+        std::string write_error;        // last spool write error, if any
 
-        // Pre-metadata buffer. python-ismrmrd-server's reference server is
-        // order-agnostic and persists CONFIG_FILE / CONFIG_TEXT / TEXT that
-        // arrive before METADATA_XML. Our dump sink is only opened on
-        // METADATA_XML (start_scan), so any config/text worker jobs that
-        // run before the sink is open would silently drop. Instead the
-        // worker appends them to this buffer; start_scan replays the
-        // buffer into the newly-opened sink before it's released.
-        std::string pending_config_file;
-        bool pending_config_file_set{false};
-        std::string pending_config_text;
-        bool pending_config_text_set{false};
-        std::vector<std::string> pending_texts;
-
-        // Snapshot of the most-recently-closed sink's counts so /debug/sinks
-        // can report final retention after close, when sink is null. Updated
-        // in close_scan_on_worker() before sink.reset().
-        uint32_t last_closed_acq{0};
-        uint32_t last_closed_img{0};
-        uint32_t last_closed_wf{0};
-        bool ever_closed{false};
+        // Post-conversion counters, populated in close_scan by the
+        // SpoolConverter result.
+        uint32_t converted_acq{0};
+        uint32_t converted_img{0};
+        uint32_t converted_wf{0};
+        bool conversion_ok{false};
     };
 
     std::filesystem::path dump_dir_;
+    bool delete_spool_after_convert_;
     Lane scanner_;
     Lane recon_;
-
-    static constexpr size_t kMaxQueuedBytes = 256ULL * 1024ULL * 1024ULL;
-    static constexpr size_t kMaxQueuedJobs = 4096;
+    std::atomic<ConversionStatus> status_{ConversionStatus::Idle};
 
     void start_lane(Lane& lane, std::filesystem::path lane_dir, std::string tag);
     void stop_lane(Lane& lane);
-    DumpEnqueueResult enqueue_scanner(size_t bytes, std::function<void()> fn);
-    DumpEnqueueResult enqueue_recon(size_t bytes, std::function<void()> fn);
-    DumpEnqueueResult enqueue_on(Lane& lane, size_t bytes,
-                                  std::function<void()> fn, bool droppable);
+    DumpEnqueueResult enqueue_scanner(uint16_t tag, std::vector<uint8_t> body);
+    DumpEnqueueResult enqueue_recon(uint16_t tag, std::vector<uint8_t> body);
+    DumpEnqueueResult enqueue_on(Lane& lane, uint16_t tag,
+                                  std::vector<uint8_t> body);
     void worker_loop(Lane& lane);
-    void close_scan_on_worker(Lane& lane);
-    void write_status_on_worker(MrdSink* sink, const Lane& lane);
+    // Lazily open the spool on first record arrival. No lock required:
+    // only the worker thread touches lane.spool / current_filename.
+    void ensure_spool_on_worker(Lane& lane);
+    void close_spool_on_worker(Lane& lane);
+    void convert_lane(Lane& lane, bool is_scanner);
 };
 
 } // namespace mrd

@@ -52,34 +52,46 @@ TEST_CASE("DumpRecorder enqueue returns Accepted on happy path",
     rec.close_scan();
 }
 
-TEST_CASE("DumpRecorder enqueue returns Dropped when queue overflows",
-          "[dump][overflow][api]") {
-    auto dir = fs::temp_directory_path() / "test_dump_overflow_dropped";
+TEST_CASE("DumpRecorder with spool never drops under high-count acq flood",
+          "[dump][spool][lossless]") {
+    // Contract: dump mode is lossless. A flood of acquisitions well
+    // beyond any previous queue cap (4096) must complete without
+    // dropping. Using acqs (not text) is the realistic stressor because
+    // scanner at 50 Hz x 5 slices x 128 lines pushes 32,000 acqs/s
+    // and was the reason spool was introduced.
+    auto dir = fs::temp_directory_path() / "test_dump_spool_lossless";
     fs::remove_all(dir);
     fs::create_directories(dir);
 
     mrd::DumpRecorder rec(dir);
-    auto start_r = rec.start_scan("overflow.h5",
+    auto start_r = rec.start_scan("lossless.h5",
                                   "<?xml version=\"1.0\"?><ismrmrdHeader/>");
     REQUIRE(start_r == mrd::DumpEnqueueResult::Accepted);
 
-    // Flood the 4096-job queue with tiny text records. At least one append
-    // after the cap must return Dropped — this is the caller-visible
-    // backpressure signal introduced by blocker-1 resolution.
-    const std::string payload(64, 'X');
-    bool saw_dropped = false;
-    for (int i = 0; i < 20000 && !saw_dropped; ++i) {
-        auto r = rec.append_scanner_text(payload);
-        if (r == mrd::DumpEnqueueResult::Dropped) saw_dropped = true;
-        REQUIRE((r == mrd::DumpEnqueueResult::Accepted
-                 || r == mrd::DumpEnqueueResult::Dropped));
+    constexpr uint16_t nsamples = 64;
+    constexpr uint16_t nchannels = 4;
+    ISMRMRD::AcquisitionHeader hdr{};
+    hdr.version = 1;
+    hdr.number_of_samples = nsamples;
+    hdr.active_channels = nchannels;
+    hdr.trajectory_dimensions = 0;
+
+    const size_t sample_bytes =
+        size_t(nsamples) * nchannels * 2 * sizeof(float);
+    constexpr int kFloodCount = 10000;  // > any prior queue cap (4096)
+
+    for (int i = 0; i < kFloodCount; ++i) {
+        std::vector<uint8_t> samples(sample_bytes, 0x5A);
+        hdr.scan_counter = static_cast<uint32_t>(i);
+        auto r = rec.append_scanner_acquisition(hdr, {}, std::move(samples));
+        REQUIRE(r == mrd::DumpEnqueueResult::Accepted);
     }
-    INFO("saw_dropped=" << saw_dropped
-         << " had_overflow=" << rec.had_overflow());
-    REQUIRE(saw_dropped);
-    REQUIRE(rec.had_overflow());
 
     rec.close_scan();
+
+    REQUIRE_FALSE(rec.had_overflow());
+    REQUIRE(rec.dropped_record_count() == 0);
+    REQUIRE(rec.dropped_byte_count() == 0);
 }
 
 // Helper: read a scalar VLEN string dataset from a closed HDF5 file.

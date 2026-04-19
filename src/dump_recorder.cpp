@@ -1,7 +1,9 @@
 /*
  * File: src/dump_recorder.cpp
  * Project: CWRU Data Marshal - MRI Marshal
- * Purpose: Async canonical ISMRMRD H5 dump recorder.
+ * Purpose: Raw-MRD spool recorder. Writes incoming wire bytes to a
+ *          flat append-only file during the scan; on close, converts
+ *          to the canonical ISMRMRD HDF5 artifact.
  */
 
 #undef LOG_COMPONENT
@@ -9,16 +11,44 @@
 #include "logging.hpp"
 #include "dump_recorder.hpp"
 
-#include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <ctime>
 
 #include "mrd_io.hpp"
 #include "mrd_stream_tags.hpp"
+#include "spool_converter.hpp"
 
 namespace mrd {
 
-DumpRecorder::DumpRecorder(std::filesystem::path dump_dir)
+namespace {
+
+// Scan filename uses the current wall-clock time so the spool and the
+// eventually-converted .h5 are both named "scan_<ts>". First record of
+// a scan triggers this; start_scan() uses the scanner lane's filename
+// to name the recon lane's artifacts too.
+std::string scan_filename_now()
+{
+    auto now = std::chrono::system_clock::now();
+    auto tt = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  now.time_since_epoch()) % 1000;
+    std::tm tm_utc;
+    gmtime_r(&tt, &tm_utc);
+    char buf[64];
+    std::strftime(buf, sizeof(buf), "scan_%Y-%m-%dT%H:%M:%S", &tm_utc);
+    char out[80];
+    std::snprintf(out, sizeof(out), "%s.%03ldZ", buf, (long)ms.count());
+    return std::string(out);
+}
+
+} // namespace
+
+DumpRecorder::DumpRecorder(std::filesystem::path dump_dir,
+                           bool delete_spool_after_convert)
     : dump_dir_(std::move(dump_dir))
+    , delete_spool_after_convert_(delete_spool_after_convert)
 {
     start_lane(scanner_, dump_scanner_dir(dump_dir_), "scanner");
     start_lane(recon_,   dump_recon_dir(dump_dir_),   "recon");
@@ -31,7 +61,8 @@ DumpRecorder::~DumpRecorder()
     stop_lane(recon_);
 }
 
-void DumpRecorder::start_lane(Lane& lane, std::filesystem::path lane_dir, std::string tag)
+void DumpRecorder::start_lane(Lane& lane, std::filesystem::path lane_dir,
+                              std::string tag)
 {
     lane.lane_dir = std::move(lane_dir);
     lane.component_tag = std::move(tag);
@@ -49,216 +80,211 @@ void DumpRecorder::stop_lane(Lane& lane)
         lane.worker.join();
 }
 
-DumpEnqueueResult DumpRecorder::enqueue_scanner(size_t bytes, std::function<void()> fn)
+DumpEnqueueResult DumpRecorder::enqueue_scanner(uint16_t tag,
+                                                 std::vector<uint8_t> body)
 {
-    return enqueue_on(scanner_, bytes, std::move(fn), /*droppable=*/true);
+    return enqueue_on(scanner_, tag, std::move(body));
 }
 
-DumpEnqueueResult DumpRecorder::enqueue_recon(size_t bytes, std::function<void()> fn)
+DumpEnqueueResult DumpRecorder::enqueue_recon(uint16_t tag,
+                                               std::vector<uint8_t> body)
 {
-    return enqueue_on(recon_, bytes, std::move(fn), /*droppable=*/true);
+    return enqueue_on(recon_, tag, std::move(body));
 }
 
-DumpEnqueueResult DumpRecorder::enqueue_on(Lane& lane, size_t bytes,
-                                            std::function<void()> fn, bool droppable)
+DumpEnqueueResult DumpRecorder::enqueue_on(Lane& lane, uint16_t tag,
+                                            std::vector<uint8_t> body)
 {
-    DumpEnqueueResult result = DumpEnqueueResult::Accepted;
-
-    // Oversized droppable jobs cannot fit in the cap even with an empty
-    // queue. Reject them up front rather than admitting silently.
-    if (droppable && bytes > kMaxQueuedBytes) {
-        lane.dropped_records.fetch_add(1);
-        lane.dropped_bytes.fetch_add(bytes);
-        if (!lane.drop_logged.exchange(true)) {
-            LOG_WARN("Dump queue rejecting oversized record on lane="
-                     << lane.component_tag << " (" << bytes
-                     << " bytes > cap " << kMaxQueuedBytes << ")");
-        }
-        return DumpEnqueueResult::Dropped;
-    }
-
+    // Contract: no drop on queue pressure. We append unconditionally;
+    // memory pressure is bounded by the scanner's actual throughput
+    // times the worker-drain latency (microseconds), not queue cap.
     {
         std::lock_guard<std::mutex> lk(lane.mtx);
         if (lane.stopping) return DumpEnqueueResult::Stopped;
-
-        // Oldest-drop on overflow: shed exactly enough oldest droppable
-        // jobs to make room for the new admission. Non-droppable barriers
-        // are skipped so they always survive.
-        for (int safety = 0; safety < static_cast<int>(kMaxQueuedJobs) + 1; ++safety) {
-            if (lane.queue.size() < kMaxQueuedJobs &&
-                lane.queued_bytes + bytes <= kMaxQueuedBytes) {
-                break;
-            }
-            auto it = std::find_if(lane.queue.begin(), lane.queue.end(),
-                                   [](const Lane::Job& j) { return j.droppable; });
-            if (it == lane.queue.end()) break;
-            lane.queued_bytes -= it->bytes;
-            lane.dropped_records.fetch_add(1);
-            lane.dropped_bytes.fetch_add(it->bytes);
-            lane.queue.erase(it);
-            if (!lane.drop_logged.exchange(true)) {
-                LOG_WARN("Dump queue full on lane=" << lane.component_tag
-                         << "; dropping oldest pending record to keep live MRD path moving");
-            }
-            result = DumpEnqueueResult::Dropped;
-        }
-
-        // After the drop loop, if a droppable job still doesn't fit (queue
-        // is full of non-droppable barriers), reject it rather than blowing
-        // the cap silently. Non-droppable barriers are allowed to bypass
-        // the cap because they're rare, small, and required for correctness.
-        const bool fits =
-            lane.queue.size() < kMaxQueuedJobs &&
-            lane.queued_bytes + bytes <= kMaxQueuedBytes;
-        if (!fits && droppable) {
-            lane.dropped_records.fetch_add(1);
-            lane.dropped_bytes.fetch_add(bytes);
-            if (!lane.drop_logged.exchange(true)) {
-                LOG_WARN("Dump queue full on lane=" << lane.component_tag
-                         << " and only barriers remain; dropping new record");
-            }
-            return DumpEnqueueResult::Dropped;
-        }
-
-        lane.queued_bytes += bytes;
-        lane.queue.push_back(Lane::Job{bytes, std::move(fn), droppable});
+        lane.queue.push_back(Lane::Record{tag, std::move(body)});
     }
     lane.cv.notify_one();
-    return result;
+    return DumpEnqueueResult::Accepted;
+}
+
+void DumpRecorder::ensure_spool_on_worker(Lane& lane)
+{
+    if (lane.spool) return;
+    if (lane.current_filename.empty()) {
+        // First record for a scan arrived before start_scan's filename
+        // was available. Assign one now; start_scan() will override
+        // with the scanner-chosen stem so both lanes agree.
+        lane.current_filename = scan_filename_now();
+    }
+    auto spool_path = lane.lane_dir / (lane.current_filename + ".spool");
+    lane.spool = std::make_unique<SpoolWriter>(spool_path);
+    if (!lane.spool->healthy()) {
+        lane.write_error = lane.spool->last_error();
+        LOG_ERROR("Spool open failed on lane=" << lane.component_tag
+                  << ": " << lane.write_error);
+    } else {
+        LOG_INFO("Opened spool lane=" << lane.component_tag
+                 << " path=" << spool_path.string());
+    }
+}
+
+void DumpRecorder::close_spool_on_worker(Lane& lane)
+{
+    if (lane.spool) {
+        lane.spool->flush();
+        lane.spool->close();
+    }
 }
 
 void DumpRecorder::worker_loop(Lane& lane)
 {
     for (;;) {
-        Lane::Job job;
+        Lane::Record rec;
         {
             std::unique_lock<std::mutex> lk(lane.mtx);
-            lane.cv.wait(lk, [&lane] { return lane.stopping || !lane.queue.empty(); });
+            lane.cv.wait(lk, [&lane] {
+                return lane.stopping || !lane.queue.empty();
+            });
             if (lane.stopping && lane.queue.empty())
                 break;
-            job = std::move(lane.queue.front());
+            rec = std::move(lane.queue.front());
             lane.queue.pop_front();
-            lane.queued_bytes -= job.bytes;
         }
 
-        try {
-            job.fn();
-        } catch (const std::exception& e) {
-            LOG_WARN("Dump write failed on lane=" << lane.component_tag
-                     << ": " << e.what());
+        ensure_spool_on_worker(lane);
+        if (!lane.spool || !lane.spool->healthy()) {
+            // Disk-write failure. Count as a hard drop.
+            lane.dropped_records.fetch_add(1);
+            lane.dropped_bytes.fetch_add(rec.body.size());
+            if (!lane.drop_logged.exchange(true)) {
+                LOG_ERROR("Dump spool write unavailable on lane="
+                          << lane.component_tag << " ("
+                          << lane.write_error << ")");
+            }
+            continue;
+        }
+        if (!lane.spool->append(rec.tag, rec.body.data(),
+                                 static_cast<uint32_t>(rec.body.size()))) {
+            lane.dropped_records.fetch_add(1);
+            lane.dropped_bytes.fetch_add(rec.body.size());
+            lane.write_error = lane.spool->last_error();
+            if (!lane.drop_logged.exchange(true)) {
+                LOG_ERROR("Dump spool write failed on lane="
+                          << lane.component_tag << ": "
+                          << lane.write_error);
+            }
         }
     }
 
-    close_scan_on_worker(lane);
+    close_spool_on_worker(lane);
+}
+
+// Build wire body for TEXT-class messages. Format:
+//   [uint32 length][text + NUL]
+static std::vector<uint8_t> build_length_prefixed_text_body(const std::string& s)
+{
+    const uint32_t inner = static_cast<uint32_t>(s.size() + 1);
+    std::vector<uint8_t> body(sizeof(uint32_t) + inner);
+    std::memcpy(body.data(), &inner, sizeof(uint32_t));
+    std::memcpy(body.data() + sizeof(uint32_t), s.data(), s.size());
+    body[sizeof(uint32_t) + s.size()] = '\0';
+    return body;
 }
 
 DumpEnqueueResult DumpRecorder::start_scan(std::string filename, std::string xml)
 {
-    const size_t bytes = filename.size() + xml.size();
-    auto fn = [this, filename, xml] {
-        // Per-lane init lambda is run separately on each worker. We dispatch
-        // identical bodies because each lane only manages its own sink.
+    // Align both lanes on the scan identity. If the spool has already
+    // been opened (because CONFIG_FILE / TEXT arrived before METADATA),
+    // we keep using the existing stem; otherwise adopt the caller's.
+    auto align = [this, &filename, &xml](Lane& lane) {
+        std::lock_guard<std::mutex> lk(lane.mtx);
+        // We can set current_filename safely only if the worker hasn't
+        // opened a spool yet. If spool is already open, the filename is
+        // whatever the worker chose; the caller's filename is ignored
+        // to avoid renaming an in-flight file. In practice the caller's
+        // filename matches the one scan_filename_now() would generate
+        // within the same scan window, so this is rarely observable.
+        if (!lane.spool && lane.current_filename.empty()) {
+            // Strip ".h5" suffix from filename if present -- we want the
+            // stem to which we append ".spool" or ".h5".
+            std::string stem = filename;
+            if (stem.size() > 3 &&
+                stem.compare(stem.size() - 3, 3, ".h5") == 0)
+                stem.resize(stem.size() - 3);
+            lane.current_filename = stem;
+        }
+        lane.current_xml = xml;
     };
-    // Issue start to both lanes. Use a shared payload so both workers see
-    // identical filename/xml.
-    auto payload = std::make_shared<std::pair<std::string, std::string>>(
-        std::move(filename), std::move(xml));
+    align(scanner_);
+    align(recon_);
+    status_.store(ConversionStatus::Spooling);
 
-    auto enq_lane = [this, bytes, payload](Lane& lane, bool is_scanner) {
-        return enqueue_on(lane, bytes, [this, &lane, payload, is_scanner] {
-            // Snapshot pending CONFIG/TEXT BEFORE close_scan_on_worker
-            // clears them. python-ismrmrd-server's protocol allows
-            // CONFIG_FILE / CONFIG_TEXT / TEXT to arrive before
-            // METADATA_XML; those jobs ran on the worker with no sink
-            // open and stashed their payload in pending_*. We must
-            // replay them into the sink that start_scan is about to
-            // open. close_scan_on_worker clears the buffers as part of
-            // between-scan cleanup, so we capture first.
-            std::string pending_cf       = std::move(lane.pending_config_file);
-            bool        pending_cf_set   = lane.pending_config_file_set;
-            std::string pending_ct       = std::move(lane.pending_config_text);
-            bool        pending_ct_set   = lane.pending_config_text_set;
-            std::vector<std::string> pending_txt = std::move(lane.pending_texts);
-
-            close_scan_on_worker(lane);
-            lane.current_filename = payload->first;
-            lane.current_xml = payload->second;
-            auto path = lane.lane_dir / lane.current_filename;
-            lane.sink = std::make_unique<MrdSink>(path);
-            lane.sink->set_header(lane.current_xml);
-
-            if (pending_cf_set) {
-                lane.sink->write_string_dataset("config_file", pending_cf);
-            }
-            if (pending_ct_set) {
-                lane.sink->write_string_dataset("config", pending_ct);
-            }
-            for (auto& text : pending_txt) {
-                lane.sink->write_string_dataset(
-                    "text_" + std::to_string(lane.text_count++), text);
-            }
-
-            lane.drop_logged.store(false);
-            lane.dropped_records.store(0);
-            lane.dropped_bytes.store(0);
-            (void)is_scanner;
-        }, /*droppable=*/false);
-    };
-
-    auto r1 = enq_lane(scanner_, true);
-    auto r2 = enq_lane(recon_, false);
-    if (r1 == DumpEnqueueResult::Stopped || r2 == DumpEnqueueResult::Stopped)
-        return DumpEnqueueResult::Stopped;
-    if (r1 == DumpEnqueueResult::Dropped || r2 == DumpEnqueueResult::Dropped)
-        return DumpEnqueueResult::Dropped;
-    return DumpEnqueueResult::Accepted;
+    // Spool the METADATA_XML record itself so the converter can set
+    // the HDF5 header on replay.
+    auto body = build_length_prefixed_text_body(xml);
+    return enqueue_scanner(MRD_MESSAGE_METADATA_XML_TEXT, std::move(body));
 }
 
 void DumpRecorder::close_scan()
 {
-    auto close_one = [this](Lane& lane) {
-        auto done = std::make_shared<std::promise<void>>();
-        auto fut = done->get_future();
-        {
-            std::lock_guard<std::mutex> lk(lane.mtx);
-            if (lane.stopping) {
-                done->set_value();
-            } else {
-                lane.queue.push_back(Lane::Job{0, [this, &lane, done] {
-                    close_scan_on_worker(lane);
-                    done->set_value();
-                }, /*droppable=*/false});
-            }
-        }
-        lane.cv.notify_one();
-        fut.wait();
+    // Drain both lanes by briefly stopping their workers and
+    // re-starting them for the next scan. Stop signal sets
+    // lane.stopping=true, worker finishes current record + drains the
+    // queue, closes the spool, then exits. After join() we clear
+    // stopping and start a fresh worker thread.
+    auto drain_and_restart = [this](Lane& lane) {
+        stop_lane(lane);
+        // Worker has exited; spool closed in worker_loop()'s exit path.
+        lane.stopping = false;
+        lane.worker = std::thread([this, &lane] { worker_loop(lane); });
     };
-    close_one(scanner_);
-    close_one(recon_);
+    drain_and_restart(scanner_);
+    drain_and_restart(recon_);
+
+    status_.store(ConversionStatus::Converting);
+    LOG_INFO("Converting dump spool to HDF5");
+    convert_lane(scanner_, /*is_scanner_side=*/true);
+    convert_lane(recon_,   /*is_scanner_side=*/false);
+
+    const bool ok = scanner_.conversion_ok && recon_.conversion_ok;
+    status_.store(ok ? ConversionStatus::Complete : ConversionStatus::Failed);
+    LOG_INFO("Dump conversion " << (ok ? "complete" : "FAILED"));
 }
 
-void DumpRecorder::close_scan_on_worker(Lane& lane)
+void DumpRecorder::convert_lane(Lane& lane, bool is_scanner)
 {
-    if (lane.sink) {
-        // Snapshot counts before close so /debug/sinks can report final
-        // retention after the sink is gone.
-        lane.last_closed_acq = lane.sink->acquisition_count();
-        lane.last_closed_img = lane.sink->image_count();
-        lane.last_closed_wf  = lane.sink->waveform_count();
-        lane.ever_closed = true;
-        write_status_on_worker(lane.sink.get(), lane);
-        lane.sink->close();
-        lane.sink.reset();
+    if (lane.current_filename.empty()) {
+        // No records were ever spooled for this lane.
+        lane.conversion_ok = true;
+        return;
     }
+    auto spool_path = lane.lane_dir / (lane.current_filename + ".spool");
+    auto h5_path    = lane.lane_dir / (lane.current_filename + ".h5");
+    if (!std::filesystem::exists(spool_path)) {
+        lane.conversion_ok = true;
+        return;
+    }
+    auto stats = convert_spool_to_hdf5(spool_path, h5_path, is_scanner);
+    lane.converted_acq = stats.acq_written;
+    lane.converted_img = stats.img_written;
+    lane.converted_wf  = stats.wf_written;
+    lane.conversion_ok = stats.ok();
+    if (!lane.conversion_ok) {
+        LOG_ERROR("Spool->HDF5 conversion failed on lane="
+                  << lane.component_tag
+                  << " records_read=" << stats.records_read
+                  << " truncated=" << stats.truncated
+                  << " error=" << stats.error);
+    } else if (delete_spool_after_convert_) {
+        std::error_code ec;
+        std::filesystem::remove(spool_path, ec);
+    }
+    // Reset for next scan.
     lane.current_filename.clear();
     lane.current_xml.clear();
-    lane.text_count = 0;
-    lane.pending_config_file.clear();
-    lane.pending_config_file_set = false;
-    lane.pending_config_text.clear();
-    lane.pending_config_text_set = false;
-    lane.pending_texts.clear();
 }
+
+// ----- Post-hoc accessors -----
 
 bool DumpRecorder::had_overflow() const noexcept
 {
@@ -277,179 +303,119 @@ uint64_t DumpRecorder::dropped_byte_count() const noexcept
 
 DumpRecorder::CounterSnapshot DumpRecorder::counters() const
 {
-    auto fill = [](const Lane& lane, SinkCounters& out) {
+    auto snap_lane = [](const Lane& lane, LaneSnapshot& out) {
         std::lock_guard<std::mutex> lk(lane.mtx);
-        if (lane.sink) {
-            out.acq = lane.sink->acquisition_count();
-            out.img = lane.sink->image_count();
-            out.wf  = lane.sink->waveform_count();
-            out.open = true;
-        } else if (lane.ever_closed) {
-            // Final counters from the most-recently-closed sink, so
-            // /debug/sinks remains a valid retention metric after the
-            // scan has closed.
-            out.acq = lane.last_closed_acq;
-            out.img = lane.last_closed_img;
-            out.wf  = lane.last_closed_wf;
-            out.open = false;
+        if (lane.spool) {
+            out.spool_records = lane.spool->records();
+            out.spool_bytes   = lane.spool->bytes();
+            out.spool_open    = lane.spool->healthy();
+            out.write_error   = lane.spool->last_error();
+        } else {
+            out.write_error = lane.write_error;
         }
+        out.converted_acq = lane.converted_acq;
+        out.converted_img = lane.converted_img;
+        out.converted_wf  = lane.converted_wf;
+        out.conversion_ok = lane.conversion_ok;
     };
     CounterSnapshot snap;
-    fill(scanner_, snap.scanner);
-    fill(recon_,   snap.recon);
+    snap_lane(scanner_, snap.scanner);
+    snap_lane(recon_,   snap.recon);
     snap.dropped_records = dropped_record_count();
-    snap.dropped_bytes = dropped_byte_count();
-    snap.had_overflow = had_overflow();
+    snap.dropped_bytes   = dropped_byte_count();
+    snap.had_overflow    = had_overflow();
+    snap.status          = status_.load();
     return snap;
 }
 
-void DumpRecorder::write_status_on_worker(MrdSink* sink, const Lane& lane)
-{
-    if (!sink) return;
-    const auto dropped_records = lane.dropped_records.load();
-    const auto dropped_bytes = lane.dropped_bytes.load();
-    sink->write_string_dataset("dump_complete", dropped_records == 0 ? "true" : "false");
-    sink->write_string_dataset("dropped_records", std::to_string(dropped_records));
-    sink->write_string_dataset("dropped_bytes", std::to_string(dropped_bytes));
-}
+// ----- Per-kind append APIs (build wire body, enqueue) -----
 
 DumpEnqueueResult DumpRecorder::set_scanner_config_file(std::string config)
 {
-    return enqueue_scanner(config.size(), [this, config = std::move(config)] {
-        if (!scanner_.sink) {
-            // Sink not open yet — buffer for replay by start_scan.
-            scanner_.pending_config_file = config;
-            scanner_.pending_config_file_set = true;
-            return;
-        }
-        scanner_.sink->write_string_dataset("config_file", config);
-    });
+    // CONFIG_FILE wire body is a fixed 1024-byte C string on the wire
+    // (padded with NUL). kspace_streamer and the reference python server
+    // both send 1024 bytes.
+    constexpr size_t kConfigFileBytes = 1024;
+    std::vector<uint8_t> body(kConfigFileBytes, 0);
+    const size_t n = std::min(config.size(), kConfigFileBytes - 1);
+    std::memcpy(body.data(), config.data(), n);
+    return enqueue_scanner(MRD_MESSAGE_CONFIG_FILE, std::move(body));
 }
 
 DumpEnqueueResult DumpRecorder::set_scanner_config_text(std::string config)
 {
-    return enqueue_scanner(config.size(), [this, config = std::move(config)] {
-        if (!scanner_.sink) {
-            scanner_.pending_config_text = config;
-            scanner_.pending_config_text_set = true;
-            return;
-        }
-        scanner_.sink->write_string_dataset("config", config);
-    });
+    return enqueue_scanner(MRD_MESSAGE_CONFIG_TEXT,
+                           build_length_prefixed_text_body(config));
 }
 
 DumpEnqueueResult DumpRecorder::append_scanner_text(std::string text)
 {
-    return enqueue_scanner(text.size(), [this, text = std::move(text)] {
-        if (!scanner_.sink) {
-            scanner_.pending_texts.push_back(text);
-            return;
-        }
-        scanner_.sink->write_string_dataset(
-            "text_" + std::to_string(scanner_.text_count++), text);
-    });
+    return enqueue_scanner(MRD_MESSAGE_TEXT,
+                           build_length_prefixed_text_body(text));
 }
 
 DumpEnqueueResult DumpRecorder::append_recon_text(std::string text)
 {
-    return enqueue_recon(text.size(), [this, text = std::move(text)] {
-        if (!recon_.sink) {
-            recon_.pending_texts.push_back(text);
-            return;
-        }
-        recon_.sink->write_string_dataset(
-            "text_" + std::to_string(recon_.text_count++), text);
-    });
+    return enqueue_recon(MRD_MESSAGE_TEXT,
+                         build_length_prefixed_text_body(text));
 }
 
-DumpEnqueueResult DumpRecorder::append_scanner_acquisition(const ISMRMRD::AcquisitionHeader& hdr,
-                                                            std::vector<uint8_t> traj,
-                                                            std::vector<uint8_t> samples)
+DumpEnqueueResult DumpRecorder::append_scanner_acquisition(
+    const ISMRMRD::AcquisitionHeader& hdr,
+    std::vector<uint8_t> traj,
+    std::vector<uint8_t> samples)
 {
-    const size_t bytes = traj.size() + samples.size() + sizeof(hdr);
-    auto acq = std::make_shared<ISMRMRD::Acquisition>(
-        hdr.number_of_samples, hdr.active_channels, hdr.trajectory_dimensions);
-    acq->setHead(hdr);
+    // Wire body: [AcquisitionHeader][traj bytes][sample bytes]
+    const size_t hdr_bytes = sizeof(hdr);
+    std::vector<uint8_t> body(hdr_bytes + traj.size() + samples.size());
+    std::memcpy(body.data(), &hdr, hdr_bytes);
     if (!traj.empty())
-        std::memcpy(acq->getTrajPtr(), traj.data(), traj.size());
+        std::memcpy(body.data() + hdr_bytes, traj.data(), traj.size());
     if (!samples.empty())
-        std::memcpy(acq->getDataPtr(), samples.data(), samples.size());
-    return enqueue_scanner(bytes, [this, acq = std::move(acq)] {
-        if (!scanner_.sink) return;
-        scanner_.sink->append_acquisition(*acq);
-    });
+        std::memcpy(body.data() + hdr_bytes + traj.size(),
+                    samples.data(), samples.size());
+    return enqueue_scanner(MRD_MESSAGE_ISMRMRD_ACQUISITION, std::move(body));
 }
 
-DumpEnqueueResult DumpRecorder::append_scanner_image(const ISMRMRD::ImageHeader& hdr,
-                                                     std::vector<uint8_t> attr,
-                                                     std::vector<uint8_t> pixels)
+DumpEnqueueResult DumpRecorder::append_scanner_image(
+    const ISMRMRD::ImageHeader& hdr,
+    std::vector<uint8_t> attr,
+    std::vector<uint8_t> pixels)
 {
-    const size_t bytes = attr.size() + pixels.size() + sizeof(hdr);
-    struct Payload {
-        ISMRMRD::ImageHeader hdr;
-        std::vector<uint8_t> attr;
-        std::vector<uint8_t> pixels;
-    };
-    auto p = std::make_shared<Payload>(Payload{hdr, std::move(attr), std::move(pixels)});
-    return enqueue_scanner(bytes, [this, p = std::move(p)] {
-        if (!scanner_.sink) return;
-        const std::string varname = "image_" + std::to_string(p->hdr.image_series_index);
-        scanner_.sink->append_image(varname, p->hdr,
-                                    reinterpret_cast<const char*>(p->attr.data()), p->attr.size(),
-                                    p->pixels.data(), p->pixels.size());
-    });
+    // Wire body: [ImageHeader][uint64 attr_len][attr][pixels]
+    const size_t hdr_bytes = sizeof(hdr);
+    const uint64_t attr_len = attr.size();
+    std::vector<uint8_t> body(hdr_bytes + sizeof(attr_len) +
+                              attr.size() + pixels.size());
+    size_t off = 0;
+    std::memcpy(body.data() + off, &hdr, hdr_bytes); off += hdr_bytes;
+    std::memcpy(body.data() + off, &attr_len, sizeof(attr_len));
+    off += sizeof(attr_len);
+    if (!attr.empty()) { std::memcpy(body.data() + off, attr.data(), attr.size()); off += attr.size(); }
+    if (!pixels.empty()) std::memcpy(body.data() + off, pixels.data(), pixels.size());
+    return enqueue_scanner(MRD_MESSAGE_ISMRMRD_IMAGE, std::move(body));
 }
 
-DumpEnqueueResult DumpRecorder::append_scanner_waveform(const ISMRMRD::WaveformHeader& hdr,
-                                                        std::vector<uint8_t> data)
+DumpEnqueueResult DumpRecorder::append_scanner_waveform(
+    const ISMRMRD::WaveformHeader& hdr,
+    std::vector<uint8_t> data)
 {
-    const size_t bytes = data.size() + sizeof(hdr);
-    auto wf = std::make_shared<ISMRMRD::Waveform>(hdr.number_of_samples, hdr.channels);
-    std::memcpy(&wf->head, &hdr, WAVEFORM_HEADER_BYTES);
+    // Wire body: [WaveformHeader][sample bytes]
+    std::vector<uint8_t> body(WAVEFORM_HEADER_BYTES + data.size());
+    std::memcpy(body.data(), &hdr, WAVEFORM_HEADER_BYTES);
     if (!data.empty())
-        std::memcpy(wf->data, data.data(), data.size());
-    return enqueue_scanner(bytes, [this, wf = std::move(wf)] {
-        if (!scanner_.sink) return;
-        scanner_.sink->append_waveform(*wf);
-    });
+        std::memcpy(body.data() + WAVEFORM_HEADER_BYTES, data.data(), data.size());
+    return enqueue_scanner(MRD_MESSAGE_ISMRMRD_WAVEFORM, std::move(body));
 }
 
 DumpEnqueueResult DumpRecorder::append_recon_image(std::vector<uint8_t> body)
 {
-    return enqueue_recon(body.size(), [this, body = std::move(body)] {
-        if (body.size() < IMAGE_HEADER_BYTES + sizeof(uint64_t)) return;
-        const auto* hdr = reinterpret_cast<const ISMRMRD::ImageHeader*>(body.data());
-        uint64_t attr_len = 0;
-        std::memcpy(&attr_len, body.data() + IMAGE_HEADER_BYTES, sizeof(uint64_t));
-        const size_t attr_off = IMAGE_HEADER_BYTES + sizeof(uint64_t);
-        // MEDIUM #13: overflow-safe bound check.
-        if (body.size() < attr_off) return;
-        if (attr_len > body.size() - attr_off) return;
-        const size_t pixel_off = attr_off + static_cast<size_t>(attr_len);
-        if (!recon_.sink) return;
-        const std::string varname = "image_" + std::to_string(hdr->image_series_index);
-        recon_.sink->append_image(varname, *hdr,
-                                  reinterpret_cast<const char*>(body.data() + attr_off),
-                                  static_cast<size_t>(attr_len),
-                                  body.data() + pixel_off,
-                                  body.size() - pixel_off);
-    });
+    return enqueue_recon(MRD_MESSAGE_ISMRMRD_IMAGE, std::move(body));
 }
 
 DumpEnqueueResult DumpRecorder::append_recon_waveform(std::vector<uint8_t> body)
 {
-    return enqueue_recon(body.size(), [this, body = std::move(body)] {
-        if (body.size() < WAVEFORM_HEADER_BYTES) return;
-        const auto* hdr = reinterpret_cast<const ISMRMRD::WaveformHeader*>(body.data());
-        const size_t data_bytes = size_t(hdr->number_of_samples) * hdr->channels * sizeof(uint32_t);
-        if (body.size() < WAVEFORM_HEADER_BYTES + data_bytes) return;
-        if (!recon_.sink) return;
-        ISMRMRD::Waveform wf(hdr->number_of_samples, hdr->channels);
-        std::memcpy(&wf.head, hdr, WAVEFORM_HEADER_BYTES);
-        if (data_bytes > 0)
-            std::memcpy(wf.data, body.data() + WAVEFORM_HEADER_BYTES, data_bytes);
-        recon_.sink->append_waveform(wf);
-    });
+    return enqueue_recon(MRD_MESSAGE_ISMRMRD_WAVEFORM, std::move(body));
 }
 
 } // namespace mrd
