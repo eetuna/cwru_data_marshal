@@ -13,6 +13,8 @@
 
 #include <catch2/catch_all.hpp>
 
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -260,20 +262,155 @@ TEST_CASE("DumpRecorder scanner+recon archives share the same <ts> stem",
     REQUIRE(rec.start_scan("caller_suggested.h5",
                            "<?xml version=\"1.0\"?><ismrmrdHeader/>")
             == mrd::DumpEnqueueResult::Accepted);
-    // Also hit the recon lane so it opens a spool too.
-    std::vector<uint8_t> empty_img;
-    (void)rec.append_recon_image(std::move(empty_img));
+    // Hit the recon lane with real content (text) so it definitely
+    // produces an .h5. An earlier version of this test used an empty
+    // recon image which the converter skipped as malformed, letting
+    // the test pass even when the shared-stem invariant was broken.
+    REQUIRE(rec.append_recon_text("recon hello")
+            == mrd::DumpEnqueueResult::Accepted);
     rec.close_scan();
 
     auto scanner_h5 = find_single_h5(mrd::dump_scanner_dir(dir));
     auto recon_h5   = find_single_h5(mrd::dump_recon_dir(dir));
     REQUIRE(!scanner_h5.empty());
-    // Recon lane may not have produced an h5 if the empty body was
-    // rejected by the converter as malformed. What matters is: if it
-    // did produce one, the stem MUST match scanner's.
-    if (!recon_h5.empty()) {
-        CHECK(scanner_h5.stem() == recon_h5.stem());
+    REQUIRE(!recon_h5.empty());
+    CHECK(scanner_h5.stem() == recon_h5.stem());
+}
+
+TEST_CASE("DumpRecorder close-barrier race: post-barrier record does NOT "
+          "truncate just-closed spool",
+          "[dump][spool][race]") {
+    // Regression for codex finding after 850c349: close_scan's barrier
+    // closed the spool, but scan_stem_ was only cleared later. If a
+    // record arrived in the window in between, ensure_spool_on_worker
+    // would read the OLD stem, open the same spool path with "wb", and
+    // truncate it before convert_spool_to_hdf5 ran.
+    //
+    // Fix: close_scan_pending_ flag set under scan_stem_mtx_. Any
+    // enqueue_on that sees pending=true generates a fresh stem, so
+    // the post-barrier record writes to a DIFFERENT spool path.
+    auto dir = fs::temp_directory_path() / "test_dump_barrier_race";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    {
+        mrd::DumpRecorder rec(dir);
+        REQUIRE(rec.start_scan("first.h5", "<?xml version=\"1.0\"?><ismrmrdHeader/>")
+                == mrd::DumpEnqueueResult::Accepted);
+        REQUIRE(rec.append_scanner_text("from scan 1")
+                == mrd::DumpEnqueueResult::Accepted);
+
+        // Simulate a post-barrier race: enqueue ACQs (fast to
+        // replay, unlike TEXT which goes through per-record HDF5
+        // string writes) on a background thread, bounded count so
+        // the test does not hang in the converter even if something
+        // regresses. At least some of these will land after the
+        // barrier but before close_scan returns.
+        constexpr uint16_t nsamples = 4;
+        constexpr uint16_t nchannels = 1;
+        const size_t sample_bytes =
+            size_t(nsamples) * nchannels * 2 * sizeof(float);
+        ISMRMRD::AcquisitionHeader rhdr{};
+        rhdr.version = 1;
+        rhdr.number_of_samples = nsamples;
+        rhdr.active_channels = nchannels;
+        rhdr.trajectory_dimensions = 0;
+
+        std::atomic<bool> stop{false};
+        std::thread hammer([&] {
+            while (!stop.load()) {
+                std::vector<uint8_t> s(sample_bytes, 0x77);
+                (void)rec.append_scanner_acquisition(rhdr, {}, std::move(s));
+            }
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        rec.close_scan();
+        stop.store(true);
+        hammer.join();
+
+        // Any records that raced the close started a second scan
+        // (fresh stem). Close that one too so both spools flush to h5.
+        rec.close_scan();
     }
+
+    // The FIRST scan's .h5 must contain at least the pre-close text.
+    // If truncation happened, it'd be empty or missing.
+    int n_h5 = 0;
+    bool found_first_text = false;
+    for (auto& ent : fs::directory_iterator(mrd::dump_scanner_dir(dir))) {
+        if (ent.path().extension() != ".h5") continue;
+        ++n_h5;
+        // Try reading text_0 from every h5; one of them must be the
+        // first scan's "from scan 1".
+        auto v = read_string_dataset_or_empty(ent.path(), "text_0");
+        if (v == "from scan 1") found_first_text = true;
+    }
+    CHECK(n_h5 >= 1);
+    CHECK(found_first_text);
+}
+
+TEST_CASE("DumpRecorder /debug/sinks counters after close + stale-counter reset",
+          "[dump][spool][counters]") {
+    // Regression for codex findings #2 and #3 against 850c349:
+    //   #2 - post-close spool_records went to 0 because counters()
+    //        only read from lane.spool which is reset after close.
+    //   #3 - converted_acq/img/wf on a lane that received nothing in
+    //        scan 2 still showed scan-1 numbers.
+    auto dir = fs::temp_directory_path() / "test_dump_counter_reset";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    constexpr uint16_t nsamples = 8;
+    constexpr uint16_t nchannels = 2;
+    const size_t sample_bytes =
+        size_t(nsamples) * nchannels * 2 * sizeof(float);
+    ISMRMRD::AcquisitionHeader hdr{};
+    hdr.version = 1;
+    hdr.number_of_samples = nsamples;
+    hdr.active_channels = nchannels;
+    hdr.trajectory_dimensions = 0;
+
+    mrd::DumpRecorder rec(dir);
+
+    // Scan 1: scanner sends acqs, recon sends a text.
+    REQUIRE(rec.start_scan("s1.h5", "<?xml version=\"1.0\"?><ismrmrdHeader/>")
+            == mrd::DumpEnqueueResult::Accepted);
+    for (int i = 0; i < 3; ++i) {
+        std::vector<uint8_t> s(sample_bytes, 0x11);
+        REQUIRE(rec.append_scanner_acquisition(hdr, {}, std::move(s))
+                == mrd::DumpEnqueueResult::Accepted);
+    }
+    REQUIRE(rec.append_recon_text("scan1 recon")
+            == mrd::DumpEnqueueResult::Accepted);
+    rec.close_scan();
+
+    // Fix #2: after close, /debug/sinks should STILL report non-zero
+    // spool_records from the just-closed scan.
+    auto snap1 = rec.counters();
+    CHECK(snap1.scanner.spool_records > 0);
+    CHECK(snap1.scanner.spool_bytes > 0);
+    CHECK(snap1.scanner.converted_acq == 3);
+    CHECK(snap1.recon.spool_records > 0);
+
+    // Scan 2: only scanner activity, no recon records.
+    REQUIRE(rec.start_scan("s2.h5", "<?xml version=\"1.0\"?><ismrmrdHeader/>")
+            == mrd::DumpEnqueueResult::Accepted);
+    for (int i = 0; i < 5; ++i) {
+        std::vector<uint8_t> s(sample_bytes, 0x22);
+        REQUIRE(rec.append_scanner_acquisition(hdr, {}, std::move(s))
+                == mrd::DumpEnqueueResult::Accepted);
+    }
+    rec.close_scan();
+
+    auto snap2 = rec.counters();
+    // Scanner: new count of 5 acqs; must not carry scan-1's 3.
+    CHECK(snap2.scanner.converted_acq == 5);
+    // Fix #3: recon had no content this scan, so converted_* must
+    // be reset to 0 rather than still showing scan-1's "recon text".
+    CHECK(snap2.recon.converted_acq == 0);
+    CHECK(snap2.recon.converted_img == 0);
+    CHECK(snap2.recon.converted_wf == 0);
 }
 
 TEST_CASE("SpoolConverter rejects records with body length > spool size",

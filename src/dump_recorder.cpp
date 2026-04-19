@@ -56,9 +56,30 @@ DumpRecorder::DumpRecorder(std::filesystem::path dump_dir,
 
 DumpRecorder::~DumpRecorder()
 {
-    close_scan();
+    // Destructor path (process shutdown / DumpRecorder reset): stop
+    // admissions FIRST so no racy enqueue can slip in between
+    // close_scan's barrier and worker teardown. Then stop the worker,
+    // which drains anything already queued and calls
+    // close_spool_on_worker on exit. Finally run the converter on
+    // whatever was spooled.
+    //
+    // We deliberately do NOT call close_scan() here. close_scan uses
+    // a barrier + pending-flag protocol that assumes the worker keeps
+    // running afterwards to accept the next scan. In the destructor
+    // we are shutting down, so the simpler stop-first path is
+    // correct and closes the "record arrives after close_scan
+    // returns" window that a call to close_scan would leave open.
+    std::string stem;
+    {
+        std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
+        stem = scan_stem_;
+    }
     stop_lane(scanner_);
     stop_lane(recon_);
+    if (!stem.empty()) {
+        convert_lane(scanner_, stem, /*is_scanner_side=*/true);
+        convert_lane(recon_,   stem, /*is_scanner_side=*/false);
+    }
 }
 
 void DumpRecorder::start_lane(Lane& lane, std::filesystem::path lane_dir,
@@ -96,12 +117,15 @@ DumpEnqueueResult DumpRecorder::enqueue_on(Lane& lane, uint16_t tag,
                                             std::vector<uint8_t> body)
 {
     // Generate the shared scan stem on first record of the scan so
-    // both lanes use the same <ts> in their filenames. No-op if a
-    // stem is already set (either by a prior record or by start_scan).
+    // both lanes use the same <ts> in their filenames. While a
+    // close_scan is pending (barriers issued, convert not yet
+    // complete), force a fresh stem so a post-barrier record cannot
+    // reopen the closed spool path with "wb" and truncate it.
     {
         std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
-        if (scan_stem_.empty()) {
+        if (scan_stem_.empty() || close_scan_pending_) {
             scan_stem_ = scan_filename_now();
+            close_scan_pending_ = false;
         }
     }
     // Contract: no drop on queue pressure. We append unconditionally;
@@ -140,6 +164,11 @@ void DumpRecorder::ensure_spool_on_worker(Lane& lane)
 void DumpRecorder::close_spool_on_worker(Lane& lane)
 {
     if (lane.spool) {
+        // Snapshot counters BEFORE reset so /debug/sinks can keep
+        // reporting them post-close. Atomic store so HTTP-thread
+        // reads get a well-ordered value without holding lane.mtx.
+        lane.last_spool_records.store(lane.spool->records());
+        lane.last_spool_bytes.store(lane.spool->bytes());
         // close() flushes then fcloses, surfacing errors from either.
         if (!lane.spool->close()) {
             lane.write_error = lane.spool->last_error();
@@ -173,10 +202,12 @@ void DumpRecorder::worker_loop(Lane& lane)
 
         if (rec.barrier) {
             // Flush and close the spool so the converter sees a
-            // complete file. Signal the waiter (close_scan). Worker
-            // keeps running so new enqueues after the barrier are NOT
-            // rejected with Stopped; they'll start a new spool via
-            // ensure_spool_on_worker.
+            // complete file. Worker keeps running so new enqueues
+            // after the barrier are NOT rejected with Stopped.
+            // scan_stem_ is protected from post-barrier truncation by
+            // close_scan_pending_ (set by close_scan before draining);
+            // any record that races with the barrier will generate
+            // a fresh stem via enqueue_on rather than reusing this one.
             close_spool_on_worker(lane);
             if (rec.signal) rec.signal->set_value();
             continue;
@@ -263,6 +294,17 @@ void DumpRecorder::close_scan()
     // the promise. We wait on the future here. The worker thread is
     // never stopped, so concurrent enqueues after the barrier are
     // admitted (they'll open a new spool when the next scan starts).
+    // Mark close_scan as pending BEFORE draining. Any enqueue that
+    // races with the barrier sees close_scan_pending_=true and
+    // generates a fresh stem rather than reusing the one about to
+    // be closed.
+    std::string stem;
+    {
+        std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
+        stem = scan_stem_;
+        close_scan_pending_ = true;
+    }
+
     auto drain_lane = [](Lane& lane) {
         auto signal = std::make_shared<std::promise<void>>();
         auto fut = signal->get_future();
@@ -283,19 +325,23 @@ void DumpRecorder::close_scan()
     drain_lane(scanner_);
     drain_lane(recon_);
 
-    // Snapshot and clear the shared scan stem. convert_lane needs the
-    // stem to find the spool file; next scan needs a fresh <ts>.
-    std::string stem;
-    {
-        std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
-        stem = std::move(scan_stem_);
-        scan_stem_.clear();
-    }
-
     status_.store(ConversionStatus::Converting);
     LOG_INFO("Converting dump spool to HDF5");
     convert_lane(scanner_, stem, /*is_scanner_side=*/true);
     convert_lane(recon_,   stem, /*is_scanner_side=*/false);
+
+    // Clear the old stem and the close_scan_pending_ guard. If a
+    // post-barrier record already generated a fresh stem (because it
+    // raced the barrier), scan_stem_ has been overwritten and we
+    // leave it alone. Otherwise we reset so the next scan starts
+    // clean.
+    {
+        std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
+        close_scan_pending_ = false;
+        if (scan_stem_ == stem) {
+            scan_stem_.clear();
+        }
+    }
 
     const bool ok = scanner_.conversion_ok && recon_.conversion_ok;
     status_.store(ok ? ConversionStatus::Complete : ConversionStatus::Failed);
@@ -305,9 +351,16 @@ void DumpRecorder::close_scan()
 void DumpRecorder::convert_lane(Lane& lane, const std::string& stem,
                                  bool is_scanner)
 {
+    // Reset counters at the top so a lane that saw records in a
+    // prior scan doesn't carry stale converted_acq/img/wf into the
+    // next /debug/sinks read for a scan where it received nothing.
+    lane.converted_acq = 0;
+    lane.converted_img = 0;
+    lane.converted_wf  = 0;
+    lane.conversion_ok = true; // overwritten on failure below
+
     if (stem.empty()) {
         // No records were ever spooled in this scan.
-        lane.conversion_ok = true;
         return;
     }
     auto spool_path = lane.lane_dir / (stem + ".spool");
@@ -315,7 +368,6 @@ void DumpRecorder::convert_lane(Lane& lane, const std::string& stem,
     if (!std::filesystem::exists(spool_path)) {
         // The lane never received any record this scan (e.g. recon
         // lane on a scanner-only probe).
-        lane.conversion_ok = true;
         return;
     }
     auto stats = convert_spool_to_hdf5(spool_path, h5_path, is_scanner);
@@ -362,7 +414,11 @@ DumpRecorder::CounterSnapshot DumpRecorder::counters() const
             out.spool_open    = lane.spool->healthy();
             out.write_error   = lane.spool->last_error();
         } else {
-            out.write_error = lane.write_error;
+            // Post-close: surface the last spool's counters so
+            // /debug/sinks stays meaningful after conversion.
+            out.spool_records = lane.last_spool_records.load();
+            out.spool_bytes   = lane.last_spool_bytes.load();
+            out.write_error   = lane.write_error;
         }
         out.converted_acq = lane.converted_acq;
         out.converted_img = lane.converted_img;

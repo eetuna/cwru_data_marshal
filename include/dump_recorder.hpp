@@ -156,6 +156,15 @@ private:
         std::string current_xml;        // set by start_scan
         std::string write_error;        // last spool write error, if any
 
+        // Snapshot of spool stats captured in close_spool_on_worker
+        // before spool.reset(). Used by /debug/sinks so post-close
+        // readers still see what the spool held. Zero until the
+        // first scan closes. Atomic because the worker thread writes
+        // and a /debug/sinks reader on the HTTP thread reads without
+        // holding lane.mtx.
+        std::atomic<uint64_t> last_spool_records{0};
+        std::atomic<uint64_t> last_spool_bytes{0};
+
         // Post-conversion counters, populated in close_scan by the
         // SpoolConverter result.
         uint32_t converted_acq{0};
@@ -173,9 +182,13 @@ private:
     // Shared scan stem. First record on EITHER lane generates it under
     // this mutex; both lanes use the same <ts> for their spool and
     // converted .h5. start_scan adopts this stem (or generates it if
-    // it's empty). Cleared at close_scan.
+    // it's empty). While close_scan_pending_ is true, the stem is
+    // treated as "the scan that just closed" and any new record
+    // forces generation of a fresh stem + fresh spool rather than
+    // reopening (and truncating) the closed one.
     mutable std::mutex scan_stem_mtx_;
     std::string scan_stem_;
+    bool close_scan_pending_{false};
 
     void start_lane(Lane& lane, std::filesystem::path lane_dir, std::string tag);
     void stop_lane(Lane& lane);
