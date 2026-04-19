@@ -68,8 +68,20 @@ TEST_CASE("push_message_to_scanner returns promptly when no scanner connected",
     if (ioc_thread.joinable()) ioc_thread.join();
 }
 
-TEST_CASE("push_message_to_scanner survives stuck scanner",
-          "[mrd][pushback]") {
+TEST_CASE("push_message_to_scanner unblocks when stop() closes socket",
+          "[mrd][pushback][shutdown]") {
+    // 2026-04-19 round-7: pushback is now inline ::send. If the
+    // scanner socket's recv buffer fills, send() blocks -- this is
+    // the standard TCP flow-control mechanism that python-ismrmrd-server
+    // and every other MRD peer relies on. The shutdown-safety property
+    // that matters is: a blocked pushback call must unblock when the
+    // listener's stop() closes the scanner fd. Test:
+    //   1. Connect a stuck-scanner client that never reads.
+    //   2. Launch a thread that hammers push_message_to_scanner; once
+    //      the kernel buffer fills, that thread blocks in ::send.
+    //   3. Call listener.stop() from the main thread. It closes the
+    //      scanner socket, which returns EPIPE on the blocked send.
+    //   4. The hammer thread returns and joins within a timeout.
     MarshalState state;
     state.dump_dir = "/tmp/test_scanner_pushback_stuck";
 
@@ -79,42 +91,45 @@ TEST_CASE("push_message_to_scanner survives stuck scanner",
 
     std::thread ioc_thread([&] { ioc.run(); });
 
-    // Connect a "scanner" client that never reads. Its recv buffer will fill
-    // up under large sends. The pre-fix blocking ::send would hang the caller
-    // once the buffer fills.
     tcp::socket stuck_scanner(ioc);
     stuck_scanner.connect(tcp::endpoint(net::ip::make_address("127.0.0.1"), port));
-
-    // Give the listener a moment to accept.
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    // Fire a large number of big messages. With the async writer, the
-    // writer thread may block on ::send once the scanner's recv buffer
-    // is full; push_message_to_scanner itself must remain prompt.
-    // 2026-04-19: pushback is now unbounded and lossless (contract
-    // says recon return messages reach the scanner unconditionally).
-    // Memory grows while the scanner is stuck; growth is surfaced as
-    // a high-watermark warning but no records are dropped.
     const std::string body(256 * 1024, 'Y'); // 256 KB each
-    const int iterations = 50;
+    std::atomic<bool> hammer_done{false};
+    std::atomic<int> hammer_sent{0};
+    std::thread hammer([&] {
+        for (int i = 0; i < 1000; ++i) {
+            listener.push_message_to_scanner(0x1022, body.data(), body.size());
+            hammer_sent.fetch_add(1);
+            // If the socket gets closed by stop(), write_exact_fd
+            // returns immediately and we loop fast -- cap iterations
+            // to avoid a tight spin after unblock.
+            if (hammer_done.load()) break;
+        }
+        hammer_done.store(true);
+    });
 
-    auto start = std::chrono::steady_clock::now();
-    for (int i = 0; i < iterations; ++i) {
-        listener.push_message_to_scanner(0x1022, body.data(), body.size());
-    }
-    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start).count();
+    // Give the hammer a moment to fill the scanner's recv buffer and
+    // block in ::send.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-    INFO("Elapsed: " << elapsed_ms << " ms for " << iterations
-         << " pushes to stuck scanner");
-    // Caller path must be fast even with a stuck scanner.
-    REQUIRE(elapsed_ms < 1000);
+    auto stop_start = std::chrono::steady_clock::now();
+    listener.stop();  // must unblock the hammer thread
+    hammer.join();
+    auto stop_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - stop_start).count();
+
+    INFO("stop() + hammer.join() took " << stop_ms << " ms, hammer_sent="
+         << hammer_sent.load());
+    // Should be well under a second; stop() closes the fd and the
+    // blocked send returns EPIPE immediately.
+    REQUIRE(stop_ms < 2000);
 
     boost::system::error_code ignore;
     stuck_scanner.shutdown(tcp::socket::shutdown_both, ignore);
     stuck_scanner.close(ignore);
 
-    listener.stop();
     ioc.stop();
     if (ioc_thread.joinable()) ioc_thread.join();
 }
@@ -181,8 +196,7 @@ TEST_CASE("push_message_to_scanner is lossless past the old 1024 cap",
     scanner.close(ignore);
     if (reader.joinable()) reader.join();
 
-    INFO("received " << received.load() << " / " << kCount
-         << " (peak queue " << listener.writer_queue_peak() << ")");
+    INFO("received " << received.load() << " / " << kCount);
     REQUIRE(received.load() == kCount);
 
     listener.stop();

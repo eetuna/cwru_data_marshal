@@ -66,7 +66,6 @@ public:
     {
         acceptor_.set_option(net::socket_base::reuse_address(true));
         LOG_INFO("MRD TCP listener on port " << port);
-        writer_thread_ = std::thread(&MrdTcpListener::writer_loop, this);
         do_accept();
     }
 
@@ -95,62 +94,55 @@ public:
             }
         }
         sessions_.shutdown_and_join();
-
-        // Stop the async writer thread.
-        {
-            std::lock_guard<std::mutex> lk(writer_mtx_);
-            writer_stopping_ = true;
-        }
-        writer_cv_.notify_all();
-        if (writer_thread_.joinable()) writer_thread_.join();
     }
 
-    // Enqueue a recon MRD message to push back to the scanner. Non-blocking;
-    // the actual blocking ::send runs on writer_thread_.
+    // Push a recon MRD return message back to the scanner synchronously.
     //
-    // HIGH #4: caller (recon reader) used to block on ::send here, which
-    // could deadlock shutdown if the scanner socket was stuck.
+    // 2026-04-19 round-7: no in-process queue. This matches
+    // python-ismrmrd-server and every standard MRD peer. The only
+    // backpressure mechanism on this path is TCP flow control: if
+    // the scanner socket's recv buffer fills, the kernel blocks
+    // ::send here, which applies TCP backpressure back to recon
+    // (the caller of this function is the recon reader thread, which
+    // then blocks on the next recon frame). That is the correct
+    // protocol-level mechanism the MRD streaming protocol relies on.
     //
-    // 2026-04-19: the contract (MRI_MARSHAL_PROTOCOL_CONTRACT_2026-04-19.md)
-    // says recon return messages are pushed back to the scanner
-    // unconditionally. The previous 1024-entry drop-oldest cap violated
-    // that. Queue is now unbounded; the ONLY case where we skip a
-    // message is when the writer is stopping (shutdown). Growth is
-    // visible via a one-shot high-watermark warning + /debug/sinks
-    // telemetry; it does not cause drops.
+    // Shutdown safety: stop() closes the scanner socket before
+    // joining session threads. A blocked ::send on a closed fd
+    // returns EPIPE immediately; write_exact_fd reports failure, we
+    // log, and the recon reader unwinds normally.
+    //
+    // The previous writer_thread_ (HIGH #4 2026-04) was meant to
+    // avoid a shutdown deadlock caused by blocking ::send on a stuck
+    // scanner. The correct fix for that is the socket-shutdown path
+    // above, not an in-process queue. A queue re-introduces choices
+    // between drop (contract violation) and unbounded growth (OOM)
+    // that TCP flow control already solves.
     void push_message_to_scanner(uint16_t tag, const void* data, size_t len) {
-        std::vector<uint8_t> payload;
-        if (len > 0) {
-            payload.assign(static_cast<const uint8_t*>(data),
-                           static_cast<const uint8_t*>(data) + len);
-        }
-        size_t size_after = 0;
+        int fd = -1;
+        std::shared_ptr<tcp::socket> sock_hold;
         {
-            std::lock_guard<std::mutex> lk(writer_mtx_);
-            if (writer_stopping_) return;
-            writer_queue_.push_back({tag, std::move(payload)});
-            size_after = writer_queue_.size();
-            writer_queue_peak_.store(
-                std::max<size_t>(writer_queue_peak_.load(), size_after));
+            std::lock_guard<std::mutex> lk(scanner_mtx_);
+            if (scanner_socket_ && scanner_socket_->is_open()) {
+                fd = scanner_socket_->native_handle();
+                sock_hold = scanner_socket_;  // keep alive for the duration of the send
+            }
         }
-        writer_cv_.notify_one();
-
-        if (size_after >= kWriterHighWatermark &&
-            !writer_drop_logged_.exchange(true)) {
-            LOG_WARN("Scanner writer queue depth " << size_after
-                     << " >= " << kWriterHighWatermark
-                     << "; scanner TCP is falling behind. Queue is "
-                     << "unbounded; memory will grow until the scanner "
-                     << "catches up or the session closes.");
+        if (fd < 0) {
+            LOG_DEBUG("Scanner writer: no scanner connected, drop tag=" << tag);
+            return;
+        }
+        if (!write_exact_fd(fd, &tag, sizeof(tag)) ||
+            (len > 0 && !write_exact_fd(fd, data, len))) {
+            LOG_WARN("Scanner writer: failed to push MRD message tag=" << tag);
+            // Socket is broken; close it so the session exits.
+            boost::system::error_code ignore;
+            if (sock_hold) {
+                sock_hold->shutdown(tcp::socket::shutdown_both, ignore);
+                sock_hold->close(ignore);
+            }
         }
     }
-
-    // Observability for /debug/sinks-style telemetry. writer_queue_peak
-    // is sticky for the connection lifetime; had_overflow stays true
-    // once the high-watermark has been crossed even if the queue
-    // later drains.
-    size_t writer_queue_peak() const noexcept { return writer_queue_peak_.load(); }
-    bool   writer_had_high_watermark() const noexcept { return writer_drop_logged_.load(); }
 
     bool has_scanner() const {
         std::lock_guard<std::mutex> lk(scanner_mtx_);
@@ -158,17 +150,6 @@ public:
     }
 
 private:
-    // Non-blocking watermark for the scanner writer queue. Crossing
-    // this does NOT drop records; it logs a one-shot warning and
-    // updates writer_drop_logged_ (kept that name for backwards
-    // compat, but it no longer means anything was dropped).
-    static constexpr size_t kWriterHighWatermark = 10000;
-
-    struct WriterJob {
-        uint16_t tag;
-        std::vector<uint8_t> payload;  // empty if no body
-    };
-
     tcp::acceptor acceptor_;
     MarshalState& state_;
     ReconForwarder* forwarder_;
@@ -177,18 +158,6 @@ private:
     std::atomic<bool> session_active_{false};
     bool stopping_{false};           // protected by scanner_mtx_
     SessionRegistry sessions_;
-
-    // Async writer: decouples recon-reader from blocking ::send to scanner.
-    std::mutex writer_mtx_;
-    std::condition_variable writer_cv_;
-    std::deque<WriterJob> writer_queue_;
-    bool writer_stopping_{false};
-    // Name kept for backwards compat; post-2026-04-19 it means
-    // "high-watermark warning has fired" rather than "records were
-    // dropped." Pushback is now unbounded.
-    std::atomic<bool> writer_drop_logged_{false};
-    std::atomic<size_t> writer_queue_peak_{0};
-    std::thread writer_thread_;
 
     // HIGH #10: act on DumpRecorder enqueue result at the moment of drop.
     // Log once per kind to avoid flooding. Returns true if accepted.
@@ -221,54 +190,9 @@ private:
         return true;
     }
 
-    void writer_loop() {
-        while (true) {
-            WriterJob job;
-            {
-                std::unique_lock<std::mutex> lk(writer_mtx_);
-                writer_cv_.wait(lk, [this] {
-                    return writer_stopping_ || !writer_queue_.empty();
-                });
-                if (writer_queue_.empty()) {
-                    // Woken by stop with no work.
-                    if (writer_stopping_) return;
-                    continue;
-                }
-                job = std::move(writer_queue_.front());
-                writer_queue_.pop_front();
-            }
-
-            // Grab the fd under scanner_mtx_, but release before the blocking
-            // ::send so other callers aren't serialized on it.
-            int fd = -1;
-            std::shared_ptr<tcp::socket> sock_hold;
-            {
-                std::lock_guard<std::mutex> lk(scanner_mtx_);
-                if (scanner_socket_ && scanner_socket_->is_open()) {
-                    fd = scanner_socket_->native_handle();
-                    sock_hold = scanner_socket_;  // keep alive while we send
-                }
-            }
-            if (fd < 0) {
-                LOG_DEBUG("Scanner writer: no scanner connected, drop tag=" << job.tag);
-                continue;
-            }
-            if (!write_exact_fd(fd, &job.tag, sizeof(job.tag)) ||
-                (!job.payload.empty() &&
-                 !write_exact_fd(fd, job.payload.data(), job.payload.size()))) {
-                LOG_WARN("Scanner writer: failed to push MRD message tag=" << job.tag);
-                // Socket is broken; close it so the session exits.
-                boost::system::error_code ignore;
-                if (sock_hold) {
-                    sock_hold->shutdown(tcp::socket::shutdown_both, ignore);
-                    sock_hold->close(ignore);
-                }
-            } else {
-                LOG_DEBUG("Scanner writer: pushed tag=" << job.tag
-                          << " (" << job.payload.size() << " bytes)");
-            }
-        }
-    }
+    // writer_loop removed 2026-04-19 round-7: push_message_to_scanner
+    // now calls write_exact_fd inline. See push_message_to_scanner's
+    // header comment for rationale.
 
     void do_accept() {
         acceptor_.async_accept([this](boost::system::error_code ec, tcp::socket sock) {
