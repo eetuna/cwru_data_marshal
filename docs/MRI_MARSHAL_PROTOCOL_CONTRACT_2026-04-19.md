@@ -26,11 +26,15 @@ Required message IDs:
 - `1022` ISMRMRD IMAGE
 - `1026` ISMRMRD WAVEFORM
 
-The marshal forwards scanner MRD messages to recon over MRD TCP unconditionally; forwarding is not gated on the archival mode. Scanner archival depends on the archival mode (see Archival Mode).
+The marshal forwards scanner MRD messages to recon over MRD TCP unconditionally; forwarding is not gated on the archival mode.
+
+**Forwarding carve-out for scanner-origin IMAGE (1022).** Scanner-origin IMAGE is pre-reconstructed image data and is not useful input to a k-space reconstruction service. Marshal archives scanner IMAGE (to `live/from_scanner/` or `dump/from_scanner/` depending on mode) but does NOT forward it to recon. All other scanner messages (CONFIG_FILE, CONFIG_TEXT, METADATA_XML, TEXT, ACQUISITION, WAVEFORM, CLOSE) are forwarded to recon.
+
+Scanner archival depends on the archival mode (see Archival Mode).
 
 ## Marshal to Recon
 
-The marshal opens one MRD TCP connection to the configured recon service for a scan. Recon should see the same MRD message sequence it would see from a direct scanner/client connection.
+The marshal opens one MRD TCP connection to the configured recon service for a scan. With the scanner-IMAGE carve-out above, recon sees the MRD sequence it would see from a direct scanner/client connection.
 
 Recon code should not need marshal-specific changes.
 
@@ -59,7 +63,7 @@ Recon archival depends on the archival mode (see Archival Mode).
 - `dump/from_reconstruction/scan_<ts>.h5` archives the full recon return stream: IMAGE + WAVEFORM + TEXT.
 - No files are written under `live/`. `latest_image.h5` is not produced.
 
-Live and dump files for a given scan share the same `<ts>`.
+Within the active mode, scanner and recon archive files for a given scan share the same `<ts>`.
 
 ## Retention
 
