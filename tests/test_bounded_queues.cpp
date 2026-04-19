@@ -162,24 +162,22 @@ TEST_CASE("LiveImageRecorder counters() is safe under concurrent polling",
 
 TEST_CASE("LiveImageRecorder is lossless past the old 4096-job cap",
           "[live][lossless]") {
-    // Regression for the 2026-04-19 lossless-live change. Under the
-    // old design, LiveImageRecorder::enqueue erased the oldest
-    // droppable pending job once queue_.size() >= 4096. That was a
-    // latent contract violation; it only mattered if the enqueuer
-    // outpaced the worker. Post-fix: no drop path, period.
+    // Regression for the 2026-04-19 lossless-live change.
     //
-    // To deterministically exercise the old failure mode, we:
-    //   (a) use a large valid HDF5 image body so each worker write
-    //       takes measurable time (tens of microseconds per VLEN
-    //       pixel write), forcing queue backlog when the enqueuer
-    //       pushes at memory speed;
-    //   (b) push records fast in a single thread and sample
-    //       counters().queued_jobs; require the depth exceeds the
-    //       old 4096 cap at some point -- that proves the enqueuer
-    //       really did outpace the worker, which is the exact
-    //       scenario that used to trigger drop-oldest;
-    //   (c) require dropped_count stays 0 and had_overflow stays
-    //       false throughout.
+    // Round 5 design (pre-round-7): LiveImageRecorder had a bounded
+    // queue that dropped oldest at 4096 entries. Round 6 removed the
+    // drop path and made the queue unbounded. Round 7 replaced the
+    // per-record HDF5 append worker with a raw-MRD spool + close-time
+    // convert, same model as dump.
+    //
+    // With the spool, the worker drains at disk bandwidth so queue
+    // depth stays near zero even under enqueue burst -- the old
+    // "peak > 4096" proxy for "enqueuer outpaced worker" no longer
+    // applies. The lossless guarantee is now verified end-to-end:
+    //   (a) enqueue N records
+    //   (b) close_scan runs the spool->HDF5 converter
+    //   (c) the final HDF5 file has exactly N images
+    //   (d) dropped_count stays 0 throughout
     auto dir = fs::temp_directory_path() / "test_live_lossless";
     fs::remove_all(dir);
     fs::create_directories(dir);
@@ -188,33 +186,22 @@ TEST_CASE("LiveImageRecorder is lossless past the old 4096-job cap",
     REQUIRE(rec.dropped_count() == 0);
 
     constexpr int kEnqueueCount = 20000;
-    constexpr uint64_t kOldCap  = 4096;
 
-    uint64_t peak_queue_depth = 0;
     for (int i = 0; i < kEnqueueCount; ++i) {
         auto body = make_valid_wire_image(static_cast<uint16_t>(i & 0xFFFF));
         rec.append_image("lossless.h5", kLossTestXml, std::move(body));
-        // Sample every N enqueues to avoid burning cycles on counter
-        // reads. Depth must exceed the old cap somewhere in the loop.
-        if ((i & 0xFF) == 0) {
-            auto c = rec.counters();
-            if (c.queued_jobs > peak_queue_depth) peak_queue_depth = c.queued_jobs;
-        }
-        // Contract: dropped_count never rises, even mid-loop.
         REQUIRE(rec.dropped_count() == 0);
     }
 
-    INFO("peak queue depth during enqueue = " << peak_queue_depth
-         << " (must exceed old cap of " << kOldCap << ")");
-    // Backlog must have exceeded the old cap for the test to be a
-    // meaningful regression: if queued_jobs never went past 4096,
-    // the drop-oldest path was never reachable either, and this test
-    // would pass against the OLD buggy code too.
-    REQUIRE(peak_queue_depth > kOldCap);
+    rec.close_scan();
 
     REQUIRE(rec.dropped_count() == 0);
     REQUIRE_FALSE(rec.had_overflow());
 
-    rec.close_scan();
-    REQUIRE(rec.dropped_count() == 0);
+    // End-to-end lossless: the converted HDF5 file should have
+    // exactly kEnqueueCount images. counters() publishes the final
+    // converted counts after close_scan runs convert.
+    auto snap = rec.counters();
+    CHECK(snap.img == static_cast<uint32_t>(kEnqueueCount));
+    CHECK(snap.spool_records == static_cast<uint64_t>(kEnqueueCount));
 }

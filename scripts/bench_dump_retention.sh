@@ -110,25 +110,54 @@ echo "$SPOOL" | python3 -m json.tool 2>/dev/null || echo "$SPOOL"
 kill "$KSPACE_PID" 2>/dev/null || true
 sleep 1
 
-# In dump mode the converter runs on marshal shutdown (SIGTERM). Wait
-# for it to finish, then re-read /debug/sinks for the post-convert
-# counters BEFORE marshal exits.
+# The converter runs on marshal shutdown (SIGTERM) in both dump mode
+# (DumpRecorder) and live mode (LiveImageRecorder now also spools +
+# converts). Snapshot counters first, then SIGTERM, then wait for
+# marshal to exit so the on-disk .h5 is present before we inspect.
 echo ""
-echo "=== triggering dump convert via SIGTERM ==="
-kill -TERM "$MARSHAL_PID" 2>/dev/null || true
-# Poll for conversion_status = complete or failed.
-for i in $(seq 1 60); do
-    STATUS=$(curl -fsS "http://localhost:$HTTP_PORT/debug/sinks" 2>/dev/null \
-        | python3 -c 'import sys,json;print(json.load(sys.stdin).get("dump",{}).get("conversion_status","?"))' 2>/dev/null)
-    [ "$STATUS" = "complete" ] || [ "$STATUS" = "failed" ] && break
-    sleep 1
-done
+echo "=== /debug/sinks before shutdown (spool counters) ==="
+curl -fsS "http://localhost:$HTTP_PORT/debug/sinks" 2>/dev/null | python3 -m json.tool 2>/dev/null || true
 
 echo ""
-echo "=== /debug/sinks after convert ==="
-FINAL=$(curl -fsS "http://localhost:$HTTP_PORT/debug/sinks" 2>/dev/null)
-echo "$FINAL" | python3 -m json.tool 2>/dev/null || echo "$FINAL"
+echo "=== triggering convert via SIGTERM ==="
+kill -TERM "$MARSHAL_PID" 2>/dev/null || true
+for i in $(seq 1 60); do
+    kill -0 "$MARSHAL_PID" 2>/dev/null || break
+    sleep 1
+done
 wait "$MARSHAL_PID" 2>/dev/null || true
+
+# Post-shutdown: parse final h5 files on disk for authoritative counts.
+# The spool->HDF5 converter runs during close_scan, so the files are
+# complete once the marshal process exits.
+echo ""
+echo "=== final HDF5 on disk (post-convert) ==="
+FINAL=$(python3 - "$DATA_DIR" <<'PY'
+import h5py, json, os, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+out = {}
+for side_dir in sorted(root.rglob("scan_*.h5")):
+    side = side_dir.parent.name
+    bucket = side_dir.parent.parent.name
+    key = f"{bucket}/{side}"
+    try:
+        with h5py.File(side_dir, 'r') as f:
+            ds = f.get('/dataset')
+            acq = len(ds['data']) if ds and 'data' in ds else 0
+            wf  = len(ds['waveforms']) if ds and 'waveforms' in ds else 0
+            img = 0
+            if ds:
+                for k in ds.keys():
+                    if k.startswith('image_') and 'header' in ds[k]:
+                        img += len(ds[k]['header'])
+            out[key] = {"acq": acq, "img": img, "wf": wf, "path": str(side_dir)}
+    except Exception as e:
+        out[key] = {"error": str(e), "path": str(side_dir)}
+print(json.dumps(out))
+PY
+)
+echo "$FINAL" | python3 -m json.tool 2>/dev/null || echo "$FINAL"
 
 echo ""
 echo "=== sender counts ==="
