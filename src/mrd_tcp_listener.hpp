@@ -73,8 +73,27 @@ public:
         stop();
     }
 
-    // Called on graceful shutdown. Closes the acceptor + any active scanner
-    // socket, then joins the session thread. Safe to call multiple times.
+    // Called on graceful shutdown. Closes the acceptor + any active
+    // scanner socket, then joins the session thread. Safe to call
+    // multiple times.
+    //
+    // Interaction with push_message_to_scanner (inline send under
+    // scanner_send_mtx_): stop() does NOT acquire scanner_send_mtx_.
+    // A blocked push on a stuck scanner holds that mutex indefinitely
+    // via the kernel ::send; taking the mutex here would deadlock
+    // shutdown.
+    //
+    // Instead, stop() closes the scanner socket while the push may
+    // still hold scanner_send_mtx_. On Linux, a blocked ::send on
+    // a concurrently-closed fd returns EPIPE (or ECONNRESET); the
+    // boost::asio::write wrapper surfaces that as error_code. The
+    // push then logs a DEBUG message (it re-checks stopping_ to
+    // pick DEBUG over WARN) and returns, releasing scanner_send_mtx_.
+    //
+    // Formally, concurrent close+write on the same boost::asio::socket
+    // is outside the documented thread-safe operations -- but the
+    // kernel-level behavior is well-defined and every real-world
+    // implementation relies on it. We accept this pragmatism.
     void stop() {
         {
             std::lock_guard<std::mutex> lk(scanner_mtx_);
@@ -119,27 +138,57 @@ public:
     // between drop (contract violation) and unbounded growth (OOM)
     // that TCP flow control already solves.
     void push_message_to_scanner(uint16_t tag, const void* data, size_t len) {
-        int fd = -1;
-        std::shared_ptr<tcp::socket> sock_hold;
+        // scanner_send_mtx_ serializes the whole frame (tag + body) so
+        // concurrent callers (e.g. recon reader thread + recon-failure
+        // path on the session thread) can't interleave bytes on the
+        // wire. It's held across the blocking send, which can take a
+        // while on a slow scanner -- that's the intended TCP flow
+        // control behavior (callers queue up naturally).
+        std::lock_guard<std::mutex> send_lk(scanner_send_mtx_);
+
+        // Grab the socket shared_ptr under scanner_mtx_, then release
+        // that mutex so stop() can still close the socket concurrently
+        // if it needs to. shared_ptr lifetime keeps the tcp::socket
+        // object alive; we then call write_exact_socket against the
+        // socket object (not a cached native fd), so a concurrent
+        // close from stop() produces a clean EBADF/EPIPE on the send
+        // rather than a fd-reuse hazard.
+        std::shared_ptr<tcp::socket> sock;
+        bool shutting = false;
         {
             std::lock_guard<std::mutex> lk(scanner_mtx_);
+            shutting = stopping_;
             if (scanner_socket_ && scanner_socket_->is_open()) {
-                fd = scanner_socket_->native_handle();
-                sock_hold = scanner_socket_;  // keep alive for the duration of the send
+                sock = scanner_socket_;
             }
         }
-        if (fd < 0) {
+        if (!sock) {
             LOG_DEBUG("Scanner writer: no scanner connected, drop tag=" << tag);
             return;
         }
-        if (!write_exact_fd(fd, &tag, sizeof(tag)) ||
-            (len > 0 && !write_exact_fd(fd, data, len))) {
-            LOG_WARN("Scanner writer: failed to push MRD message tag=" << tag);
-            // Socket is broken; close it so the session exits.
+
+        if (!write_exact_socket(*sock, &tag, sizeof(tag)) ||
+            (len > 0 && !write_exact_socket(*sock, data, len))) {
+            // During shutdown the close is expected; log at DEBUG so
+            // we don't paint the shutdown path with "failed to push"
+            // warnings that look like a runtime error.
+            bool shutting_now = false;
+            {
+                std::lock_guard<std::mutex> lk(scanner_mtx_);
+                shutting_now = stopping_;
+            }
+            if (shutting || shutting_now) {
+                LOG_DEBUG("Scanner writer: send failed during shutdown, tag="
+                          << tag);
+            } else {
+                LOG_WARN("Scanner writer: failed to push MRD message tag=" << tag);
+            }
+            // Close the socket so the session unwinds, unless stop()
+            // is already handling the close.
             boost::system::error_code ignore;
-            if (sock_hold) {
-                sock_hold->shutdown(tcp::socket::shutdown_both, ignore);
-                sock_hold->close(ignore);
+            if (!shutting_now) {
+                sock->shutdown(tcp::socket::shutdown_both, ignore);
+                sock->close(ignore);
             }
         }
     }
@@ -154,6 +203,13 @@ private:
     MarshalState& state_;
     ReconForwarder* forwarder_;
     mutable std::mutex scanner_mtx_;
+    // Serializes concurrent push_message_to_scanner calls so the
+    // tag+body pair of a single MRD frame writes atomically to the
+    // scanner socket. Held across the blocking send; other senders
+    // queue on this mutex (TCP-style backpressure between internal
+    // callers). NEVER acquired under scanner_mtx_; order is
+    // scanner_send_mtx_ FIRST.
+    std::mutex scanner_send_mtx_;
     std::shared_ptr<tcp::socket> scanner_socket_;
     std::atomic<bool> session_active_{false};
     bool stopping_{false};           // protected by scanner_mtx_
@@ -188,6 +244,17 @@ private:
             done += static_cast<size_t>(rc);
         }
         return true;
+    }
+
+    // Blocking write on the tcp::socket object. Safe across concurrent
+    // close() from stop(): if the socket closes mid-send, boost::asio
+    // returns an error_code and we bail. Caller serializes via
+    // scanner_send_mtx_ so multiple writers don't interleave bytes.
+    static bool write_exact_socket(tcp::socket& sock, const void* buf, size_t n) {
+        if (n == 0) return true;
+        boost::system::error_code ec;
+        boost::asio::write(sock, boost::asio::buffer(buf, n), ec);
+        return !ec;
     }
 
     // writer_loop removed 2026-04-19 round-7: push_message_to_scanner

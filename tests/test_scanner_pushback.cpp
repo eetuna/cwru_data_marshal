@@ -203,3 +203,96 @@ TEST_CASE("push_message_to_scanner is lossless past the old 1024 cap",
     ioc.stop();
     if (ioc_thread.joinable()) ioc_thread.join();
 }
+
+TEST_CASE("push_message_to_scanner serializes concurrent senders",
+          "[mrd][pushback][ordering]") {
+    // Regression for codex round-8 finding #1: without scanner_send_mtx_,
+    // two threads calling push_message_to_scanner could interleave the
+    // tag+body pair of distinct MRD frames on the wire. The reader
+    // would then parse a tag from frame A followed by a body from
+    // frame B, corrupting both.
+    //
+    // Fires N frames from two producer threads, each with a distinct
+    // tag and a distinctive body pattern (all 'A's vs all 'B's).
+    // Asserts that every received frame has a body matching its tag's
+    // pattern end-to-end (i.e. no interleave).
+    MarshalState state;
+    state.dump_dir = "/tmp/test_scanner_pushback_ordering";
+
+    net::io_context ioc;
+    uint16_t port = get_ephemeral_port();
+    mrd::MrdTcpListener listener(ioc, port, state, nullptr);
+
+    std::thread ioc_thread([&] { ioc.run(); });
+
+    tcp::socket scanner(ioc);
+    scanner.connect(tcp::endpoint(net::ip::make_address("127.0.0.1"), port));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    constexpr int kPerThread = 500;
+    constexpr uint16_t kTagA = 0x1022;
+    constexpr uint16_t kTagB = 0x1026;
+    const std::string bodyA(512, 'A');
+    const std::string bodyB(512, 'B');
+
+    std::atomic<int> received_a{0};
+    std::atomic<int> received_b{0};
+    std::atomic<bool> saw_corruption{false};
+    std::atomic<bool> reader_stop{false};
+    std::thread reader([&] {
+        boost::system::error_code ec;
+        while (!reader_stop.load()) {
+            uint16_t got_tag = 0;
+            auto n = boost::asio::read(scanner,
+                boost::asio::buffer(&got_tag, sizeof(got_tag)), ec);
+            if (ec || n != sizeof(got_tag)) return;
+            std::vector<char> buf(512);
+            auto nb = boost::asio::read(scanner,
+                boost::asio::buffer(buf), ec);
+            if (ec || nb != buf.size()) return;
+            char expected = 0;
+            if (got_tag == kTagA) { received_a.fetch_add(1); expected = 'A'; }
+            else if (got_tag == kTagB) { received_b.fetch_add(1); expected = 'B'; }
+            else { saw_corruption.store(true); return; }
+            for (char c : buf) {
+                if (c != expected) { saw_corruption.store(true); return; }
+            }
+        }
+    });
+
+    std::thread producer_a([&] {
+        for (int i = 0; i < kPerThread; ++i) {
+            listener.push_message_to_scanner(kTagA, bodyA.data(), bodyA.size());
+        }
+    });
+    std::thread producer_b([&] {
+        for (int i = 0; i < kPerThread; ++i) {
+            listener.push_message_to_scanner(kTagB, bodyB.data(), bodyB.size());
+        }
+    });
+    producer_a.join();
+    producer_b.join();
+
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::seconds(10);
+    while ((received_a.load() + received_b.load()) < 2 * kPerThread &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    reader_stop.store(true);
+    boost::system::error_code ignore;
+    scanner.shutdown(tcp::socket::shutdown_both, ignore);
+    scanner.close(ignore);
+    if (reader.joinable()) reader.join();
+
+    INFO("received A=" << received_a.load() << " B=" << received_b.load()
+         << " corruption=" << saw_corruption.load());
+    REQUIRE_FALSE(saw_corruption.load());
+    REQUIRE(received_a.load() == kPerThread);
+    REQUIRE(received_b.load() == kPerThread);
+
+    listener.stop();
+    ioc.stop();
+    if (ioc_thread.joinable()) ioc_thread.join();
+}
