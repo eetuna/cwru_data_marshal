@@ -24,6 +24,7 @@
 #include <deque>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -121,9 +122,17 @@ private:
     struct Lane {
         // Queue entry captures wire bytes to write to the spool. The
         // reader thread builds this; worker pops and calls SpoolWriter.
+        //
+        // A Record with barrier=true is a synchronization signal: the
+        // worker flushes/closes the current spool and calls
+        // barrier->set_value() instead of writing. This is used by
+        // close_scan to drain the queue WITHOUT setting stopping=true
+        // (which would reject concurrent enqueues from other threads).
         struct Record {
             uint16_t tag{0};
             std::vector<uint8_t> body;
+            bool barrier{false};
+            std::shared_ptr<std::promise<void>> signal;
         };
 
         std::filesystem::path lane_dir;   // directory under dump_dir
@@ -161,6 +170,13 @@ private:
     Lane recon_;
     std::atomic<ConversionStatus> status_{ConversionStatus::Idle};
 
+    // Shared scan stem. First record on EITHER lane generates it under
+    // this mutex; both lanes use the same <ts> for their spool and
+    // converted .h5. start_scan adopts this stem (or generates it if
+    // it's empty). Cleared at close_scan.
+    mutable std::mutex scan_stem_mtx_;
+    std::string scan_stem_;
+
     void start_lane(Lane& lane, std::filesystem::path lane_dir, std::string tag);
     void stop_lane(Lane& lane);
     DumpEnqueueResult enqueue_scanner(uint16_t tag, std::vector<uint8_t> body);
@@ -172,7 +188,7 @@ private:
     // only the worker thread touches lane.spool / current_filename.
     void ensure_spool_on_worker(Lane& lane);
     void close_spool_on_worker(Lane& lane);
-    void convert_lane(Lane& lane, bool is_scanner);
+    void convert_lane(Lane& lane, const std::string& stem, bool is_scanner);
 };
 
 } // namespace mrd

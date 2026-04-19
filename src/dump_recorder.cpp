@@ -95,6 +95,15 @@ DumpEnqueueResult DumpRecorder::enqueue_recon(uint16_t tag,
 DumpEnqueueResult DumpRecorder::enqueue_on(Lane& lane, uint16_t tag,
                                             std::vector<uint8_t> body)
 {
+    // Generate the shared scan stem on first record of the scan so
+    // both lanes use the same <ts> in their filenames. No-op if a
+    // stem is already set (either by a prior record or by start_scan).
+    {
+        std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
+        if (scan_stem_.empty()) {
+            scan_stem_ = scan_filename_now();
+        }
+    }
     // Contract: no drop on queue pressure. We append unconditionally;
     // memory pressure is bounded by the scanner's actual throughput
     // times the worker-drain latency (microseconds), not queue cap.
@@ -111,10 +120,10 @@ void DumpRecorder::ensure_spool_on_worker(Lane& lane)
 {
     if (lane.spool) return;
     if (lane.current_filename.empty()) {
-        // First record for a scan arrived before start_scan's filename
-        // was available. Assign one now; start_scan() will override
-        // with the scanner-chosen stem so both lanes agree.
-        lane.current_filename = scan_filename_now();
+        // Adopt the shared scan stem. enqueue_on generates it on first
+        // record, so by the time the worker runs it is non-empty.
+        std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
+        lane.current_filename = scan_stem_;
     }
     auto spool_path = lane.lane_dir / (lane.current_filename + ".spool");
     lane.spool = std::make_unique<SpoolWriter>(spool_path);
@@ -131,9 +140,20 @@ void DumpRecorder::ensure_spool_on_worker(Lane& lane)
 void DumpRecorder::close_spool_on_worker(Lane& lane)
 {
     if (lane.spool) {
-        lane.spool->flush();
-        lane.spool->close();
+        // close() flushes then fcloses, surfacing errors from either.
+        if (!lane.spool->close()) {
+            lane.write_error = lane.spool->last_error();
+            LOG_ERROR("Dump spool close failed on lane="
+                      << lane.component_tag << ": " << lane.write_error);
+        }
+        // Reset so the NEXT scan can open a fresh spool. Without this
+        // the next ensure_spool_on_worker() early-returns on non-null
+        // spool and writes go to a closed file.
+        lane.spool.reset();
     }
+    // Clear per-scan stem so next start_scan picks a fresh filename.
+    lane.current_filename.clear();
+    lane.current_xml.clear();
 }
 
 void DumpRecorder::worker_loop(Lane& lane)
@@ -149,6 +169,17 @@ void DumpRecorder::worker_loop(Lane& lane)
                 break;
             rec = std::move(lane.queue.front());
             lane.queue.pop_front();
+        }
+
+        if (rec.barrier) {
+            // Flush and close the spool so the converter sees a
+            // complete file. Signal the waiter (close_scan). Worker
+            // keeps running so new enqueues after the barrier are NOT
+            // rejected with Stopped; they'll start a new spool via
+            // ensure_spool_on_worker.
+            close_spool_on_worker(lane);
+            if (rec.signal) rec.signal->set_value();
+            continue;
         }
 
         ensure_spool_on_worker(lane);
@@ -196,23 +227,23 @@ DumpEnqueueResult DumpRecorder::start_scan(std::string filename, std::string xml
     // Align both lanes on the scan identity. If the spool has already
     // been opened (because CONFIG_FILE / TEXT arrived before METADATA),
     // we keep using the existing stem; otherwise adopt the caller's.
-    auto align = [this, &filename, &xml](Lane& lane) {
-        std::lock_guard<std::mutex> lk(lane.mtx);
-        // We can set current_filename safely only if the worker hasn't
-        // opened a spool yet. If spool is already open, the filename is
-        // whatever the worker chose; the caller's filename is ignored
-        // to avoid renaming an in-flight file. In practice the caller's
-        // filename matches the one scan_filename_now() would generate
-        // within the same scan window, so this is rarely observable.
-        if (!lane.spool && lane.current_filename.empty()) {
-            // Strip ".h5" suffix from filename if present -- we want the
-            // stem to which we append ".spool" or ".h5".
+    // Seed the shared stem if no record has arrived yet. If CONFIG or
+    // TEXT already arrived before METADATA, enqueue_on has already set
+    // scan_stem_; we keep that stem so the spool that the worker
+    // already opened (or is about to) uses consistent names.
+    {
+        std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
+        if (scan_stem_.empty()) {
+            // Honor caller-supplied filename if reasonable; strip .h5 suffix.
             std::string stem = filename;
             if (stem.size() > 3 &&
                 stem.compare(stem.size() - 3, 3, ".h5") == 0)
                 stem.resize(stem.size() - 3);
-            lane.current_filename = stem;
+            scan_stem_ = stem.empty() ? scan_filename_now() : stem;
         }
+    }
+    auto align = [&xml](Lane& lane) {
+        std::lock_guard<std::mutex> lk(lane.mtx);
         lane.current_xml = xml;
     };
     align(scanner_);
@@ -227,40 +258,63 @@ DumpEnqueueResult DumpRecorder::start_scan(std::string filename, std::string xml
 
 void DumpRecorder::close_scan()
 {
-    // Drain both lanes by briefly stopping their workers and
-    // re-starting them for the next scan. Stop signal sets
-    // lane.stopping=true, worker finishes current record + drains the
-    // queue, closes the spool, then exits. After join() we clear
-    // stopping and start a fresh worker thread.
-    auto drain_and_restart = [this](Lane& lane) {
-        stop_lane(lane);
-        // Worker has exited; spool closed in worker_loop()'s exit path.
-        lane.stopping = false;
-        lane.worker = std::thread([this, &lane] { worker_loop(lane); });
+    // Inject a barrier into each lane. The worker drains everything
+    // enqueued so far, then flushes/closes the spool, then signals
+    // the promise. We wait on the future here. The worker thread is
+    // never stopped, so concurrent enqueues after the barrier are
+    // admitted (they'll open a new spool when the next scan starts).
+    auto drain_lane = [](Lane& lane) {
+        auto signal = std::make_shared<std::promise<void>>();
+        auto fut = signal->get_future();
+        {
+            std::lock_guard<std::mutex> lk(lane.mtx);
+            if (lane.stopping) {
+                // Destructor path: do nothing, worker is exiting.
+                return;
+            }
+            Lane::Record barrier;
+            barrier.barrier = true;
+            barrier.signal = signal;
+            lane.queue.push_back(std::move(barrier));
+        }
+        lane.cv.notify_one();
+        fut.wait();
     };
-    drain_and_restart(scanner_);
-    drain_and_restart(recon_);
+    drain_lane(scanner_);
+    drain_lane(recon_);
+
+    // Snapshot and clear the shared scan stem. convert_lane needs the
+    // stem to find the spool file; next scan needs a fresh <ts>.
+    std::string stem;
+    {
+        std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
+        stem = std::move(scan_stem_);
+        scan_stem_.clear();
+    }
 
     status_.store(ConversionStatus::Converting);
     LOG_INFO("Converting dump spool to HDF5");
-    convert_lane(scanner_, /*is_scanner_side=*/true);
-    convert_lane(recon_,   /*is_scanner_side=*/false);
+    convert_lane(scanner_, stem, /*is_scanner_side=*/true);
+    convert_lane(recon_,   stem, /*is_scanner_side=*/false);
 
     const bool ok = scanner_.conversion_ok && recon_.conversion_ok;
     status_.store(ok ? ConversionStatus::Complete : ConversionStatus::Failed);
     LOG_INFO("Dump conversion " << (ok ? "complete" : "FAILED"));
 }
 
-void DumpRecorder::convert_lane(Lane& lane, bool is_scanner)
+void DumpRecorder::convert_lane(Lane& lane, const std::string& stem,
+                                 bool is_scanner)
 {
-    if (lane.current_filename.empty()) {
-        // No records were ever spooled for this lane.
+    if (stem.empty()) {
+        // No records were ever spooled in this scan.
         lane.conversion_ok = true;
         return;
     }
-    auto spool_path = lane.lane_dir / (lane.current_filename + ".spool");
-    auto h5_path    = lane.lane_dir / (lane.current_filename + ".h5");
+    auto spool_path = lane.lane_dir / (stem + ".spool");
+    auto h5_path    = lane.lane_dir / (stem + ".h5");
     if (!std::filesystem::exists(spool_path)) {
+        // The lane never received any record this scan (e.g. recon
+        // lane on a scanner-only probe).
         lane.conversion_ok = true;
         return;
     }
@@ -279,9 +333,6 @@ void DumpRecorder::convert_lane(Lane& lane, bool is_scanner)
         std::error_code ec;
         std::filesystem::remove(spool_path, ec);
     }
-    // Reset for next scan.
-    lane.current_filename.clear();
-    lane.current_xml.clear();
 }
 
 // ----- Post-hoc accessors -----

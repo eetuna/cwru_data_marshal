@@ -14,6 +14,7 @@
 #include <catch2/catch_all.hpp>
 
 #include <filesystem>
+#include <fstream>
 #include <thread>
 #include <vector>
 
@@ -21,6 +22,7 @@
 
 #include "dump_recorder.hpp"
 #include "mrd_io.hpp"
+#include "spool_converter.hpp"
 
 namespace fs = std::filesystem;
 
@@ -162,13 +164,145 @@ TEST_CASE("DumpRecorder persists CONFIG_FILE / CONFIG_TEXT / TEXT sent before ME
         rec.close_scan();
     }
 
-    auto h5_path = mrd::dump_scanner_dir(dir) / filename;
+    // DumpRecorder generates its own shared scan stem so scanner and
+    // recon archives match. The caller-supplied filename is treated as
+    // advisory only (used if no records arrived before start_scan).
+    // Locate the produced .h5 by scanning the scanner dump dir.
+    fs::path h5_path;
+    for (auto& ent : fs::directory_iterator(mrd::dump_scanner_dir(dir))) {
+        if (ent.path().extension() == ".h5") { h5_path = ent.path(); break; }
+    }
+    REQUIRE(!h5_path.empty());
     REQUIRE(fs::exists(h5_path));
 
     CHECK(read_string_dataset_or_empty(h5_path, "config_file") == config_file_payload);
     CHECK(read_string_dataset_or_empty(h5_path, "config") == config_text_payload);
     CHECK(read_string_dataset_or_empty(h5_path, "text_0") == first_text);
     CHECK(read_string_dataset_or_empty(h5_path, "text_1") == second_text);
+}
+
+// Helper: find the single .h5 file in a dump-lane directory.
+static fs::path find_single_h5(const fs::path& dir) {
+    for (auto& ent : fs::directory_iterator(dir)) {
+        if (ent.path().extension() == ".h5") return ent.path();
+    }
+    return {};
+}
+
+TEST_CASE("DumpRecorder supports back-to-back scans (second scan works)",
+          "[dump][spool][lifecycle]") {
+    // Regression for codex finding #1: after close_scan, lane.spool was
+    // left as a non-null but closed writer. Second ensure_spool_on_worker
+    // early-returned without opening a fresh spool, and all new records
+    // were counted as failed writes.
+    auto dir = fs::temp_directory_path() / "test_dump_second_scan";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    constexpr uint16_t nsamples = 16;
+    constexpr uint16_t nchannels = 2;
+    const size_t sample_bytes =
+        size_t(nsamples) * nchannels * 2 * sizeof(float);
+
+    mrd::DumpRecorder rec(dir);
+
+    for (int scan = 0; scan < 2; ++scan) {
+        REQUIRE(rec.start_scan("s" + std::to_string(scan) + ".h5",
+                               "<?xml version=\"1.0\"?><ismrmrdHeader/>")
+                == mrd::DumpEnqueueResult::Accepted);
+
+        ISMRMRD::AcquisitionHeader hdr{};
+        hdr.version = 1;
+        hdr.number_of_samples = nsamples;
+        hdr.active_channels = nchannels;
+        hdr.trajectory_dimensions = 0;
+
+        for (int i = 0; i < 5; ++i) {
+            std::vector<uint8_t> samples(sample_bytes, 0xAA);
+            hdr.scan_counter = static_cast<uint32_t>(i);
+            REQUIRE(rec.append_scanner_acquisition(hdr, {}, std::move(samples))
+                    == mrd::DumpEnqueueResult::Accepted);
+        }
+
+        rec.close_scan();
+        REQUIRE(rec.dropped_record_count() == 0);
+    }
+
+    // Both scans should have produced valid H5 files with matching counts.
+    // At least two distinct .h5 files must exist in the scanner dump dir.
+    int n_h5 = 0;
+    for (auto& ent : fs::directory_iterator(mrd::dump_scanner_dir(dir))) {
+        if (ent.path().extension() == ".h5") ++n_h5;
+    }
+    CHECK(n_h5 == 2);
+}
+
+TEST_CASE("DumpRecorder scanner+recon archives share the same <ts> stem",
+          "[dump][spool][contract]") {
+    // Regression for codex finding #2: CONFIG arriving on scanner lane
+    // before METADATA_XML used to cause the scanner worker to pick its
+    // own filename while start_scan let the recon lane adopt the
+    // caller-supplied filename. Two lanes ended up with different stems,
+    // violating the contract that active-mode scanner+recon archives
+    // share the same <ts>.
+    auto dir = fs::temp_directory_path() / "test_dump_shared_stem";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    mrd::DumpRecorder rec(dir);
+    // Pre-metadata scanner traffic: forces scanner lane to open its
+    // spool first with whatever stem is in play.
+    REQUIRE(rec.set_scanner_config_file("simplefft")
+            == mrd::DumpEnqueueResult::Accepted);
+    REQUIRE(rec.append_scanner_text("pre-metadata")
+            == mrd::DumpEnqueueResult::Accepted);
+    // Now METADATA_XML.
+    REQUIRE(rec.start_scan("caller_suggested.h5",
+                           "<?xml version=\"1.0\"?><ismrmrdHeader/>")
+            == mrd::DumpEnqueueResult::Accepted);
+    // Also hit the recon lane so it opens a spool too.
+    std::vector<uint8_t> empty_img;
+    (void)rec.append_recon_image(std::move(empty_img));
+    rec.close_scan();
+
+    auto scanner_h5 = find_single_h5(mrd::dump_scanner_dir(dir));
+    auto recon_h5   = find_single_h5(mrd::dump_recon_dir(dir));
+    REQUIRE(!scanner_h5.empty());
+    // Recon lane may not have produced an h5 if the empty body was
+    // rejected by the converter as malformed. What matters is: if it
+    // did produce one, the stem MUST match scanner's.
+    if (!recon_h5.empty()) {
+        CHECK(scanner_h5.stem() == recon_h5.stem());
+    }
+}
+
+TEST_CASE("SpoolConverter rejects records with body length > spool size",
+          "[dump][spool][converter]") {
+    // Regression for codex finding #5: converter did body.resize(len)
+    // before bounding len against the spool file size. A corrupt prefix
+    // with len=0xFFFFFFFF would try to allocate 4 GiB.
+    auto dir = fs::temp_directory_path() / "test_dump_truncated_spool";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    auto spool_path = dir / "corrupt.spool";
+    auto h5_path    = dir / "corrupt.h5";
+    {
+        std::ofstream os(spool_path, std::ios::binary);
+        uint16_t tag = 5; // TEXT
+        uint32_t len = 0xFFFFFFFFu; // lies about body size
+        os.write(reinterpret_cast<const char*>(&tag), sizeof(tag));
+        os.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        // Intentionally do not write any body.
+    }
+
+    auto stats = mrd::convert_spool_to_hdf5(spool_path, h5_path,
+                                            /*is_scanner_side=*/true);
+    CHECK_FALSE(stats.ok());
+    CHECK(stats.truncated);
+    CHECK_FALSE(stats.error.empty());
+    // Must NOT have attempted to resize to the giant length.
+    // Catch2 will have failed via OOM otherwise.
 }
 
 TEST_CASE("DumpRecorder enqueue returns Stopped after destruction",

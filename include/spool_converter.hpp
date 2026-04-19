@@ -75,6 +75,17 @@ inline SpoolConvertStats convert_spool_to_hdf5(
         return stats;
     }
 
+    // Spool size is the upper bound for any single record body; a
+    // corrupt or truncated record with a bogus length prefix would
+    // otherwise trigger an unbounded body.resize() below.
+    std::error_code ec;
+    const std::uintmax_t spool_size = std::filesystem::file_size(spool_path, ec);
+    if (ec) {
+        std::fclose(fp);
+        stats.error = std::string("stat spool failed: ") + ec.message();
+        return stats;
+    }
+
     std::unique_ptr<MrdSink> sink;
     auto ensure_sink = [&] {
         if (!sink) sink = std::make_unique<MrdSink>(h5_path);
@@ -91,6 +102,14 @@ inline SpoolConvertStats convert_spool_to_hdf5(
         if (got != 1) { stats.truncated = true; break; }
         if (std::fread(&len, sizeof(len), 1, fp) != 1) { stats.truncated = true; break; }
 
+        // Bound the allocation: a record body cannot exceed the spool
+        // file size. Corrupt prefix with len=0xFFFFFFFF would otherwise
+        // try to allocate 4 GiB.
+        if (static_cast<std::uintmax_t>(len) > spool_size) {
+            stats.truncated = true;
+            stats.error = "record length exceeds spool file size (corrupt)";
+            break;
+        }
         body.resize(len);
         if (len > 0) {
             if (std::fread(body.data(), 1, len, fp) != len) {

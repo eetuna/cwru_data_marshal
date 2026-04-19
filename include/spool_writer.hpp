@@ -42,7 +42,7 @@ public:
         std::setvbuf(fp_, nullptr, _IOFBF, kBufSize);
     }
 
-    ~SpoolWriter() { close(); }
+    ~SpoolWriter() { (void)close(); }
 
     SpoolWriter(const SpoolWriter&) = delete;
     SpoolWriter& operator=(const SpoolWriter&) = delete;
@@ -67,7 +67,8 @@ public:
         return true;
     }
 
-    // Flush userspace buffer + fsync.
+    // Flush userspace buffer. Does NOT call fsync(2) — spool is a
+    // same-process artifact and the converter runs before process exit.
     bool flush()
     {
         std::lock_guard<std::mutex> lk(mtx_);
@@ -76,14 +77,27 @@ public:
         return true;
     }
 
-    void close()
+    // Flush + close the FILE*. Returns true iff both succeeded and no
+    // earlier write error was observed. Errors are recorded in
+    // last_error_; the spool is left in an unhealthy state so the
+    // caller can surface the failure via /debug/sinks.
+    bool close()
     {
         std::lock_guard<std::mutex> lk(mtx_);
-        if (fp_) {
-            std::fflush(fp_);
-            std::fclose(fp_);
-            fp_ = nullptr;
+        if (!fp_) return last_error_.empty();
+        bool ok = true;
+        // Flush first so ENOSPC / EIO shows up here rather than being
+        // silently eaten by fclose.
+        if (std::fflush(fp_) != 0) {
+            last_error_ = std::string("fflush failed: ") + std::strerror(errno);
+            ok = false;
         }
+        if (std::fclose(fp_) != 0 && ok) {
+            last_error_ = std::string("fclose failed: ") + std::strerror(errno);
+            ok = false;
+        }
+        fp_ = nullptr;
+        return ok && last_error_.empty();
     }
 
     uint64_t records() const {
@@ -94,9 +108,11 @@ public:
         std::lock_guard<std::mutex> lk(mtx_);
         return bytes_;
     }
+    // True iff the spool has not observed any write failure. After
+    // close() this returns whether the session was clean end-to-end.
     bool healthy() const {
         std::lock_guard<std::mutex> lk(mtx_);
-        return fp_ != nullptr && last_error_.empty();
+        return last_error_.empty();
     }
     std::string last_error() const {
         std::lock_guard<std::mutex> lk(mtx_);
