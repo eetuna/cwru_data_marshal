@@ -403,19 +403,13 @@ int main(int argc, char** argv)
             } else if (tag == mrd::MRD_MESSAGE_ISMRMRD_WAVEFORM) {
                 handle_recon_waveform(state, data, len);
             } else if (tag == mrd::MRD_MESSAGE_TEXT && state.dump_enabled && state.dump_recorder) {
-                std::string text;
-                if (len >= sizeof(uint32_t)) {
-                    uint32_t text_len = 0;
-                    std::memcpy(&text_len, data, sizeof(text_len));
-                    if (len >= sizeof(uint32_t) + text_len) {
-                        text.assign(static_cast<const char*>(data) + sizeof(uint32_t), text_len);
-                        auto nul = text.find('\0');
-                        if (nul != std::string::npos) text.resize(nul);
-                    }
-                }
+                // Pass the full wire body verbatim ([uint32 len][text+NUL])
+                // so dump's byte-exact guarantee holds for recon TEXT too.
+                const auto* p = static_cast<const uint8_t*>(data);
+                std::vector<uint8_t> body(p, p + len);
                 // HIGH #10: enqueue returns a result; log dropped at
                 // callsite rather than only via post-hoc accessor.
-                auto r = state.dump_recorder->append_recon_text(text);
+                auto r = state.dump_recorder->append_recon_text(std::move(body));
                 if (r == mrd::DumpEnqueueResult::Dropped) {
                     LOG_WARN("DUMP drop at enqueue (recon_text)");
                 }

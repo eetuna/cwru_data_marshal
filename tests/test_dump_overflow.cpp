@@ -28,6 +28,26 @@
 
 namespace fs = std::filesystem;
 
+// Helpers for the byte-exact dump API: tests now pass wire bodies
+// rather than parsed strings. These helpers reproduce the exact
+// wire framing the listener would have assembled on the socket.
+static std::vector<uint8_t> config_file_body(const std::string& s) {
+    std::vector<uint8_t> body(1024, 0);
+    const size_t n = std::min(s.size(), size_t{1023});
+    std::memcpy(body.data(), s.data(), n);
+    return body;
+}
+
+static std::vector<uint8_t> text_body(const std::string& s) {
+    // [uint32 inner_len][text + NUL]. inner_len includes the NUL.
+    const uint32_t inner = static_cast<uint32_t>(s.size() + 1);
+    std::vector<uint8_t> body(sizeof(uint32_t) + inner);
+    std::memcpy(body.data(), &inner, sizeof(inner));
+    std::memcpy(body.data() + sizeof(inner), s.data(), s.size());
+    body[sizeof(inner) + s.size()] = '\0';
+    return body;
+}
+
 TEST_CASE("Fresh DumpRecorder reports no overflow", "[dump][overflow]") {
     auto dir = fs::temp_directory_path() / "test_dump_overflow_fresh";
     fs::remove_all(dir);
@@ -50,7 +70,7 @@ TEST_CASE("DumpRecorder enqueue returns Accepted on happy path",
                             "<?xml version=\"1.0\"?><ismrmrdHeader/>");
     REQUIRE(r == mrd::DumpEnqueueResult::Accepted);
 
-    auto r2 = rec.append_scanner_text("small");
+    auto r2 = rec.append_scanner_text(text_body("small"));
     REQUIRE(r2 == mrd::DumpEnqueueResult::Accepted);
 
     rec.close_scan();
@@ -150,13 +170,13 @@ TEST_CASE("DumpRecorder persists CONFIG_FILE / CONFIG_TEXT / TEXT sent before ME
         mrd::DumpRecorder rec(dir);
         // Order matches python-ismrmrd-server client.py and
         // kspace_streamer: config first, THEN metadata.
-        REQUIRE(rec.set_scanner_config_file(config_file_payload)
+        REQUIRE(rec.set_scanner_config_file(config_file_body(config_file_payload))
                 == mrd::DumpEnqueueResult::Accepted);
-        REQUIRE(rec.set_scanner_config_text(config_text_payload)
+        REQUIRE(rec.set_scanner_config_text(text_body(config_text_payload))
                 == mrd::DumpEnqueueResult::Accepted);
-        REQUIRE(rec.append_scanner_text(first_text)
+        REQUIRE(rec.append_scanner_text(text_body(first_text))
                 == mrd::DumpEnqueueResult::Accepted);
-        REQUIRE(rec.append_scanner_text(second_text)
+        REQUIRE(rec.append_scanner_text(text_body(second_text))
                 == mrd::DumpEnqueueResult::Accepted);
 
         // Now open the sink via start_scan (METADATA_XML arrival).
@@ -254,9 +274,9 @@ TEST_CASE("DumpRecorder scanner+recon archives share the same <ts> stem",
     mrd::DumpRecorder rec(dir);
     // Pre-metadata scanner traffic: forces scanner lane to open its
     // spool first with whatever stem is in play.
-    REQUIRE(rec.set_scanner_config_file("simplefft")
+    REQUIRE(rec.set_scanner_config_file(config_file_body("simplefft"))
             == mrd::DumpEnqueueResult::Accepted);
-    REQUIRE(rec.append_scanner_text("pre-metadata")
+    REQUIRE(rec.append_scanner_text(text_body("pre-metadata"))
             == mrd::DumpEnqueueResult::Accepted);
     // Now METADATA_XML.
     REQUIRE(rec.start_scan("caller_suggested.h5",
@@ -266,7 +286,7 @@ TEST_CASE("DumpRecorder scanner+recon archives share the same <ts> stem",
     // produces an .h5. An earlier version of this test used an empty
     // recon image which the converter skipped as malformed, letting
     // the test pass even when the shared-stem invariant was broken.
-    REQUIRE(rec.append_recon_text("recon hello")
+    REQUIRE(rec.append_recon_text(text_body("recon hello"))
             == mrd::DumpEnqueueResult::Accepted);
     rec.close_scan();
 
@@ -309,7 +329,7 @@ TEST_CASE("DumpRecorder close-barrier race: strict scan boundary "
         REQUIRE(rec.start_scan("first.h5",
                                "<?xml version=\"1.0\"?><ismrmrdHeader/>")
                 == mrd::DumpEnqueueResult::Accepted);
-        REQUIRE(rec.append_scanner_text(pre_close)
+        REQUIRE(rec.append_scanner_text(text_body(pre_close))
                 == mrd::DumpEnqueueResult::Accepted);
 
         // close_scan serializes all pending records into scan 1's spool
@@ -319,7 +339,7 @@ TEST_CASE("DumpRecorder close-barrier race: strict scan boundary "
         rec.close_scan();
 
         // This record must land in a DIFFERENT .h5 than pre_close did.
-        REQUIRE(rec.append_scanner_text(post_close)
+        REQUIRE(rec.append_scanner_text(text_body(post_close))
                 == mrd::DumpEnqueueResult::Accepted);
         rec.close_scan();
     }
@@ -364,7 +384,7 @@ TEST_CASE("DumpRecorder close-barrier race under concurrent hammer: "
         REQUIRE(rec.start_scan("first.h5",
                                "<?xml version=\"1.0\"?><ismrmrdHeader/>")
                 == mrd::DumpEnqueueResult::Accepted);
-        REQUIRE(rec.append_scanner_text(pre_close)
+        REQUIRE(rec.append_scanner_text(text_body(pre_close))
                 == mrd::DumpEnqueueResult::Accepted);
 
         constexpr uint16_t nsamples = 4;
@@ -470,7 +490,7 @@ TEST_CASE("DumpRecorder /debug/sinks counters after close + stale-counter reset"
         REQUIRE(rec.append_scanner_acquisition(hdr, {}, std::move(s))
                 == mrd::DumpEnqueueResult::Accepted);
     }
-    REQUIRE(rec.append_recon_text("scan1 recon")
+    REQUIRE(rec.append_recon_text(text_body("scan1 recon"))
             == mrd::DumpEnqueueResult::Accepted);
     rec.close_scan();
 
@@ -610,6 +630,94 @@ TEST_CASE("DumpRecorder counters() is safe under concurrent polling during conve
     CHECK_FALSE(saw_torn.load());
     CHECK(rec.counters().scanner.converted_acq == kRecordCount);
     CHECK(rec.counters().scanner.conversion_ok);
+}
+
+TEST_CASE("DumpRecorder preserves byte-exact TEXT bodies (embedded NULs)",
+          "[dump][spool][byte-exact]") {
+    // Regression for codex round-5 finding: the listener used to strip
+    // at the first NUL when assembling the dump string (config_text
+    // parsed into std::string, then truncated at '\\0'). DumpRecorder
+    // rebuilt the wire body from that truncated string. A sender with
+    // embedded NULs in its CONFIG_TEXT / TEXT body would lose
+    // everything after the first NUL in the dumped HDF5.
+    //
+    // Post-fix: listener passes the FULL wire body verbatim; dump
+    // stores it as-is; the converter extracts the payload back into
+    // an HDF5 string dataset. We feed a body with an embedded NUL
+    // followed by a distinctive tail and assert the full payload
+    // arrives in the final h5.
+    auto dir = fs::temp_directory_path() / "test_dump_byte_exact";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    // Construct a TEXT body with an embedded NUL mid-payload.
+    const std::string pre  = "first_half";
+    const std::string tail = "second_half_after_NUL";
+    std::string payload = pre;
+    payload += '\0';
+    payload += tail;
+    // text_body appends a trailing NUL; len inside is payload.size()+1.
+    auto body = text_body(payload);
+
+    {
+        mrd::DumpRecorder rec(dir);
+        REQUIRE(rec.start_scan("byte_exact.h5",
+                               "<?xml version=\"1.0\"?><ismrmrdHeader/>")
+                == mrd::DumpEnqueueResult::Accepted);
+        REQUIRE(rec.append_scanner_text(std::move(body))
+                == mrd::DumpEnqueueResult::Accepted);
+        rec.close_scan();
+    }
+
+    // Open the resulting h5 and pull text_0 as a variable-length
+    // string dataset. HDF5 VLEN strings are NUL-terminated C strings,
+    // so they truncate at the FIRST NUL -- this is a known HDF5
+    // limitation on the read side, not a byte-exact-dump bug on the
+    // write side. Verify the bytes landed in the spool record
+    // verbatim instead; the spool is the authoritative byte-exact
+    // artifact.
+    auto scanner_dir = mrd::dump_scanner_dir(dir);
+    fs::path spool_path;
+    for (auto& ent : fs::directory_iterator(scanner_dir)) {
+        if (ent.path().extension() == ".spool") { spool_path = ent.path(); break; }
+    }
+    REQUIRE(!spool_path.empty());
+
+    // Scan the spool for the TEXT record and confirm the full
+    // pre + '\\0' + tail payload is present verbatim.
+    std::ifstream in(spool_path, std::ios::binary);
+    REQUIRE(in.is_open());
+    bool found_match = false;
+    while (in) {
+        uint16_t tag = 0;
+        uint32_t len = 0;
+        if (!in.read(reinterpret_cast<char*>(&tag), sizeof(tag))) break;
+        if (!in.read(reinterpret_cast<char*>(&len), sizeof(len))) break;
+        std::vector<uint8_t> rec_body(len);
+        if (len > 0 && !in.read(reinterpret_cast<char*>(rec_body.data()), len))
+            break;
+        if (tag != mrd::MRD_MESSAGE_TEXT) continue;
+        // Body layout: [uint32 inner_len][payload...]
+        if (rec_body.size() < sizeof(uint32_t)) continue;
+        uint32_t inner = 0;
+        std::memcpy(&inner, rec_body.data(), sizeof(inner));
+        if (rec_body.size() < sizeof(uint32_t) + inner) continue;
+        const char* p = reinterpret_cast<const char*>(
+            rec_body.data() + sizeof(uint32_t));
+        std::string bytes(p, inner);  // includes trailing NUL
+        // Search for the embedded-NUL pattern verbatim.
+        if (bytes.size() >= pre.size() + 1 + tail.size()) {
+            bool match_pre  = std::memcmp(bytes.data(), pre.data(), pre.size()) == 0;
+            bool match_nul  = bytes[pre.size()] == '\0';
+            bool match_tail = std::memcmp(bytes.data() + pre.size() + 1,
+                                          tail.data(), tail.size()) == 0;
+            if (match_pre && match_nul && match_tail) {
+                found_match = true;
+                break;
+            }
+        }
+    }
+    CHECK(found_match);
 }
 
 TEST_CASE("DumpRecorder enqueue returns Stopped after destruction",

@@ -65,10 +65,15 @@ public:
     DumpEnqueueResult start_scan(std::string filename, std::string xml);
     void close_scan();
 
-    DumpEnqueueResult set_scanner_config_file(std::string config);
-    DumpEnqueueResult set_scanner_config_text(std::string config);
-    DumpEnqueueResult append_scanner_text(std::string text);
-    DumpEnqueueResult append_recon_text(std::string text);
+    // Byte-exact dump: these accept the FULL wire body exactly as
+    // read off the socket. DumpRecorder does not reparse, strip NULs,
+    // or rebuild framing -- the spool record is the wire body
+    // verbatim. The converter reconstructs the semantic string at
+    // HDF5-write time using the same parse used by the live path.
+    DumpEnqueueResult set_scanner_config_file(std::vector<uint8_t> body);
+    DumpEnqueueResult set_scanner_config_text(std::vector<uint8_t> body);
+    DumpEnqueueResult append_scanner_text(std::vector<uint8_t> body);
+    DumpEnqueueResult append_recon_text(std::vector<uint8_t> body);
 
     DumpEnqueueResult append_scanner_acquisition(const ISMRMRD::AcquisitionHeader& hdr,
                                                  std::vector<uint8_t> traj,

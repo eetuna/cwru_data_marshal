@@ -490,36 +490,32 @@ DumpRecorder::CounterSnapshot DumpRecorder::counters() const
     return snap;
 }
 
-// ----- Per-kind append APIs (build wire body, enqueue) -----
+// ----- Per-kind append APIs (pass wire body verbatim, enqueue) -----
+//
+// 2026-04-19: byte-exact dump. The listener already has the full wire
+// body for CONFIG_FILE / CONFIG_TEXT / METADATA_XML / TEXT (assembled
+// from the length-prefixed socket reads). Dump stores those bytes
+// verbatim; reconstruction into the HDF5 string dataset happens in
+// the spool converter. No NUL-stripping or rebuilding here.
 
-DumpEnqueueResult DumpRecorder::set_scanner_config_file(std::string config)
+DumpEnqueueResult DumpRecorder::set_scanner_config_file(std::vector<uint8_t> body)
 {
-    // CONFIG_FILE wire body is a fixed 1024-byte C string on the wire
-    // (padded with NUL). kspace_streamer and the reference python server
-    // both send 1024 bytes.
-    constexpr size_t kConfigFileBytes = 1024;
-    std::vector<uint8_t> body(kConfigFileBytes, 0);
-    const size_t n = std::min(config.size(), kConfigFileBytes - 1);
-    std::memcpy(body.data(), config.data(), n);
     return enqueue_scanner(MRD_MESSAGE_CONFIG_FILE, std::move(body));
 }
 
-DumpEnqueueResult DumpRecorder::set_scanner_config_text(std::string config)
+DumpEnqueueResult DumpRecorder::set_scanner_config_text(std::vector<uint8_t> body)
 {
-    return enqueue_scanner(MRD_MESSAGE_CONFIG_TEXT,
-                           build_length_prefixed_text_body(config));
+    return enqueue_scanner(MRD_MESSAGE_CONFIG_TEXT, std::move(body));
 }
 
-DumpEnqueueResult DumpRecorder::append_scanner_text(std::string text)
+DumpEnqueueResult DumpRecorder::append_scanner_text(std::vector<uint8_t> body)
 {
-    return enqueue_scanner(MRD_MESSAGE_TEXT,
-                           build_length_prefixed_text_body(text));
+    return enqueue_scanner(MRD_MESSAGE_TEXT, std::move(body));
 }
 
-DumpEnqueueResult DumpRecorder::append_recon_text(std::string text)
+DumpEnqueueResult DumpRecorder::append_recon_text(std::vector<uint8_t> body)
 {
-    return enqueue_recon(MRD_MESSAGE_TEXT,
-                         build_length_prefixed_text_body(text));
+    return enqueue_recon(MRD_MESSAGE_TEXT, std::move(body));
 }
 
 DumpEnqueueResult DumpRecorder::append_scanner_acquisition(

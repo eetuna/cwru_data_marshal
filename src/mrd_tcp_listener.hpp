@@ -390,8 +390,11 @@ private:
                         state_.config_received.store(true);
                     }
                     if (state_.dump_enabled && state_.dump_recorder) {
+                        // Pass the raw 1024-byte wire body verbatim;
+                        // dump stores it as-is for byte-exact replay.
                         check_dump_result("config_file",
-                            state_.dump_recorder->set_scanner_config_file(config));
+                            state_.dump_recorder->set_scanner_config_file(
+                                std::vector<uint8_t>(body)));
                     }
                     send_or_buffer_recon(MRD_MESSAGE_CONFIG_FILE, body);
                     break;
@@ -420,8 +423,11 @@ private:
                         state_.config_received.store(true);
                     }
                     if (state_.dump_enabled && state_.dump_recorder) {
+                        // Pass the full wire body ([uint32 len][text]);
+                        // dump preserves NULs / unusual framing verbatim.
                         check_dump_result("config_text",
-                            state_.dump_recorder->set_scanner_config_text(config));
+                            state_.dump_recorder->set_scanner_config_text(
+                                std::vector<uint8_t>(body)));
                     }
                     send_or_buffer_recon(MRD_MESSAGE_CONFIG_TEXT, body);
                     break;
@@ -523,8 +529,11 @@ private:
                     if (nul != std::string::npos) text.resize(nul);
                     LOG_INFO("TEXT: " << text);
                     if (state_.dump_enabled && state_.dump_recorder) {
+                        // Pass the verbatim wire body; dump preserves
+                        // embedded NULs and unusual framing exactly.
                         check_dump_result("scanner_text",
-                            state_.dump_recorder->append_scanner_text(text));
+                            state_.dump_recorder->append_scanner_text(
+                                std::vector<uint8_t>(body)));
                     }
                     if (ensure_recon_session()) {
                         forwarder_->post_frame(MRD_MESSAGE_TEXT, body);
