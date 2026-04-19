@@ -166,31 +166,38 @@ DumpEnqueueResult DumpRecorder::start_scan(std::string filename, std::string xml
 
     auto enq_lane = [this, bytes, payload](Lane& lane, bool is_scanner) {
         return enqueue_on(lane, bytes, [this, &lane, payload, is_scanner] {
+            // Snapshot pending CONFIG/TEXT BEFORE close_scan_on_worker
+            // clears them. python-ismrmrd-server's protocol allows
+            // CONFIG_FILE / CONFIG_TEXT / TEXT to arrive before
+            // METADATA_XML; those jobs ran on the worker with no sink
+            // open and stashed their payload in pending_*. We must
+            // replay them into the sink that start_scan is about to
+            // open. close_scan_on_worker clears the buffers as part of
+            // between-scan cleanup, so we capture first.
+            std::string pending_cf       = std::move(lane.pending_config_file);
+            bool        pending_cf_set   = lane.pending_config_file_set;
+            std::string pending_ct       = std::move(lane.pending_config_text);
+            bool        pending_ct_set   = lane.pending_config_text_set;
+            std::vector<std::string> pending_txt = std::move(lane.pending_texts);
+
             close_scan_on_worker(lane);
             lane.current_filename = payload->first;
             lane.current_xml = payload->second;
             auto path = lane.lane_dir / lane.current_filename;
             lane.sink = std::make_unique<MrdSink>(path);
             lane.sink->set_header(lane.current_xml);
-            // Replay any CONFIG_FILE / CONFIG_TEXT / TEXT jobs that ran on
-            // the worker before the sink existed. These were buffered in
-            // the lane because python-ismrmrd-server's protocol allows
-            // CONFIG/TEXT to arrive before METADATA_XML.
-            if (lane.pending_config_file_set) {
-                lane.sink->write_string_dataset("config_file", lane.pending_config_file);
-                lane.pending_config_file.clear();
-                lane.pending_config_file_set = false;
+
+            if (pending_cf_set) {
+                lane.sink->write_string_dataset("config_file", pending_cf);
             }
-            if (lane.pending_config_text_set) {
-                lane.sink->write_string_dataset("config", lane.pending_config_text);
-                lane.pending_config_text.clear();
-                lane.pending_config_text_set = false;
+            if (pending_ct_set) {
+                lane.sink->write_string_dataset("config", pending_ct);
             }
-            for (auto& text : lane.pending_texts) {
+            for (auto& text : pending_txt) {
                 lane.sink->write_string_dataset(
                     "text_" + std::to_string(lane.text_count++), text);
             }
-            lane.pending_texts.clear();
+
             lane.drop_logged.store(false);
             lane.dropped_records.store(0);
             lane.dropped_bytes.store(0);
