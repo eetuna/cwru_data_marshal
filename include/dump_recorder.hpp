@@ -64,49 +64,86 @@ public:
     DumpEnqueueResult append_recon_image(std::vector<uint8_t> body);
     DumpEnqueueResult append_recon_waveform(std::vector<uint8_t> body);
 
-    // Post-hoc accessors (retained). Callers that want fine-grained runtime
-    // signal use the DumpEnqueueResult return values above; these give the
-    // cumulative view for CLOSE-time logging.
-    bool had_overflow() const noexcept { return drop_logged_.load(); }
-    uint64_t dropped_record_count() const noexcept {
-        return dropped_records_.load();
-    }
-    uint64_t dropped_byte_count() const noexcept {
-        return dropped_bytes_.load();
-    }
+    // Post-hoc accessors. The CLOSE-time view sums both lanes.
+    bool had_overflow() const noexcept;
+    uint64_t dropped_record_count() const noexcept;
+    uint64_t dropped_byte_count() const noexcept;
+
+    // Snapshot of per-sink message counters for /debug/sinks.
+    struct SinkCounters {
+        uint32_t acq{0};
+        uint32_t img{0};
+        uint32_t wf{0};
+        bool open{false};
+    };
+    struct CounterSnapshot {
+        SinkCounters scanner;
+        SinkCounters recon;
+        uint64_t dropped_records{0};
+        uint64_t dropped_bytes{0};
+        bool had_overflow{false};
+    };
+    CounterSnapshot counters() const;
 
 private:
-    struct Job {
-        size_t bytes{0};
-        std::function<void()> fn;
+    // P5: per-lane queue + worker. Scanner-side and recon-side traffic
+    // ran through one shared worker pre-fix; a slow HDF5 write to one
+    // sink blocked all writes to the other. Each lane now owns its
+    // queue, mutex, cv, worker, sink, and drop counters.
+    struct Lane {
+        // Job lifecycle. Barrier jobs (start_scan side-effects, close_scan)
+        // are non-droppable; data jobs are droppable so the overflow path
+        // can shed oldest-first without ever evicting a barrier.
+        struct Job {
+            size_t bytes{0};
+            std::function<void()> fn;
+            bool droppable{true};
+        };
+
+        std::filesystem::path lane_dir;          // directory under dump_dir
+        std::string component_tag;               // for log messages
+
+        std::thread worker;
+        mutable std::mutex mtx;
+        std::condition_variable cv;
+        std::deque<Job> queue;
+        size_t queued_bytes{0};
+        bool stopping{false};
+
+        std::atomic<bool> drop_logged{false};
+        std::atomic<uint64_t> dropped_records{0};
+        std::atomic<uint64_t> dropped_bytes{0};
+
+        std::string current_filename;
+        std::string current_xml;
+        std::unique_ptr<MrdSink> sink;
+        uint32_t text_count{0};
+
+        // Snapshot of the most-recently-closed sink's counts so /debug/sinks
+        // can report final retention after close, when sink is null. Updated
+        // in close_scan_on_worker() before sink.reset().
+        uint32_t last_closed_acq{0};
+        uint32_t last_closed_img{0};
+        uint32_t last_closed_wf{0};
+        bool ever_closed{false};
     };
 
     std::filesystem::path dump_dir_;
-    std::thread worker_;
-    std::mutex mtx_;
-    std::condition_variable cv_;
-    std::deque<Job> queue_;
-    size_t queued_bytes_{0};
-    bool stopping_{false};
-    std::atomic<bool> drop_logged_{false};
-    std::atomic<uint64_t> dropped_records_{0};
-    std::atomic<uint64_t> dropped_bytes_{0};
-
-    std::string current_filename_;
-    std::string current_xml_;
-    std::unique_ptr<MrdSink> scanner_sink_;
-    std::unique_ptr<MrdSink> recon_sink_;
-    uint32_t scanner_text_count_{0};
-    uint32_t recon_text_count_{0};
+    Lane scanner_;
+    Lane recon_;
 
     static constexpr size_t kMaxQueuedBytes = 256ULL * 1024ULL * 1024ULL;
     static constexpr size_t kMaxQueuedJobs = 4096;
 
-    DumpEnqueueResult enqueue(size_t bytes, std::function<void()> fn);
-    void worker_loop();
-    void close_scan_on_worker();
-    void ensure_recon_sink_on_worker();
-    void write_status_on_worker(MrdSink* sink);
+    void start_lane(Lane& lane, std::filesystem::path lane_dir, std::string tag);
+    void stop_lane(Lane& lane);
+    DumpEnqueueResult enqueue_scanner(size_t bytes, std::function<void()> fn);
+    DumpEnqueueResult enqueue_recon(size_t bytes, std::function<void()> fn);
+    DumpEnqueueResult enqueue_on(Lane& lane, size_t bytes,
+                                  std::function<void()> fn, bool droppable);
+    void worker_loop(Lane& lane);
+    void close_scan_on_worker(Lane& lane);
+    void write_status_on_worker(MrdSink* sink, const Lane& lane);
 };
 
 } // namespace mrd

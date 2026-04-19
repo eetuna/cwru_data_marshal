@@ -187,6 +187,34 @@ inline void append_live_image(MarshalState& state, LiveLane lane, const uint8_t*
     }
 }
 
+inline void append_live_waveform(MarshalState& state, LiveLane lane,
+                                 const uint8_t* data, size_t size)
+{
+    if (size < WAVEFORM_HEADER_BYTES) return;
+
+    std::string xml;
+    std::string filename;
+    std::vector<uint8_t> wf_bytes(data, data + size);
+
+    {
+        std::lock_guard<std::mutex> lk(state.scan_mtx);
+        xml = state.current_xml_header;
+
+        if (state.current_scan_filename.empty()) {
+            state.current_scan_filename = scan_filename();
+        }
+        filename = state.current_scan_filename;
+
+        auto& lane_store = lane_state(state, lane);
+        if (!lane_store.recorder) {
+            lane_store.recorder = std::make_unique<LiveImageRecorder>(
+                lane_live_dir(state.dump_dir, lane));
+        }
+
+        lane_store.recorder->append_waveform(filename, xml, std::move(wf_bytes));
+    }
+}
+
 inline void flush_live_lane(MarshalState& state, LiveLane lane)
 {
     std::lock_guard<std::mutex> lk(state.scan_mtx);

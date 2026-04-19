@@ -34,11 +34,27 @@ public:
     void append_image(std::string filename,
                       std::string xml,
                       std::vector<uint8_t> body);
+    // ECG and other scanner waveforms are persisted via the same per-lane
+    // sink so live mode captures them alongside images. Body is the wire
+    // payload: WaveformHeader (40 B) + uint32 samples * channels.
+    void append_waveform(std::string filename,
+                         std::string xml,
+                         std::vector<uint8_t> body);
     void close_scan();
 
     // MEDIUM #15: runtime-visible backpressure on unbounded queue.
     bool had_overflow() const noexcept { return drop_logged_.load(); }
     uint64_t dropped_count() const noexcept { return dropped_count_.load(); }
+
+    // Snapshot of the per-message-kind counters from the active sink. Returns
+    // zeros when the lane has not yet opened a sink for the current scan.
+    struct CounterSnapshot {
+        uint32_t acq{0};
+        uint32_t img{0};
+        uint32_t wf{0};
+        bool sink_open{false};
+    };
+    CounterSnapshot counters() const;
 
 private:
     // MEDIUM #15: bound the queue. Live archive writes cannot be coalesced
@@ -53,7 +69,7 @@ private:
 
     std::filesystem::path lane_dir_;
     std::thread worker_;
-    std::mutex mtx_;
+    mutable std::mutex mtx_;
     std::condition_variable cv_;
     std::deque<Job> queue_;
     bool stopping_{false};

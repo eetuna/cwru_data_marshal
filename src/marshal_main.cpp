@@ -336,27 +336,38 @@ int main(int argc, char** argv)
         state.dump_recorder = std::make_unique<mrd::DumpRecorder>(state.dump_dir);
     state.recon_url = recon_host.empty() ? "" : recon_host + ":" + std::to_string(recon_port);
     state.max_body_bytes = max_body_size;
-    state.latest_writer = std::make_unique<mrd::LatestImageWriter>();
-    state.scanner_live.recorder = std::make_unique<mrd::LiveImageRecorder>(
-        mrd::live_scanner_dir(state.dump_dir));
-    state.recon_live.recorder = std::make_unique<mrd::LiveImageRecorder>(
-        mrd::live_recon_dir(state.dump_dir));
+    // Live infra (latest snapshot + per-lane history recorders) is mutually
+    // exclusive with dump mode. In dump mode the operator wants a pure
+    // archive; running the live snapshot/history pipelines alongside dump
+    // wastes work and confuses throughput tests.
+    if (!state.dump_enabled) {
+        state.latest_writer = std::make_unique<mrd::LatestImageWriter>();
+        state.scanner_live.recorder = std::make_unique<mrd::LiveImageRecorder>(
+            mrd::live_scanner_dir(state.dump_dir));
+        state.recon_live.recorder = std::make_unique<mrd::LiveImageRecorder>(
+            mrd::live_recon_dir(state.dump_dir));
+    }
 
-    // Ensure file directories used by dump and live latest-image output.
-    mrd::live_scanner_dir(state.dump_dir);
-    mrd::live_recon_dir(state.dump_dir);
+    // Ensure file directories used by the active mode only.
     if (state.dump_enabled) {
         mrd::dump_scanner_dir(state.dump_dir);
         mrd::dump_recon_dir(state.dump_dir);
+    } else {
+        mrd::live_scanner_dir(state.dump_dir);
+        mrd::live_recon_dir(state.dump_dir);
     }
 
     // Recon forwarder via MRD TCP (optional)
     std::unique_ptr<mrd::ReconForwarder> forwarder;
     if (!recon_host.empty()) {
         auto on_failure = [&state]() {
-            write_error_png(state.dump_dir);
-            auto png_path = mrd::live_recon_dir(state.dump_dir) / "latest_error.png";
-            {
+            // Live mode only: write the latest_error.png snapshot under
+            // live/from_reconstruction so /image/latest can return an error
+            // marker. In dump mode there is no live snapshot path and
+            // /image/latest returns 404, so skip the live filesystem write.
+            if (!state.dump_enabled) {
+                write_error_png(state.dump_dir);
+                auto png_path = mrd::live_recon_dir(state.dump_dir) / "latest_error.png";
                 std::lock_guard<std::mutex> lk(state.latest_image_mtx);
                 state.latest_image_path = png_path.string();
                 state.latest_image_error = true;

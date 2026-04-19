@@ -7,9 +7,9 @@ A high-performance, dual-marshal architecture for synchronized MRI and robotic d
 ## 🛠️ Storage & Transport
 
 - Scanner and reconstruction traffic use **MRD TCP**; the marshal listens on `--mrd-port` and forwards to recon over the same wire protocol.
-- Session data lives under `./data` by default, with `live/from_scanner/` and `live/from_reconstruction/` always populated per scan.
-- When `--dump` is enabled, the marshal also mirrors canonical ISMRMRD HDF5 history into `dump/from_scanner/` and `dump/from_reconstruction/`.
-- Clients that need a stable reader target use `GET /image/latest`, which points at the closed `latest_image.h5` snapshot published under `live/`.
+- `--dump` selects the persistence mode (mutually exclusive):
+  - **Live mode (default, no `--dump`):** writes images **and** waveforms (e.g. ECG) to `live/from_scanner/` and `live/from_reconstruction/`. Publishes the closed `latest_image.h5` snapshot under `live/` and serves `GET /image/latest`.
+  - **Dump mode (`--dump`):** archive-only. Writes the full stream — raw acquisitions, images, waveforms, text/config — to `dump/from_scanner/` and `dump/from_reconstruction/`. The live snapshot pipeline is disabled and `GET /image/latest` returns `404`.
 
 ---
 
@@ -68,7 +68,7 @@ ctest --test-dir build --output-on-failure
 
 ## 🛡️ Key Features
 - **MRD TCP transport:** Scanner-side clients connect to the marshal over MRD TCP, and recon replies travel back on the same transport.
-- **Closed snapshot handoff:** `GET /image/latest` points readers at atomically replaced, closed `latest_image.h5` snapshots.
-- **Live/dump split:** `live/` is always populated for active scans, while `dump/` is the optional archival mirror under `./data`.
+- **Closed snapshot handoff:** in live mode, `GET /image/latest` points readers at atomically replaced, closed `latest_image.h5` snapshots. In dump mode the endpoint returns `404`.
+- **Live vs dump are mutually exclusive:** live mode writes images + waveforms under `live/`; dump mode (`--dump`) writes the full stream (acqs + images + waveforms + text) under `dump/` and disables the live snapshot path.
 - **Canonical HDF5 history:** Scanner and reconstruction streams are recorded as standard ISMRMRD per-scan files.
 - **Volume support:** Handles **2D multislice** series and **full 3D volumes**.

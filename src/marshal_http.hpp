@@ -79,9 +79,16 @@ static auto text_response(const http::request<Body>& req,
 // ---------------------------------------------------------------------------
 inline void handle_recon_image(MarshalState& state, const void* data, size_t size)
 {
-    if (state.dump_enabled && state.dump_recorder) {
-        const auto* bytes = static_cast<const uint8_t*>(data);
-        state.dump_recorder->append_recon_image(std::vector<uint8_t>(bytes, bytes + size));
+    // Dump mode is exclusive of the live snapshot/history pipeline. Gate
+    // purely on the mode flag so a missing dump_recorder does not silently
+    // fall back to writing live output.
+    if (state.dump_enabled) {
+        if (state.dump_recorder) {
+            const auto* bytes = static_cast<const uint8_t*>(data);
+            state.dump_recorder->append_recon_image(
+                std::vector<uint8_t>(bytes, bytes + size));
+        }
+        return;
     }
 
     mrd::append_live_image(state, mrd::LiveLane::Recon,
@@ -94,10 +101,18 @@ inline void handle_recon_waveform(MarshalState& state, const void* data, size_t 
     const auto* whdr = static_cast<const ISMRMRD::WaveformHeader*>(data);
     size_t data_bytes = size_t(whdr->number_of_samples) * whdr->channels * sizeof(uint32_t);
     if (size < mrd::WAVEFORM_HEADER_BYTES + data_bytes) return;
-    if (state.dump_enabled && state.dump_recorder) {
-        const auto* bytes = static_cast<const uint8_t*>(data);
-        state.dump_recorder->append_recon_waveform(std::vector<uint8_t>(bytes, bytes + size));
+    if (state.dump_enabled) {
+        if (state.dump_recorder) {
+            const auto* bytes = static_cast<const uint8_t*>(data);
+            state.dump_recorder->append_recon_waveform(
+                std::vector<uint8_t>(bytes, bytes + size));
+        }
+        return;
     }
+    // Live mode: persist recon-side waveforms via the per-lane history
+    // recorder so default-mode runs capture ECG too (not just images).
+    mrd::append_live_waveform(state, mrd::LiveLane::Recon,
+                              static_cast<const uint8_t*>(data), size);
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +120,12 @@ inline void handle_recon_waveform(MarshalState& state, const void* data, size_t 
 // ---------------------------------------------------------------------------
 template <class Body>
 static auto handle_get_image_latest(const http::request<Body>& req, MarshalState& state)
+    -> http::response<http::string_body>
 {
+    if (state.dump_enabled) {
+        return json_response(req, http::status::not_found,
+                             {{"error", "dump mode; no live snapshot"}});
+    }
     std::lock_guard<std::mutex> lk(state.latest_image_mtx);
     if (state.latest_image_path.empty()) {
         http::response<http::string_body> res{http::status::no_content, req.version()};
@@ -246,6 +266,51 @@ static auto handle_get_health(const http::request<Body>& req, MarshalState& stat
 }
 
 // ---------------------------------------------------------------------------
+// GET /debug/sinks — per-pipeline message counters for retention testing.
+// Returns sink-level acq/img/wf counters (only those incremented on
+// successful HDF5 writes) plus dump drop totals. Use this — not viz_client
+// FPS — to measure dump or live-history retention.
+// ---------------------------------------------------------------------------
+template <class Body>
+static auto handle_get_debug_sinks(const http::request<Body>& req, MarshalState& state)
+{
+    nlohmann::json j;
+    j["mode"] = state.dump_enabled ? "dump" : "live";
+
+    if (state.dump_enabled && state.dump_recorder) {
+        auto c = state.dump_recorder->counters();
+        j["dump"]["from_scanner"] = {
+            {"acq", c.scanner.acq}, {"img", c.scanner.img},
+            {"wf", c.scanner.wf}, {"open", c.scanner.open}};
+        j["dump"]["from_reconstruction"] = {
+            {"acq", c.recon.acq}, {"img", c.recon.img},
+            {"wf", c.recon.wf}, {"open", c.recon.open}};
+        j["dump"]["dropped_records"] = c.dropped_records;
+        j["dump"]["dropped_bytes"] = c.dropped_bytes;
+        j["dump"]["had_overflow"] = c.had_overflow;
+    }
+    if (!state.dump_enabled) {
+        if (state.scanner_live.recorder) {
+            auto c = state.scanner_live.recorder->counters();
+            j["live"]["from_scanner"] = {
+                {"acq", c.acq}, {"img", c.img},
+                {"wf", c.wf}, {"open", c.sink_open}};
+            j["live"]["from_scanner"]["dropped"] =
+                state.scanner_live.recorder->dropped_count();
+        }
+        if (state.recon_live.recorder) {
+            auto c = state.recon_live.recorder->counters();
+            j["live"]["from_reconstruction"] = {
+                {"acq", c.acq}, {"img", c.img},
+                {"wf", c.wf}, {"open", c.sink_open}};
+            j["live"]["from_reconstruction"]["dropped"] =
+                state.recon_live.recorder->dropped_count();
+        }
+    }
+    return json_response(req, http::status::ok, j);
+}
+
+// ---------------------------------------------------------------------------
 // Main dispatcher
 // ---------------------------------------------------------------------------
 template <class Body, class Send>
@@ -292,6 +357,10 @@ void handle_http_request(http::request<Body>&& req, MarshalState& state, Send&& 
     }
     if (method == http::verb::get && target == "/health") {
         send(handle_get_health(req, state));
+        return;
+    }
+    if (method == http::verb::get && target == "/debug/sinks") {
+        send(handle_get_debug_sinks(req, state));
         return;
     }
 

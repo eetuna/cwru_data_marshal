@@ -440,7 +440,12 @@ private:
                         check_dump_result("start_scan",
                             state_.dump_recorder->start_scan(scan_file, xml));
                     }
-                    reset_live_outputs_for_new_scan(state_);
+                    // Live mode only: reset_live_outputs_for_new_scan touches
+                    // live/ paths and creates per-lane directories. In dump
+                    // mode there is no live snapshot/history to reset.
+                    if (!state_.dump_enabled) {
+                        reset_live_outputs_for_new_scan(state_);
+                    }
                     state_.header_received.store(true);
                     send_or_buffer_recon(MRD_MESSAGE_METADATA_XML_TEXT, body);
                     break;
@@ -580,16 +585,19 @@ private:
 
                     LOG_DEBUG("IMAGE from scanner: "
                               << ihdr->matrix_size[0] << "x" << ihdr->matrix_size[1]);
-                    if (state_.dump_enabled && state_.dump_recorder) {
-                        check_dump_result("scanner_image",
-                            state_.dump_recorder->append_scanner_image(
-                                *ihdr, std::vector<uint8_t>(attr),
-                                std::vector<uint8_t>(pixels)));
+                    if (state_.dump_enabled) {
+                        if (state_.dump_recorder) {
+                            check_dump_result("scanner_image",
+                                state_.dump_recorder->append_scanner_image(
+                                    *ihdr, std::vector<uint8_t>(attr),
+                                    std::vector<uint8_t>(pixels)));
+                        }
+                    } else {
+                        // Scanner-origin IMAGE is already reconstructed image data.
+                        // In live mode, save/expose it for file-reading clients;
+                        // do not send it to the k-space reconstruction service.
+                        append_live_image(state_, LiveLane::Scanner, body.data(), body.size());
                     }
-                    // Scanner-origin IMAGE is already reconstructed image data.
-                    // Save/expose it for file-reading clients; do not send it to
-                    // the k-space reconstruction service.
-                    append_live_image(state_, LiveLane::Scanner, body.data(), body.size());
                     break;
                 }
 
@@ -606,10 +614,17 @@ private:
                     std::memcpy(body.data(), &whdr, WAVEFORM_HEADER_BYTES);
                     std::memcpy(body.data() + WAVEFORM_HEADER_BYTES, wf_data.data(), data_bytes);
 
-                    if (state_.dump_enabled && state_.dump_recorder) {
-                        check_dump_result("scanner_waveform",
-                            state_.dump_recorder->append_scanner_waveform(
-                                whdr, std::vector<uint8_t>(wf_data)));
+                    if (state_.dump_enabled) {
+                        if (state_.dump_recorder) {
+                            check_dump_result("scanner_waveform",
+                                state_.dump_recorder->append_scanner_waveform(
+                                    whdr, std::vector<uint8_t>(wf_data)));
+                        }
+                    } else {
+                        // Live mode: persist scanner waveforms (e.g. ECG) into
+                        // per-lane live history alongside images.
+                        append_live_waveform(state_, LiveLane::Scanner,
+                                             body.data(), body.size());
                     }
                     if (ensure_recon_session()) {
                         forwarder_->post_frame(MRD_MESSAGE_ISMRMRD_WAVEFORM, body);

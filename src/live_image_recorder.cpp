@@ -42,6 +42,22 @@ bool append_wire_image(MrdSink& sink, const uint8_t* data, size_t size)
     return true;
 }
 
+bool append_wire_waveform(MrdSink& sink, const uint8_t* data, size_t size)
+{
+    if (size < WAVEFORM_HEADER_BYTES) return false;
+    const auto* hdr = reinterpret_cast<const ISMRMRD::WaveformHeader*>(data);
+    const size_t data_bytes =
+        size_t(hdr->number_of_samples) * hdr->channels * sizeof(uint32_t);
+    if (size < WAVEFORM_HEADER_BYTES + data_bytes) return false;
+
+    ISMRMRD::Waveform wf(hdr->number_of_samples, hdr->channels);
+    std::memcpy(&wf.head, hdr, WAVEFORM_HEADER_BYTES);
+    if (data_bytes > 0)
+        std::memcpy(wf.data, data + WAVEFORM_HEADER_BYTES, data_bytes);
+    sink.append_waveform(wf);
+    return true;
+}
+
 } // namespace
 
 LiveImageRecorder::LiveImageRecorder(std::filesystem::path lane_dir)
@@ -103,6 +119,22 @@ void LiveImageRecorder::append_image(std::string filename,
     });
 }
 
+void LiveImageRecorder::append_waveform(std::string filename,
+                                        std::string xml,
+                                        std::vector<uint8_t> body)
+{
+    enqueue([this,
+             filename = std::move(filename),
+             xml = std::move(xml),
+             body = std::move(body)]() mutable {
+        ensure_sink_on_worker(filename, xml);
+        if (!sink_) return;
+        if (!append_wire_waveform(*sink_, body.data(), body.size())) {
+            LOG_WARN("Skipping malformed live waveform append for " << lane_dir_.string());
+        }
+    });
+}
+
 void LiveImageRecorder::close_scan()
 {
     auto done = std::make_shared<std::promise<void>>();
@@ -144,6 +176,19 @@ void LiveImageRecorder::worker_loop()
     }
 
     close_scan_on_worker();
+}
+
+LiveImageRecorder::CounterSnapshot LiveImageRecorder::counters() const
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    CounterSnapshot snap;
+    if (sink_) {
+        snap.acq = sink_->acquisition_count();
+        snap.img = sink_->image_count();
+        snap.wf = sink_->waveform_count();
+        snap.sink_open = true;
+    }
+    return snap;
 }
 
 void LiveImageRecorder::close_scan_on_worker()

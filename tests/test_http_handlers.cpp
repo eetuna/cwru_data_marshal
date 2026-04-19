@@ -5,10 +5,13 @@
 
 #include <catch2/catch_all.hpp>
 #include <boost/beast/http.hpp>
+#include <chrono>
 #include <filesystem>
 #include <random>
 #include <cstring>
 #include <fstream>
+#include <system_error>
+#include <thread>
 
 #include <ismrmrd/ismrmrd.h>
 #include <ismrmrd/dataset.h>
@@ -132,6 +135,58 @@ TEST_CASE("GET /image/latest returns 204 before first image", "[http]") {
     http::request<http::string_body> req{http::verb::get, "/image/latest", 11};
     auto res = dispatch(req, state);
     REQUIRE(res.result() == http::status::no_content);
+}
+
+TEST_CASE("Dump mode disables live snapshot/history filesystem side effects",
+          "[http][dump][mode]") {
+    MarshalState state; init_state(state);
+    state.dump_enabled = true;
+    state.current_xml_header = TEST_XML;
+    state.header_received.store(true);
+    state.current_scan_filename = "scan_dumpmode_test.h5";
+
+    SECTION("GET /image/latest returns 404") {
+        http::request<http::string_body> req{http::verb::get, "/image/latest", 11};
+        auto res = dispatch(req, state);
+        REQUIRE(res.result() == http::status::not_found);
+        auto j = json::parse(res.body());
+        CHECK(j.contains("error"));
+    }
+
+    SECTION("handle_recon_image does not write live latest_image.h5") {
+        const auto live_recon = mrd::live_recon_dir(state.dump_dir);
+        const auto latest = live_recon / "latest_image.h5";
+        std::error_code ec;
+        fs::remove(latest, ec);
+
+        auto wire = make_wire_image(1, 0, 1.0f);
+        handle_recon_image(state, wire.data(), wire.size());
+
+        // Give any (incorrectly enqueued) live writer a moment to flush.
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        CHECK_FALSE(fs::exists(latest));
+        std::lock_guard<std::mutex> lk(state.latest_image_mtx);
+        CHECK(state.latest_image_path.empty());
+    }
+
+    SECTION("Live recorders not constructed in dump mode") {
+        // The constructor gating in marshal_main.cpp lives outside this test
+        // (we instantiate MarshalState directly), but the contract is that
+        // when dump_enabled is true the http/listener paths skip the live
+        // calls entirely. Confirm via state: append_live_image must early-out
+        // and not lazily create a recorder.
+        REQUIRE(state.dump_enabled);
+        CHECK(state.scanner_live.recorder == nullptr);
+        CHECK(state.recon_live.recorder == nullptr);
+
+        auto wire = make_wire_image(2, 0, 2.0f);
+        handle_recon_image(state, wire.data(), wire.size());
+
+        // handle_recon_image returns early in dump mode, so the lazy
+        // construction in append_live_image must not have happened.
+        CHECK(state.recon_live.recorder == nullptr);
+    }
 }
 
 TEST_CASE("Latest image path follows most recently updated lane", "[http][latest]") {
