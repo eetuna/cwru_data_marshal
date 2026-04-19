@@ -109,6 +109,57 @@ static const std::string kLossTestXml = R"(<?xml version="1.0"?>
     <encoding><encodedSpace><matrixSize><x>256</x><y>256</y><z>1</z></matrixSize></encodedSpace></encoding>
 </ismrmrdHeader>)";
 
+TEST_CASE("LiveImageRecorder counters() is safe under concurrent polling",
+          "[live][race]") {
+    // Regression for codex round-5 live-path race finding:
+    // LiveImageRecorder's worker dropped the queue lock before
+    // running each job's lambda, then the lambda mutated sink_
+    // (ensure_sink_on_worker / close_scan_on_worker). counters()
+    // used to read sink_ under the queue lock -- the lock gave
+    // false safety because the worker wasn't holding it.
+    //
+    // Post-fix: worker publishes atomics (pub_acq/img/wf_count,
+    // pub_sink_open) after each successful append and at close.
+    // counters() reads ONLY those atomics + queue depth under
+    // mtx_. Never touches sink_ directly. This test hammers
+    // counters() from a background thread while the worker is
+    // opening/writing/closing the sink. Under TSan it would fire
+    // at a sink_ read during worker mutation if the fix regressed.
+    auto dir = fs::temp_directory_path() / "test_live_race";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    mrd::LiveImageRecorder rec(dir);
+
+    std::atomic<bool> stop{false};
+    std::atomic<size_t> poll_count{0};
+    std::thread poller([&] {
+        while (!stop.load()) {
+            auto c = rec.counters();
+            (void)c.acq; (void)c.img; (void)c.wf;
+            (void)c.sink_open; (void)c.queued_jobs;
+            (void)c.high_watermark_hit;
+            poll_count.fetch_add(1);
+        }
+    });
+
+    // Enqueue several hundred valid image records. Worker opens,
+    // writes, and eventually closes sink_ at close_scan. counters()
+    // must never touch sink_ during any of that.
+    for (int i = 0; i < 500; ++i) {
+        rec.append_image("race.h5", kLossTestXml,
+                         make_valid_wire_image(static_cast<uint16_t>(i)));
+    }
+    rec.close_scan();
+
+    stop.store(true);
+    poller.join();
+
+    INFO("polled " << poll_count.load() << " times");
+    REQUIRE(poll_count.load() > 0);
+    REQUIRE(rec.dropped_count() == 0);
+}
+
 TEST_CASE("LiveImageRecorder is lossless past the old 4096-job cap",
           "[live][lossless]") {
     // Regression for the 2026-04-19 lossless-live change. Under the

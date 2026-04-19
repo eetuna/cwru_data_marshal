@@ -159,15 +159,26 @@ void DumpRecorder::ensure_spool_on_worker(Lane& lane)
         }
         LOG_ERROR("Spool open failed on lane=" << lane.component_tag
                   << ": " << err);
+        lane.spool_is_open.store(false);
     } else {
         LOG_INFO("Opened spool lane=" << lane.component_tag
                  << " path=" << spool_path.string());
+        // Fresh spool: reset live counters and mark open. counters()
+        // will see the new state on its next poll.
+        lane.live_spool_records.store(0);
+        lane.live_spool_bytes.store(0);
+        lane.spool_is_open.store(true);
     }
 }
 
 void DumpRecorder::close_spool_on_worker(Lane& lane)
 {
     if (lane.spool) {
+        // Mark closed BEFORE we start tearing down the SpoolWriter so
+        // a concurrent counters() reader does not interpret the atomic
+        // live counters as "open" while we are in the process of
+        // destroying the writer.
+        lane.spool_is_open.store(false);
         // Snapshot counters BEFORE reset so /debug/sinks can keep
         // reporting them post-close. Atomic store so HTTP-thread
         // reads get a well-ordered value without holding lane.mtx.
@@ -250,6 +261,11 @@ void DumpRecorder::worker_loop(Lane& lane)
                 LOG_ERROR("Dump spool write failed on lane="
                           << lane.component_tag << ": " << err);
             }
+        } else {
+            // Publish fresh counters so /debug/sinks reflects the
+            // write without needing to read lane.spool directly.
+            lane.live_spool_records.store(lane.spool->records());
+            lane.live_spool_bytes.store(lane.spool->bytes());
         }
     }
 
@@ -442,19 +458,23 @@ uint64_t DumpRecorder::dropped_byte_count() const noexcept
 DumpRecorder::CounterSnapshot DumpRecorder::counters() const
 {
     auto snap_lane = [](const Lane& lane, LaneSnapshot& out) {
-        std::lock_guard<std::mutex> lk(lane.mtx);
-        if (lane.spool) {
-            out.spool_records = lane.spool->records();
-            out.spool_bytes   = lane.spool->bytes();
-            out.spool_open    = lane.spool->healthy();
-            out.write_error   = lane.spool->last_error();
+        // Read spool liveness + counters from atomics only. Worker
+        // mutates lane.spool (unique_ptr) without holding lane.mtx,
+        // so we MUST NOT dereference it here.
+        const bool open_now = lane.spool_is_open.load();
+        if (open_now) {
+            out.spool_records = lane.live_spool_records.load();
+            out.spool_bytes   = lane.live_spool_bytes.load();
+            out.spool_open    = true;
         } else {
-            // Post-close: surface the last spool's counters so
-            // /debug/sinks stays meaningful after conversion.
             out.spool_records = lane.last_spool_records.load();
             out.spool_bytes   = lane.last_spool_bytes.load();
-            out.write_error   = lane.write_error;
+            out.spool_open    = false;
         }
+        // write_error and converted_* live in the coherent telemetry
+        // group under lane.mtx (Fix #1).
+        std::lock_guard<std::mutex> lk(lane.mtx);
+        out.write_error   = lane.write_error;
         out.converted_acq = lane.converted_acq;
         out.converted_img = lane.converted_img;
         out.converted_wf  = lane.converted_wf;

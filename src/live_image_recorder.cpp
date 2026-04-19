@@ -114,7 +114,14 @@ void LiveImageRecorder::append_image(std::string filename,
         if (!sink_) return;
         if (!append_wire_image(*sink_, body.data(), body.size())) {
             LOG_WARN("Skipping malformed live image append for " << lane_dir_.string());
+            return;
         }
+        // Publish counters AFTER successful append. Readers (counters()
+        // from the HTTP thread) only consult these atomics; sink_ stays
+        // worker-exclusive so there's no read/write race on it.
+        pub_img_count_.store(sink_->image_count());
+        pub_acq_count_.store(sink_->acquisition_count());
+        pub_wf_count_.store(sink_->waveform_count());
     });
 }
 
@@ -130,7 +137,11 @@ void LiveImageRecorder::append_waveform(std::string filename,
         if (!sink_) return;
         if (!append_wire_waveform(*sink_, body.data(), body.size())) {
             LOG_WARN("Skipping malformed live waveform append for " << lane_dir_.string());
+            return;
         }
+        pub_wf_count_.store(sink_->waveform_count());
+        pub_acq_count_.store(sink_->acquisition_count());
+        pub_img_count_.store(sink_->image_count());
     });
 }
 
@@ -179,25 +190,37 @@ void LiveImageRecorder::worker_loop()
 
 LiveImageRecorder::CounterSnapshot LiveImageRecorder::counters() const
 {
-    std::lock_guard<std::mutex> lk(mtx_);
+    // IMPORTANT: this reads ONLY atomics + queue depth. It never
+    // touches sink_ because the worker thread owns that pointer
+    // exclusively and mutates it (ensure_sink_on_worker,
+    // close_scan_on_worker) WITHOUT holding mtx_. Reading sink_ here
+    // would race with those mutations even under lock, because the
+    // worker does not take the lock while using sink_.
     CounterSnapshot snap;
-    if (sink_) {
-        snap.acq = sink_->acquisition_count();
-        snap.img = sink_->image_count();
-        snap.wf = sink_->waveform_count();
-        snap.sink_open = true;
-    }
-    snap.queued_jobs = queue_.size();
+    snap.acq       = pub_acq_count_.load();
+    snap.img       = pub_img_count_.load();
+    snap.wf        = pub_wf_count_.load();
+    snap.sink_open = pub_sink_open_.load();
     snap.high_watermark_hit = high_watermark_hit_.load();
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        snap.queued_jobs = queue_.size();
+    }
     return snap;
 }
 
 void LiveImageRecorder::close_scan_on_worker()
 {
     if (sink_) {
+        // Publish final counters BEFORE the sink is destroyed, so
+        // counters() keeps reporting the final state after close.
+        pub_acq_count_.store(sink_->acquisition_count());
+        pub_img_count_.store(sink_->image_count());
+        pub_wf_count_.store(sink_->waveform_count());
         sink_->close();
         sink_.reset();
     }
+    pub_sink_open_.store(false);
     current_filename_.clear();
     // Reset per-scan watermark so the next scan starts clean.
     high_watermark_hit_.store(false);
@@ -216,6 +239,12 @@ void LiveImageRecorder::ensure_sink_on_worker(const std::string& filename,
         current_filename_ = filename;
         sink_ = std::make_unique<MrdSink>(lane_dir_ / current_filename_);
         if (!xml.empty()) sink_->set_header(xml);
+        // Fresh sink for a new scan: reset published counters and
+        // mark as open.
+        pub_acq_count_.store(0);
+        pub_img_count_.store(0);
+        pub_wf_count_.store(0);
+        pub_sink_open_.store(true);
     }
 }
 

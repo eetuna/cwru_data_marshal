@@ -92,6 +92,17 @@ private:
     // once per scan, reset at close_scan_on_worker.
     std::atomic<bool> high_watermark_hit_{false};
 
+    // Published counters. The worker owns sink_ exclusively and
+    // publishes these atomics after each successful append (or at
+    // close). counters() reads ONLY these atomics + queue depth;
+    // it never touches sink_ directly. Without this, HTTP-thread
+    // reads of sink_ race with the worker's open/close/append
+    // operations on the same pointer and MrdSink's internal state.
+    std::atomic<uint32_t> pub_acq_count_{0};
+    std::atomic<uint32_t> pub_img_count_{0};
+    std::atomic<uint32_t> pub_wf_count_{0};
+    std::atomic<bool>     pub_sink_open_{false};
+
     std::string current_filename_;
     std::unique_ptr<MrdSink> sink_;
 

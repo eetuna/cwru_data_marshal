@@ -165,6 +165,17 @@ private:
         std::atomic<uint64_t> last_spool_records{0};
         std::atomic<uint64_t> last_spool_bytes{0};
 
+        // Published spool liveness state. Worker publishes these
+        // after open/after-each-append/close. counters() reads
+        // ONLY these atomics; it never touches lane.spool directly,
+        // because the worker mutates lane.spool (make_unique / reset)
+        // without holding lane.mtx. A read of lane.spool->records()
+        // from the HTTP thread could race with a worker-side reset
+        // and UAF.
+        std::atomic<uint64_t> live_spool_records{0};
+        std::atomic<uint64_t> live_spool_bytes{0};
+        std::atomic<bool>     spool_is_open{false};
+
         // Post-conversion counters, populated in close_scan by the
         // SpoolConverter result.
         uint32_t converted_acq{0};
