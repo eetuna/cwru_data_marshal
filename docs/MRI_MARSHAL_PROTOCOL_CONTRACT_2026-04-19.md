@@ -26,7 +26,7 @@ Required message IDs:
 - `1022` ISMRMRD IMAGE
 - `1026` ISMRMRD WAVEFORM
 
-The marshal forwards scanner MRD messages to recon over MRD TCP unconditionally; forwarding is not gated on the archival mode.
+The marshal forwards scanner MRD messages to recon over MRD TCP, except scanner-origin IMAGE as described below. Forwarding is not gated on the archival mode.
 
 **Forwarding carve-out for scanner-origin IMAGE (1022).** Scanner-origin IMAGE is pre-reconstructed image data and is not useful input to a k-space reconstruction service. Marshal archives scanner IMAGE (to `live/from_scanner/` or `dump/from_scanner/` depending on mode) but does NOT forward it to recon. All other scanner messages (CONFIG_FILE, CONFIG_TEXT, METADATA_XML, TEXT, ACQUISITION, WAVEFORM, CLOSE) are forwarded to recon.
 
