@@ -294,36 +294,46 @@ void DumpRecorder::close_scan()
     // the promise. We wait on the future here. The worker thread is
     // never stopped, so concurrent enqueues after the barrier are
     // admitted (they'll open a new spool when the next scan starts).
-    // Mark close_scan as pending BEFORE draining. Any enqueue that
-    // races with the barrier sees close_scan_pending_=true and
-    // generates a fresh stem rather than reusing the one about to
-    // be closed.
+    // Atomic barrier-insertion under scan_stem_mtx_: any concurrent
+    // enqueue_on sees close_scan_pending_=true ONLY after both lane
+    // barriers are already queued. Without this, a record that arrived
+    // between "set pending" and "push barriers" would see pending=true,
+    // generate a fresh stem, clear pending, and then land on the lane
+    // queue in front of the (not-yet-pushed) barrier -- polluting the
+    // old scan's spool and/or orphaning a fresh stem.
+    //
+    // Two futures so we can wait on both AFTER releasing the stem lock.
     std::string stem;
+    auto scanner_signal = std::make_shared<std::promise<void>>();
+    auto scanner_fut    = scanner_signal->get_future();
+    auto recon_signal   = std::make_shared<std::promise<void>>();
+    auto recon_fut      = recon_signal->get_future();
     {
         std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
         stem = scan_stem_;
         close_scan_pending_ = true;
-    }
 
-    auto drain_lane = [](Lane& lane) {
-        auto signal = std::make_shared<std::promise<void>>();
-        auto fut = signal->get_future();
-        {
+        auto queue_barrier = [](Lane& lane,
+                                std::shared_ptr<std::promise<void>> sig) {
             std::lock_guard<std::mutex> lk(lane.mtx);
             if (lane.stopping) {
-                // Destructor path: do nothing, worker is exiting.
+                // Destructor path: worker is exiting. Satisfy the
+                // promise now so the wait below returns.
+                sig->set_value();
                 return;
             }
             Lane::Record barrier;
             barrier.barrier = true;
-            barrier.signal = signal;
+            barrier.signal = std::move(sig);
             lane.queue.push_back(std::move(barrier));
-        }
-        lane.cv.notify_one();
-        fut.wait();
-    };
-    drain_lane(scanner_);
-    drain_lane(recon_);
+        };
+        queue_barrier(scanner_, scanner_signal);
+        queue_barrier(recon_,   recon_signal);
+    }
+    scanner_.cv.notify_one();
+    recon_.cv.notify_one();
+    scanner_fut.wait();
+    recon_fut.wait();
 
     status_.store(ConversionStatus::Converting);
     LOG_INFO("Converting dump spool to HDF5");
