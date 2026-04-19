@@ -38,6 +38,22 @@ static std::vector<uint8_t> config_file_body(const std::string& s) {
     return body;
 }
 
+// Wrap a legacy 2-arg start_scan(filename, xml) call for tests. The
+// new 3-arg API takes (filename, xml_body, header_xml); tests that
+// don't care about METADATA_XML byte-exactness can keep using the
+// string form through this helper.
+static mrd::DumpEnqueueResult dump_start_scan(mrd::DumpRecorder& rec,
+                                               const std::string& filename,
+                                               const std::string& xml) {
+    // Build the standard length-prefixed XML wire body.
+    const uint32_t inner = static_cast<uint32_t>(xml.size() + 1);
+    std::vector<uint8_t> body(sizeof(uint32_t) + inner);
+    std::memcpy(body.data(), &inner, sizeof(inner));
+    std::memcpy(body.data() + sizeof(inner), xml.data(), xml.size());
+    body[sizeof(inner) + xml.size()] = '\0';
+    return rec.start_scan(filename, std::move(body), xml);
+}
+
 static std::vector<uint8_t> text_body(const std::string& s) {
     // [uint32 inner_len][text + NUL]. inner_len includes the NUL.
     const uint32_t inner = static_cast<uint32_t>(s.size() + 1);
@@ -66,7 +82,7 @@ TEST_CASE("DumpRecorder enqueue returns Accepted on happy path",
     fs::create_directories(dir);
 
     mrd::DumpRecorder rec(dir);
-    auto r = rec.start_scan("api_ok.h5",
+    auto r = dump_start_scan(rec, "api_ok.h5",
                             "<?xml version=\"1.0\"?><ismrmrdHeader/>");
     REQUIRE(r == mrd::DumpEnqueueResult::Accepted);
 
@@ -88,7 +104,7 @@ TEST_CASE("DumpRecorder with spool never drops under high-count acq flood",
     fs::create_directories(dir);
 
     mrd::DumpRecorder rec(dir);
-    auto start_r = rec.start_scan("lossless.h5",
+    auto start_r = dump_start_scan(rec, "lossless.h5",
                                   "<?xml version=\"1.0\"?><ismrmrdHeader/>");
     REQUIRE(start_r == mrd::DumpEnqueueResult::Accepted);
 
@@ -180,7 +196,7 @@ TEST_CASE("DumpRecorder persists CONFIG_FILE / CONFIG_TEXT / TEXT sent before ME
                 == mrd::DumpEnqueueResult::Accepted);
 
         // Now open the sink via start_scan (METADATA_XML arrival).
-        REQUIRE(rec.start_scan(filename, xml)
+        REQUIRE(dump_start_scan(rec, filename, xml)
                 == mrd::DumpEnqueueResult::Accepted);
 
         rec.close_scan();
@@ -229,7 +245,7 @@ TEST_CASE("DumpRecorder supports back-to-back scans (second scan works)",
     mrd::DumpRecorder rec(dir);
 
     for (int scan = 0; scan < 2; ++scan) {
-        REQUIRE(rec.start_scan("s" + std::to_string(scan) + ".h5",
+        REQUIRE(dump_start_scan(rec, "s" + std::to_string(scan) + ".h5",
                                "<?xml version=\"1.0\"?><ismrmrdHeader/>")
                 == mrd::DumpEnqueueResult::Accepted);
 
@@ -279,7 +295,7 @@ TEST_CASE("DumpRecorder scanner+recon archives share the same <ts> stem",
     REQUIRE(rec.append_scanner_text(text_body("pre-metadata"))
             == mrd::DumpEnqueueResult::Accepted);
     // Now METADATA_XML.
-    REQUIRE(rec.start_scan("caller_suggested.h5",
+    REQUIRE(dump_start_scan(rec, "caller_suggested.h5",
                            "<?xml version=\"1.0\"?><ismrmrdHeader/>")
             == mrd::DumpEnqueueResult::Accepted);
     // Hit the recon lane with real content (text) so it definitely
@@ -326,7 +342,7 @@ TEST_CASE("DumpRecorder close-barrier race: strict scan boundary "
 
     {
         mrd::DumpRecorder rec(dir);
-        REQUIRE(rec.start_scan("first.h5",
+        REQUIRE(dump_start_scan(rec, "first.h5",
                                "<?xml version=\"1.0\"?><ismrmrdHeader/>")
                 == mrd::DumpEnqueueResult::Accepted);
         REQUIRE(rec.append_scanner_text(text_body(pre_close))
@@ -381,7 +397,7 @@ TEST_CASE("DumpRecorder close-barrier race under concurrent hammer: "
 
     {
         mrd::DumpRecorder rec(dir);
-        REQUIRE(rec.start_scan("first.h5",
+        REQUIRE(dump_start_scan(rec, "first.h5",
                                "<?xml version=\"1.0\"?><ismrmrdHeader/>")
                 == mrd::DumpEnqueueResult::Accepted);
         REQUIRE(rec.append_scanner_text(text_body(pre_close))
@@ -483,7 +499,7 @@ TEST_CASE("DumpRecorder /debug/sinks counters after close + stale-counter reset"
     mrd::DumpRecorder rec(dir);
 
     // Scan 1: scanner sends acqs, recon sends a text.
-    REQUIRE(rec.start_scan("s1.h5", "<?xml version=\"1.0\"?><ismrmrdHeader/>")
+    REQUIRE(dump_start_scan(rec, "s1.h5", "<?xml version=\"1.0\"?><ismrmrdHeader/>")
             == mrd::DumpEnqueueResult::Accepted);
     for (int i = 0; i < 3; ++i) {
         std::vector<uint8_t> s(sample_bytes, 0x11);
@@ -503,7 +519,7 @@ TEST_CASE("DumpRecorder /debug/sinks counters after close + stale-counter reset"
     CHECK(snap1.recon.spool_records > 0);
 
     // Scan 2: only scanner activity, no recon records.
-    REQUIRE(rec.start_scan("s2.h5", "<?xml version=\"1.0\"?><ismrmrdHeader/>")
+    REQUIRE(dump_start_scan(rec, "s2.h5", "<?xml version=\"1.0\"?><ismrmrdHeader/>")
             == mrd::DumpEnqueueResult::Accepted);
     for (int i = 0; i < 5; ++i) {
         std::vector<uint8_t> s(sample_bytes, 0x22);
@@ -578,7 +594,7 @@ TEST_CASE("DumpRecorder counters() is safe under concurrent polling during conve
         size_t(nsamples) * nchannels * 2 * sizeof(float);
 
     mrd::DumpRecorder rec(dir);
-    REQUIRE(rec.start_scan("telemetry.h5",
+    REQUIRE(dump_start_scan(rec, "telemetry.h5",
                            "<?xml version=\"1.0\"?><ismrmrdHeader/>")
             == mrd::DumpEnqueueResult::Accepted);
 
@@ -661,7 +677,7 @@ TEST_CASE("DumpRecorder preserves byte-exact TEXT bodies (embedded NULs)",
 
     {
         mrd::DumpRecorder rec(dir);
-        REQUIRE(rec.start_scan("byte_exact.h5",
+        REQUIRE(dump_start_scan(rec, "byte_exact.h5",
                                "<?xml version=\"1.0\"?><ismrmrdHeader/>")
                 == mrd::DumpEnqueueResult::Accepted);
         REQUIRE(rec.append_scanner_text(std::move(body))
@@ -720,6 +736,85 @@ TEST_CASE("DumpRecorder preserves byte-exact TEXT bodies (embedded NULs)",
     CHECK(found_match);
 }
 
+TEST_CASE("DumpRecorder preserves byte-exact METADATA_XML (embedded NUL)",
+          "[dump][spool][byte-exact]") {
+    // Regression for codex round-6 follow-up. Fix #4 covered CONFIG
+    // and TEXT but METADATA_XML was still NUL-stripped by the
+    // listener before being passed into start_scan(). Fix: start_scan
+    // now takes the raw wire body alongside the parsed xml string.
+    // Dump stores the verbatim body; listener keeps the parsed
+    // string for its own slice-count regex etc.
+    //
+    // We feed XML with `pre\\0<!-- tail -->` via the wire-body path
+    // and assert the spool record contains the full payload.
+    auto dir = fs::temp_directory_path() / "test_dump_metadata_byte_exact";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    const std::string xml_pre  = "<?xml version=\"1.0\"?><ismrmrdHeader>";
+    const std::string xml_tail = "<!-- tail after NUL --></ismrmrdHeader>";
+    std::string payload = xml_pre;
+    payload += '\0';
+    payload += xml_tail;
+
+    // Build the wire body exactly as the listener would: [uint32][payload+NUL]
+    const uint32_t inner = static_cast<uint32_t>(payload.size() + 1);
+    std::vector<uint8_t> body(sizeof(uint32_t) + inner);
+    std::memcpy(body.data(), &inner, sizeof(inner));
+    std::memcpy(body.data() + sizeof(inner), payload.data(), payload.size());
+    body[sizeof(inner) + payload.size()] = '\0';
+
+    {
+        mrd::DumpRecorder rec(dir);
+        // Strip-at-NUL "header_xml" matches what the listener's own
+        // state keeps; dump treats the raw body as authoritative.
+        std::string header_xml = xml_pre;
+        REQUIRE(rec.start_scan("metadata_be.h5", body, header_xml)
+                == mrd::DumpEnqueueResult::Accepted);
+        rec.close_scan();
+    }
+
+    // Read the spool directly; HDF5 VLEN strings would truncate at
+    // the first NUL on HDF5 read-back, so spool-level verification
+    // is the correct byte-exactness assertion.
+    auto scanner_dir = mrd::dump_scanner_dir(dir);
+    fs::path spool_path;
+    for (auto& ent : fs::directory_iterator(scanner_dir)) {
+        if (ent.path().extension() == ".spool") { spool_path = ent.path(); break; }
+    }
+    REQUIRE(!spool_path.empty());
+
+    std::ifstream in(spool_path, std::ios::binary);
+    REQUIRE(in.is_open());
+    bool found_match = false;
+    while (in) {
+        uint16_t tag = 0;
+        uint32_t len = 0;
+        if (!in.read(reinterpret_cast<char*>(&tag), sizeof(tag))) break;
+        if (!in.read(reinterpret_cast<char*>(&len), sizeof(len))) break;
+        std::vector<uint8_t> rec_body(len);
+        if (len > 0 && !in.read(reinterpret_cast<char*>(rec_body.data()), len))
+            break;
+        if (tag != mrd::MRD_MESSAGE_METADATA_XML_TEXT) continue;
+        if (rec_body.size() < sizeof(uint32_t)) continue;
+        uint32_t rec_inner = 0;
+        std::memcpy(&rec_inner, rec_body.data(), sizeof(rec_inner));
+        if (rec_body.size() < sizeof(uint32_t) + rec_inner) continue;
+        const char* p = reinterpret_cast<const char*>(
+            rec_body.data() + sizeof(uint32_t));
+        // Expect: xml_pre + '\0' + xml_tail + '\0'. Full payload present.
+        if (rec_inner >= xml_pre.size() + 1 + xml_tail.size() &&
+            std::memcmp(p, xml_pre.data(), xml_pre.size()) == 0 &&
+            p[xml_pre.size()] == '\0' &&
+            std::memcmp(p + xml_pre.size() + 1,
+                        xml_tail.data(), xml_tail.size()) == 0) {
+            found_match = true;
+            break;
+        }
+    }
+    CHECK(found_match);
+}
+
 TEST_CASE("DumpRecorder enqueue returns Stopped after destruction",
           "[dump][overflow][api]") {
     auto dir = fs::temp_directory_path() / "test_dump_overflow_stopped";
@@ -728,7 +823,7 @@ TEST_CASE("DumpRecorder enqueue returns Stopped after destruction",
 
     // Scope the recorder so its worker stops before we try to enqueue.
     auto rec = std::make_unique<mrd::DumpRecorder>(dir);
-    rec->start_scan("stopped.h5",
+    dump_start_scan(*rec, "stopped.h5",
                     "<?xml version=\"1.0\"?><ismrmrdHeader/>");
     rec->close_scan();
     rec.reset();  // destructor sets stopping_ = true and joins worker

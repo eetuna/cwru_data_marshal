@@ -57,12 +57,20 @@ public:
     DumpRecorder(const DumpRecorder&) = delete;
     DumpRecorder& operator=(const DumpRecorder&) = delete;
 
-    // start_scan sets the filename and XML header that later records
-    // will reference. If spool records already arrived before this
-    // call (CONFIG_FILE, CONFIG_TEXT, TEXT) they are already captured
-    // in the spool; METADATA_XML is just another record and the
-    // converter handles ordering.
-    DumpEnqueueResult start_scan(std::string filename, std::string xml);
+    // start_scan sets the filename and takes the raw METADATA_XML
+    // wire body ([uint32 len][xml+NUL]) from the listener so the
+    // spool captures it byte-exactly. The converter's METADATA_XML
+    // handler extracts the semantic xml at HDF5-write time via the
+    // same parse used by the live path.
+    //
+    // xml_body is the full wire body to spool verbatim. header_xml
+    // is the parsed XML string DumpRecorder uses for internal sink
+    // configuration (e.g. set_header); the listener strips it at
+    // the first NUL as it does for live-mode state, which is fine
+    // for HDF5 VLEN purposes.
+    DumpEnqueueResult start_scan(std::string filename,
+                                 std::vector<uint8_t> xml_body,
+                                 std::string header_xml);
     void close_scan();
 
     // Byte-exact dump: these accept the FULL wire body exactly as

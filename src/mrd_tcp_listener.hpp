@@ -474,8 +474,16 @@ private:
                         state_.recon_expected_slices = nz;
                     }
                     if (state_.dump_enabled && state_.dump_recorder) {
+                        // Pass the raw wire body for byte-exact
+                        // METADATA_XML preservation in the spool.
+                        // xml (NUL-stripped) is kept as an argument
+                        // for dump's own sink header configuration;
+                        // the spool record is the verbatim body.
                         check_dump_result("start_scan",
-                            state_.dump_recorder->start_scan(scan_file, xml));
+                            state_.dump_recorder->start_scan(
+                                scan_file,
+                                std::vector<uint8_t>(body),
+                                xml));
                     }
                     // Live mode only: reset_live_outputs_for_new_scan touches
                     // live/ paths and creates per-lane directories. In dump

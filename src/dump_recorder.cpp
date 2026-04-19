@@ -284,7 +284,9 @@ static std::vector<uint8_t> build_length_prefixed_text_body(const std::string& s
     return body;
 }
 
-DumpEnqueueResult DumpRecorder::start_scan(std::string filename, std::string xml)
+DumpEnqueueResult DumpRecorder::start_scan(std::string filename,
+                                             std::vector<uint8_t> xml_body,
+                                             std::string header_xml)
 {
     // Align both lanes on the scan identity. If the spool has already
     // been opened (because CONFIG_FILE / TEXT arrived before METADATA),
@@ -304,18 +306,18 @@ DumpEnqueueResult DumpRecorder::start_scan(std::string filename, std::string xml
             scan_stem_ = stem.empty() ? scan_filename_now() : stem;
         }
     }
-    auto align = [&xml](Lane& lane) {
+    auto align = [&header_xml](Lane& lane) {
         std::lock_guard<std::mutex> lk(lane.mtx);
-        lane.current_xml = xml;
+        lane.current_xml = header_xml;
     };
     align(scanner_);
     align(recon_);
     status_.store(ConversionStatus::Spooling);
 
-    // Spool the METADATA_XML record itself so the converter can set
-    // the HDF5 header on replay.
-    auto body = build_length_prefixed_text_body(xml);
-    return enqueue_scanner(MRD_MESSAGE_METADATA_XML_TEXT, std::move(body));
+    // Spool the METADATA_XML record verbatim so the converter sees
+    // the exact wire bytes the scanner sent (byte-exact preservation,
+    // same as CONFIG/TEXT).
+    return enqueue_scanner(MRD_MESSAGE_METADATA_XML_TEXT, std::move(xml_body));
 }
 
 void DumpRecorder::close_scan()
