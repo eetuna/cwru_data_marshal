@@ -50,6 +50,8 @@ Recon archival depends on the archival mode (see Archival Mode).
 
 `--dump` selects the archival mode. Modes are mutually exclusive; marshal commits to one mode at process startup.
 
+Both modes use the same storage model: during the scan, incoming wire bytes are written to a flat raw-MRD spool file (`scan_<ts>.h5.spool`). On scan close, the spool is converted to the canonical ISMRMRD HDF5 file (`scan_<ts>.h5`). The raw spool is retained next to the converted `.h5` by default so the byte-exact wire stream remains recoverable independent of the HDF5 converter.
+
 ### Live mode (default, no `--dump`)
 
 - `live/from_scanner/scan_<ts>.h5` archives scanner-origin IMAGE (1022) and WAVEFORM (1026), including ECG.
@@ -65,15 +67,34 @@ Recon archival depends on the archival mode (see Archival Mode).
 
 Within the active mode, scanner and recon archive files for a given scan share the same `<ts>`.
 
+### Mid-scan readability
+
+- `latest_image.h5` is the mid-scan readable interface for live clients. It is written by `LatestImageWriter` as an atomic closed-file snapshot (write temp, fsync, rename over the destination) and is safe to open concurrently from any reader at any time.
+- `live/from_*/scan_<ts>.h5` and `dump/from_*/scan_<ts>.h5` are archival outputs, finalized after scan close. They are NOT guaranteed mid-scan readable; HDF5's default file locking holds an exclusive lock on the writer anyway, and with the spool-then-convert design the `.h5` does not exist until the converter runs at close.
+- The retained `.spool` file is byte-exact of the wire stream and is present throughout the scan, but it is a private implementation format (length-prefixed MRD records) intended for post-scan recovery / offline conversion, not a stable client-facing interface.
+- Future mid-scan-readable history (if required) should be added as either (a) HDF5 SWMR mode on the archival sink, or (b) additional periodic closed-file snapshots using the `latest_image.h5` pattern. The current design does not support it and should not be assumed to.
+
 ## Retention
 
-Archival is lossless. Marshal must persist every incoming message to the active archival sink until the scan closes. Marshal must never drop records.
+Archival is lossless. Marshal persists every incoming message to the active archival sink until the scan closes. Marshal must never drop records due to queue pressure, rate limits, or internal flow-control decisions. Dropped-record counters in `/debug/sinks` are kept for visibility and must remain zero under any non-disk-failure operating condition.
 
-## Non-blocking Guarantee
+The only acceptable fail-path is a hard disk-write failure (ENOSPC, EIO). In that case the drop counter increments, a one-shot error is logged, and `/debug/sinks` surfaces the error.
 
-Marshal must never stall, backpressure, or damage the scanner or recon session by virtue of its archival work. The scanner → recon forwarding path and the recon → scanner return path are never held on archival writes. Archival is asynchronous: reader threads enqueue and return; worker threads drain into HDF5.
+## Non-blocking Guarantee (archival)
 
-The non-blocking guarantee is paired with the retention guarantee: marshal must not satisfy either by violating the other. If marshal cannot sustain the incoming rate losslessly without blocking the protocol, that is a marshal defect (larger queue, faster writer, lower-overhead format) — not an operating condition.
+Marshal must never stall, backpressure, or damage the scanner or recon session by virtue of its archival work. Archival writes run on worker threads that consume a per-lane queue; reader threads enqueue and return. The archival disk path is decoupled from the protocol forwarding path.
+
+This guarantee is specifically about archival: HDF5 writes and conversion must never block scanner or recon. It does NOT prohibit TCP flow control on the protocol path itself (see Protocol Forwarding below), which is the transport-level mechanism every MRD peer — including `python-ismrmrd-server` — relies on.
+
+## Protocol Forwarding
+
+Scanner → recon and recon → scanner forwarding use blocking TCP sends. This matches the reference implementation (`python-ismrmrd-server/connection.py`) and the behavior of Gadgetron and every other MRD peer in the ecosystem. TCP flow control is the protocol-level backpressure mechanism:
+
+- If the scanner's receive buffer fills (scanner is slow to read return messages), the marshal's send to the scanner blocks. That in turn blocks the recon reader thread on its next send, which applies backpressure across the recon TCP connection back to recon itself. Recon pauses producing until scanner catches up. No data is lost.
+- Marshal does NOT maintain an in-process queue on the pushback path. A queue at this layer would force a choice between drop (contract violation) and unbounded growth (OOM), both of which TCP flow control already solves.
+- Shutdown safety: when marshal's `stop()` closes the scanner socket, any in-flight blocking send returns EPIPE and unwinds cleanly.
+
+"TCP flow control" and "marshal stalling scanner/recon" are distinct. TCP flow control is a transport-layer property of the connection; marshal stalling the peers would be marshal holding up forwarding for its own reasons (archival, bookkeeping, internal locks). The non-blocking guarantee above prohibits the latter; it does not and cannot prohibit the former.
 
 ## HTTP Side Channel
 
@@ -91,7 +112,7 @@ HTTP is only for non-scanner clients:
 
 `GET /image/latest` in dump mode returns `404 Not Found` with body `{"error":"dump mode; no live snapshot"}`.
 
-`GET /debug/sinks` returns per-sink counters (`acq`, `img`, `wf`) for all active sinks, last-closed counters so retention is observable after a sink closes, and dump drop counters (which must remain zero under the retention guarantee).
+`GET /debug/sinks` returns per-sink counters (`acq`, `img`, `wf`) for all active sinks, last-closed counters so retention is observable after a sink closes, spool record / byte counters (during scan) and converted HDF5 counts (after close), queue depth + high-watermark hit flags, and dropped-record counters (which must remain zero under the retention guarantee, excluding the disk-failure exception above).
 
 ## Failure Behavior
 
