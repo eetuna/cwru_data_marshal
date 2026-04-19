@@ -119,6 +119,19 @@ private:
         std::unique_ptr<MrdSink> sink;
         uint32_t text_count{0};
 
+        // Pre-metadata buffer. python-ismrmrd-server's reference server is
+        // order-agnostic and persists CONFIG_FILE / CONFIG_TEXT / TEXT that
+        // arrive before METADATA_XML. Our dump sink is only opened on
+        // METADATA_XML (start_scan), so any config/text worker jobs that
+        // run before the sink is open would silently drop. Instead the
+        // worker appends them to this buffer; start_scan replays the
+        // buffer into the newly-opened sink before it's released.
+        std::string pending_config_file;
+        bool pending_config_file_set{false};
+        std::string pending_config_text;
+        bool pending_config_text_set{false};
+        std::vector<std::string> pending_texts;
+
         // Snapshot of the most-recently-closed sink's counts so /debug/sinks
         // can report final retention after close, when sink is null. Updated
         // in close_scan_on_worker() before sink.reset().

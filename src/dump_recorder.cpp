@@ -172,7 +172,25 @@ DumpEnqueueResult DumpRecorder::start_scan(std::string filename, std::string xml
             auto path = lane.lane_dir / lane.current_filename;
             lane.sink = std::make_unique<MrdSink>(path);
             lane.sink->set_header(lane.current_xml);
-            lane.text_count = 0;
+            // Replay any CONFIG_FILE / CONFIG_TEXT / TEXT jobs that ran on
+            // the worker before the sink existed. These were buffered in
+            // the lane because python-ismrmrd-server's protocol allows
+            // CONFIG/TEXT to arrive before METADATA_XML.
+            if (lane.pending_config_file_set) {
+                lane.sink->write_string_dataset("config_file", lane.pending_config_file);
+                lane.pending_config_file.clear();
+                lane.pending_config_file_set = false;
+            }
+            if (lane.pending_config_text_set) {
+                lane.sink->write_string_dataset("config", lane.pending_config_text);
+                lane.pending_config_text.clear();
+                lane.pending_config_text_set = false;
+            }
+            for (auto& text : lane.pending_texts) {
+                lane.sink->write_string_dataset(
+                    "text_" + std::to_string(lane.text_count++), text);
+            }
+            lane.pending_texts.clear();
             lane.drop_logged.store(false);
             lane.dropped_records.store(0);
             lane.dropped_bytes.store(0);
@@ -228,6 +246,11 @@ void DumpRecorder::close_scan_on_worker(Lane& lane)
     lane.current_filename.clear();
     lane.current_xml.clear();
     lane.text_count = 0;
+    lane.pending_config_file.clear();
+    lane.pending_config_file_set = false;
+    lane.pending_config_text.clear();
+    lane.pending_config_text_set = false;
+    lane.pending_texts.clear();
 }
 
 bool DumpRecorder::had_overflow() const noexcept
@@ -286,7 +309,12 @@ void DumpRecorder::write_status_on_worker(MrdSink* sink, const Lane& lane)
 DumpEnqueueResult DumpRecorder::set_scanner_config_file(std::string config)
 {
     return enqueue_scanner(config.size(), [this, config = std::move(config)] {
-        if (!scanner_.sink) return;
+        if (!scanner_.sink) {
+            // Sink not open yet — buffer for replay by start_scan.
+            scanner_.pending_config_file = config;
+            scanner_.pending_config_file_set = true;
+            return;
+        }
         scanner_.sink->write_string_dataset("config_file", config);
     });
 }
@@ -294,7 +322,11 @@ DumpEnqueueResult DumpRecorder::set_scanner_config_file(std::string config)
 DumpEnqueueResult DumpRecorder::set_scanner_config_text(std::string config)
 {
     return enqueue_scanner(config.size(), [this, config = std::move(config)] {
-        if (!scanner_.sink) return;
+        if (!scanner_.sink) {
+            scanner_.pending_config_text = config;
+            scanner_.pending_config_text_set = true;
+            return;
+        }
         scanner_.sink->write_string_dataset("config", config);
     });
 }
@@ -302,7 +334,10 @@ DumpEnqueueResult DumpRecorder::set_scanner_config_text(std::string config)
 DumpEnqueueResult DumpRecorder::append_scanner_text(std::string text)
 {
     return enqueue_scanner(text.size(), [this, text = std::move(text)] {
-        if (!scanner_.sink) return;
+        if (!scanner_.sink) {
+            scanner_.pending_texts.push_back(text);
+            return;
+        }
         scanner_.sink->write_string_dataset(
             "text_" + std::to_string(scanner_.text_count++), text);
     });
@@ -311,7 +346,10 @@ DumpEnqueueResult DumpRecorder::append_scanner_text(std::string text)
 DumpEnqueueResult DumpRecorder::append_recon_text(std::string text)
 {
     return enqueue_recon(text.size(), [this, text = std::move(text)] {
-        if (!recon_.sink) return;
+        if (!recon_.sink) {
+            recon_.pending_texts.push_back(text);
+            return;
+        }
         recon_.sink->write_string_dataset(
             "text_" + std::to_string(recon_.text_count++), text);
     });
