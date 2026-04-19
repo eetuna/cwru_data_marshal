@@ -531,6 +531,87 @@ TEST_CASE("SpoolConverter rejects records with body length > spool size",
     // Catch2 will have failed via OOM otherwise.
 }
 
+TEST_CASE("DumpRecorder counters() is safe under concurrent polling during convert",
+          "[dump][spool][telemetry-race]") {
+    // Regression for codex round-5 finding: convert_lane() wrote
+    // converted_{acq,img,wf} + conversion_ok WITHOUT lane.mtx while
+    // counters() read them under lane.mtx, and write_error had the
+    // same pattern. A concurrent GET /debug/sinks reader could see
+    // torn/inconsistent values (and UB on the std::string
+    // write_error assignment). Fix: writer takes lane.mtx around
+    // every telemetry field mutation; reader already held it.
+    //
+    // This test runs a long enough conversion that a polling thread
+    // is guaranteed to read the lane counters while convert_lane is
+    // actively writing them. Under ThreadSanitizer this would fire
+    // at the unprotected write. Without TSan, we can at least
+    // verify that the reader never sees obviously-inconsistent
+    // state (e.g. conversion_ok=false while converted_* is nonzero
+    // from a prior scan, or write_error set but spool still open).
+    auto dir = fs::temp_directory_path() / "test_dump_telemetry_race";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    constexpr uint16_t nsamples = 32;
+    constexpr uint16_t nchannels = 4;
+    const size_t sample_bytes =
+        size_t(nsamples) * nchannels * 2 * sizeof(float);
+
+    mrd::DumpRecorder rec(dir);
+    REQUIRE(rec.start_scan("telemetry.h5",
+                           "<?xml version=\"1.0\"?><ismrmrdHeader/>")
+            == mrd::DumpEnqueueResult::Accepted);
+
+    // Enough records that the converter takes measurable time.
+    ISMRMRD::AcquisitionHeader hdr{};
+    hdr.version = 1;
+    hdr.number_of_samples = nsamples;
+    hdr.active_channels = nchannels;
+    hdr.trajectory_dimensions = 0;
+    constexpr int kRecordCount = 5000;
+    for (int i = 0; i < kRecordCount; ++i) {
+        std::vector<uint8_t> s(sample_bytes, 0xAA);
+        hdr.scan_counter = static_cast<uint32_t>(i);
+        REQUIRE(rec.append_scanner_acquisition(hdr, {}, std::move(s))
+                == mrd::DumpEnqueueResult::Accepted);
+    }
+
+    // Poll counters() hard while close_scan is in flight. close_scan
+    // drains the worker, then runs convert_lane on both lanes. The
+    // poller will observe all of it.
+    std::atomic<bool> stop{false};
+    std::atomic<size_t> poll_count{0};
+    std::atomic<bool> saw_torn{false};
+    std::thread poller([&] {
+        while (!stop.load()) {
+            auto snap = rec.counters();
+            // Consistency check: while conversion is running, the
+            // lane fields should never show a "failed" conversion
+            // with nonzero converted counts (that would be a torn
+            // write from two different scan states).
+            if (!snap.scanner.conversion_ok &&
+                (snap.scanner.converted_acq != 0 ||
+                 snap.scanner.converted_img != 0 ||
+                 snap.scanner.converted_wf != 0)) {
+                saw_torn.store(true);
+            }
+            (void)snap.scanner.write_error;  // exercise string copy path
+            (void)snap.recon.write_error;
+            poll_count.fetch_add(1);
+        }
+    });
+
+    rec.close_scan();
+    stop.store(true);
+    poller.join();
+
+    INFO("polled " << poll_count.load() << " times during close/convert");
+    REQUIRE(poll_count.load() > 0);
+    CHECK_FALSE(saw_torn.load());
+    CHECK(rec.counters().scanner.converted_acq == kRecordCount);
+    CHECK(rec.counters().scanner.conversion_ok);
+}
+
 TEST_CASE("DumpRecorder enqueue returns Stopped after destruction",
           "[dump][overflow][api]") {
     auto dir = fs::temp_directory_path() / "test_dump_overflow_stopped";

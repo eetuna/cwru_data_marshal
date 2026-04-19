@@ -152,9 +152,13 @@ void DumpRecorder::ensure_spool_on_worker(Lane& lane)
     auto spool_path = lane.lane_dir / (lane.current_filename + ".spool");
     lane.spool = std::make_unique<SpoolWriter>(spool_path);
     if (!lane.spool->healthy()) {
-        lane.write_error = lane.spool->last_error();
+        std::string err = lane.spool->last_error();
+        {
+            std::lock_guard<std::mutex> lk(lane.mtx);
+            lane.write_error = err;
+        }
         LOG_ERROR("Spool open failed on lane=" << lane.component_tag
-                  << ": " << lane.write_error);
+                  << ": " << err);
     } else {
         LOG_INFO("Opened spool lane=" << lane.component_tag
                  << " path=" << spool_path.string());
@@ -171,9 +175,13 @@ void DumpRecorder::close_spool_on_worker(Lane& lane)
         lane.last_spool_bytes.store(lane.spool->bytes());
         // close() flushes then fcloses, surfacing errors from either.
         if (!lane.spool->close()) {
-            lane.write_error = lane.spool->last_error();
+            std::string err = lane.spool->last_error();
+            {
+                std::lock_guard<std::mutex> lk(lane.mtx);
+                lane.write_error = err;
+            }
             LOG_ERROR("Dump spool close failed on lane="
-                      << lane.component_tag << ": " << lane.write_error);
+                      << lane.component_tag << ": " << err);
         }
         // Reset so the NEXT scan can open a fresh spool. Without this
         // the next ensure_spool_on_worker() early-returns on non-null
@@ -219,9 +227,13 @@ void DumpRecorder::worker_loop(Lane& lane)
             lane.dropped_records.fetch_add(1);
             lane.dropped_bytes.fetch_add(rec.body.size());
             if (!lane.drop_logged.exchange(true)) {
+                std::string err;
+                {
+                    std::lock_guard<std::mutex> lk(lane.mtx);
+                    err = lane.write_error;
+                }
                 LOG_ERROR("Dump spool write unavailable on lane="
-                          << lane.component_tag << " ("
-                          << lane.write_error << ")");
+                          << lane.component_tag << " (" << err << ")");
             }
             continue;
         }
@@ -229,11 +241,14 @@ void DumpRecorder::worker_loop(Lane& lane)
                                  static_cast<uint32_t>(rec.body.size()))) {
             lane.dropped_records.fetch_add(1);
             lane.dropped_bytes.fetch_add(rec.body.size());
-            lane.write_error = lane.spool->last_error();
+            std::string err = lane.spool->last_error();
+            {
+                std::lock_guard<std::mutex> lk(lane.mtx);
+                lane.write_error = err;
+            }
             if (!lane.drop_logged.exchange(true)) {
                 LOG_ERROR("Dump spool write failed on lane="
-                          << lane.component_tag << ": "
-                          << lane.write_error);
+                          << lane.component_tag << ": " << err);
             }
         }
     }
@@ -361,13 +376,17 @@ void DumpRecorder::close_scan()
 void DumpRecorder::convert_lane(Lane& lane, const std::string& stem,
                                  bool is_scanner)
 {
-    // Reset counters at the top so a lane that saw records in a
-    // prior scan doesn't carry stale converted_acq/img/wf into the
-    // next /debug/sinks read for a scan where it received nothing.
-    lane.converted_acq = 0;
-    lane.converted_img = 0;
-    lane.converted_wf  = 0;
-    lane.conversion_ok = true; // overwritten on failure below
+    // Reset telemetry at the top under lane.mtx so a concurrent
+    // /debug/sinks reader sees a coherent {converted_*, conversion_ok,
+    // write_error} snapshot even mid-convert. counters() takes the
+    // same lock on the read side.
+    {
+        std::lock_guard<std::mutex> lk(lane.mtx);
+        lane.converted_acq = 0;
+        lane.converted_img = 0;
+        lane.converted_wf  = 0;
+        lane.conversion_ok = true; // overwritten on failure below
+    }
 
     if (stem.empty()) {
         // No records were ever spooled in this scan.
@@ -380,12 +399,18 @@ void DumpRecorder::convert_lane(Lane& lane, const std::string& stem,
         // lane on a scanner-only probe).
         return;
     }
+    // Conversion itself runs WITHOUT lane.mtx -- it can take seconds
+    // and must not block HTTP telemetry reads. Only the telemetry
+    // publish is locked.
     auto stats = convert_spool_to_hdf5(spool_path, h5_path, is_scanner);
-    lane.converted_acq = stats.acq_written;
-    lane.converted_img = stats.img_written;
-    lane.converted_wf  = stats.wf_written;
-    lane.conversion_ok = stats.ok();
-    if (!lane.conversion_ok) {
+    {
+        std::lock_guard<std::mutex> lk(lane.mtx);
+        lane.converted_acq = stats.acq_written;
+        lane.converted_img = stats.img_written;
+        lane.converted_wf  = stats.wf_written;
+        lane.conversion_ok = stats.ok();
+    }
+    if (!stats.ok()) {
         LOG_ERROR("Spool->HDF5 conversion failed on lane="
                   << lane.component_tag
                   << " records_read=" << stats.records_read
