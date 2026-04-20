@@ -316,7 +316,7 @@ Smoke test: `docker compose -f /workspaces/cwru_data_marshal/docker-compose.demo
 Docs refreshed and pruned on 2026-04-20:
 - 5 essentials updated for mode mutual exclusion + spool architecture: `ARCHITECTURE.md`, `API_REFERENCE.md`, `DEVELOPER_GUIDE.md`, `DUMP_QUICK_START.md`, `MANUAL_TERMINAL_SETUP.md`.
 - 12 superseded docs removed from the repo (pre-refactor latest-image work, the 2026-04-18 bug-hunt trail, the undated contract, and the executed `MRI_MARSHAL_FIX_PLAN_2026-04-19.md`). Local copies live under `docs/archive/` (gitignored) for convenience; authoritative history is in `git log --all --full-history -- docs/<name>.md`.
-- Active round-7/8/9 trail still lives at the top of `docs/`: `CHECKPOINT_2026-04-19`, `DUMP_PATH_AUDIT_2026-04-19`, `HANDOFF_COMPARISON_STRESS_2026-04-19`, `PERF_STRESS_COMPARE_2026-04-19`, `PROTOCOL_CONTRACT_2026-04-19`, and this handoff.
+- Active trail in `docs/` pruned to 2 files: `MRI_MARSHAL_PROTOCOL_CONTRACT_2026-04-19.md` (authoritative contract) and this handoff. The round-7/8/9 artifacts (`CHECKPOINT`, `DUMP_PATH_AUDIT`, `HANDOFF_COMPARISON_STRESS`, `PERF_STRESS_COMPARE`) are local-only under `docs/archive/` (gitignored) and in git history via `git log --all --full-history -- docs/<name>.md`.
 
 ---
 
