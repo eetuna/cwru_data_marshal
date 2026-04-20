@@ -2,6 +2,7 @@
 
 **For:** the next Claude agent picking up this work.
 **State at handoff:** round-9 audit complete (codex), no blocking findings.
+**2026-04-20 addendum:** perf verified, no regression — see "Perf verification (2026-04-20)" below.
 **Reading time:** 10 minutes. Do not skip the "how I got it wrong" section.
 
 ---
@@ -308,6 +309,55 @@ docker images | grep cwru
 ```
 
 Smoke test: `docker compose -f /workspaces/cwru_data_marshal/docker-compose.demo.yml up`. See the demo guide for the expected services (mri-marshal + robot-marshal + mock-recon + kspace-streamer + viz-client + helpers).
+
+---
+
+## Perf verification (2026-04-20)
+
+Back-to-back same-host 10-min bench, Release build (`-O3 -DNDEBUG`),
+`DURATION=600 KSPACE_INTERVAL=0.025`, same binaries for kspace_streamer
+and viz_client (only marshal differs):
+
+| Metric | b1519b2 baseline | e6c099e tip | Delta |
+|---|---|---|---|
+| Mean FPS | 41.86 | **42.58** | **+0.72 (+1.7%)** |
+| Median FPS | 42.88 | 43.34 | +0.46 |
+| Max FPS | 48.24 | 48.32 | +0.08 |
+| Stdev | 5.60 | **4.71** | −0.89 (better) |
+| Recon images archived | 33,368 | **36,080** | **+2,712 (+8.1%)** |
+| Volumes sent | 6,688 | **7,230** | **+542 (+8.1%)** |
+
+**Conclusion: no regression.** e6c099e is slightly faster than b1519b2
+on every metric — more images processed, lower stdev, higher mean FPS.
+The round-7/8/9 refactor is net-positive for throughput. Archived
+`MRI_MARSHAL_PERF_STRESS_COMPARE_2026-04-19.md` numbers (43.56 fps for
+b1519b2 §3) are within day-to-day noise of today's 41.86.
+
+**Critical lesson for the next agent:** the bench (and the archived
+perf doc) is only valid with a **Release build**. A Debug build
+(no `-O2/-O3`, no `-DNDEBUG`) produces roughly half the throughput
+(~20 fps, ~4,400 volumes in 10 min vs ~7,200 in Release). An earlier
+agent in this session (2026-04-20) burned ~3 hours chasing a phantom
+"8% regression" that was entirely Debug-build artifact, because the
+default `cmake --build build` picks up whatever `CMAKE_BUILD_TYPE`
+is in the cache. Always run:
+
+```bash
+cmake -DCMAKE_BUILD_TYPE=Release -B build && cmake --build build
+grep -E 'O[1-3]|DNDEBUG' build/build.ninja  # must show -O3 -DNDEBUG
+```
+
+before trusting any perf number.
+
+Binary hashes for this verification run (marshal differs by commit,
+others match, confirming only marshal changed):
+
+```
+b1519b2 marshal:         2ad3fd5ea3010e35233cb76bf4f7cc4d14031f18d851c16a4313e933aa3de1fb
+e6c099e marshal:         789a0e5fb96f0b7537f611654a1904a1016330e8dfabb1d476e32b3c9c8f2caf
+kspace_streamer (both):  9908361c2b70c880b1dea211d7a9c581a8f79f02f950a7519880b99f1f2606b0
+viz_client (both):       4508df13b488112b5456cc0353d3fddc6f4e637056295e0b27c59030314a80d6
+```
 
 ---
 
