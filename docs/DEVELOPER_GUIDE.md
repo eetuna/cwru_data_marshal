@@ -92,14 +92,14 @@ Reconstruction Service (:9002)   Viz Client, Pose Client, etc.
     │
     │ MRD TCP IMAGE(1022) back
     v
-MRI Marshal → live/from_reconstruction/scan_<ts>.h5 (and dump/… with --dump)
+MRI Marshal → <mode>/from_reconstruction/scan_<ts>.h5  (<mode> = live OR dump)
     │
     │ MRD TCP IMAGE(1022) pushed to scanner
     v
 Scanner
 ```
 
-The marshal has two interfaces: **MRD TCP** for scanner data transport (same wire protocol as python-ismrmrd-server) and **HTTP** for query/control endpoints. Scanner clients connect via MRD TCP. Marshal forwards to recon via MRD TCP and appends scanner- and recon-side ISMRMRD objects to per-scan history files under `live/from_scanner/scan_<ts>.h5` and `live/from_reconstruction/scan_<ts>.h5`. On each incoming live IMAGE it atomically publishes a closed companion snapshot at `live/from_*/latest_image.h5`. With `--dump`, history is additionally mirrored under `dump/from_{scanner,reconstruction}/`. Recon sends images back on the same TCP connection. The viz client polls HTTP `GET /image/latest`, receives the companion path, and opens group `image_0` with default HDF5 settings.
+The marshal has two interfaces: **MRD TCP** for scanner data transport (same wire protocol as python-ismrmrd-server) and **HTTP** for query/control endpoints. Scanner clients connect via MRD TCP. Marshal forwards to recon via MRD TCP. Archival is **mode-exclusive**: marshal is started in either live mode (default) or dump mode (`--dump`) and only the selected mode's subtree under `${dump_dir}/` is populated. Both modes use a raw-MRD spool written during the scan, converted to a canonical `scan_<ts>.h5` on CLOSE; the per-scan HDF5 is an archival output, not a mid-scan reader interface. In live mode only, each incoming live IMAGE also atomically publishes a closed companion snapshot at `live/from_*/latest_image.h5`. Recon sends images back on the same TCP connection. The viz client polls HTTP `GET /image/latest`, receives the companion path in live mode, or `404 Not Found` in dump mode.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full wire protocol reference and compose topology.
 
@@ -180,29 +180,34 @@ Scanner and recon clients connect via raw TCP using python-ismrmrd-server's 2-by
 
 ## Storage
 
-Every scan produces per-scan HDF5 files under the session-data umbrella. The live subtree is always populated; the dump subtree is populated only with `--dump`:
+Every scan produces per-scan HDF5 files under the session-data umbrella. Archival mode is **exclusive**: marshal is started in either live mode (default) or dump mode (`--dump`), and only the selected mode's subtree is populated.
 
 ```
 ${dump_dir}/
-├── live/
+├── live/                         <- ONLY in live mode (no --dump)
 │   ├── from_scanner/
-│   │   ├── scan_<ts>.h5         <- Scanner-origin ISMRMRD data (acquisitions, images, waveforms), appended
-│   │   └── latest_image.h5      <- Closed companion snapshot for the latest published scanner image
+│   │   ├── scan_<ts>.h5.spool    <- raw MRD wire frames written during scan
+│   │   ├── scan_<ts>.h5          <- ISMRMRD HDF5 produced by converter on CLOSE (images + waveforms; no raw ACQs in live mode)
+│   │   └── latest_image.h5       <- closed companion snapshot, atomic-rename per live IMAGE
 │   └── from_reconstruction/
-│       ├── scan_<ts>.h5         <- Recon-returned images, appended; image groups by image_series_index
-│       ├── latest_image.h5      <- Closed companion snapshot for the latest published recon image
-│       └── latest_error.png     <- Reconstruction-failed indicator (single overwritten file)
-└── dump/                         <- only when --dump is on
-    ├── from_scanner/scan_<ts>.h5
-    └── from_reconstruction/scan_<ts>.h5
+│       ├── scan_<ts>.h5.spool
+│       ├── scan_<ts>.h5          <- recon-returned images
+│       ├── latest_image.h5
+│       └── latest_error.png      <- reconstruction-failed indicator (single overwritten file)
+└── dump/                         <- ONLY in dump mode (--dump)
+    ├── from_scanner/
+    │   ├── scan_<ts>.h5.spool    <- full raw stream incl. ACQ
+    │   └── scan_<ts>.h5
+    └── from_reconstruction/
+        ├── scan_<ts>.h5.spool
+        └── scan_<ts>.h5
 ```
 
-- Scanner MRD TCP standard ISMRMRD objects → live (always) and dump (if `--dump`) scanner archives.
-- Recon MRD TCP standard ISMRMRD objects → live (always) and dump (if `--dump`) recon archives.
-- Recon failure → scanner MRD `IMAGE(1022)` failure image + HTTP `GET /image/latest` points at `latest_error.png`.
-- Before the current scan has published any live IMAGE, `GET /image/latest` returns `204 No Content`.
-- The per-scan history file is open for writing during the scan and readable only after CLOSE. The closed companion file at `live/from_*/latest_image.h5` is always readable — viz opens it via `/image/latest` and reads group `image_0`.
-- `<ts>` is shared between a scan's live and dump files.
+- Both modes use the same spool-then-convert pipeline: a `.spool` of raw MRD wire frames is written during the scan, and converted to canonical `scan_<ts>.h5` on CLOSE. The `.spool` is retained by default for forensic recovery.
+- The per-scan `scan_<ts>.h5` is an archival output finalized at CLOSE. It is NOT a mid-scan reader interface (HDF5's default file locking would block mid-scan opens on an open writer).
+- The only mid-scan readable interface is `latest_image.h5` (live mode only), published via atomic rename per incoming IMAGE.
+- `GET /image/latest` in live mode: `204 No Content` before first IMAGE, then `{path, error}`. In dump mode: `404 Not Found` with `{"error":"dump mode; no live snapshot"}`.
+- Recon failure in live mode → scanner MRD `IMAGE(1022)` failure image + `GET /image/latest` points at `latest_error.png`.
 
 ---
 

@@ -32,7 +32,7 @@ Health check. Returns `{"status": "ok"}`.
 
 #### GET /image/latest
 
-Returns a pointer to the closed companion snapshot — a stable path holding the most recently published live image update (2D slice, multi-slice stack image, or 3D volume image):
+**Live mode (default, no `--dump`):** returns a pointer to the closed companion snapshot — a stable path holding the most recently published live image update (2D slice, multi-slice stack image, or 3D volume image):
 ```json
 {
   "path": "/session-data/live/from_reconstruction/latest_image.h5",
@@ -51,13 +51,46 @@ When reconstruction has failed:
 }
 ```
 
-If a scanner MRD TCP connection is active when recon fails, the scanner also
-receives a valid MRD `IMAGE(1022)` failure image on that same connection.
+If a scanner MRD TCP connection is active when recon fails, the scanner also receives a valid MRD `IMAGE(1022)` failure image on that same connection.
 
-Before the current scan has published any live IMAGE, `GET /image/latest`
-returns `204 No Content`.
+Before the current scan has published any live IMAGE, `GET /image/latest` returns `204 No Content`.
 
-The per-scan history file (`live/from_*/scan_<ts>.h5`) is written in parallel and closed on CLOSE. It is not part of the live reader contract — readers who want post-scan history open it after the scan ends.
+**Dump mode (`--dump`):** returns `404 Not Found` with body `{"error":"dump mode; no live snapshot"}`. Dump mode is archival-only; there is no mid-scan snapshot pipeline. Viz clients should not poll this endpoint in dump mode.
+
+The per-scan history file (`<mode>/from_*/scan_<ts>.h5`) is an archival output produced on CLOSE. It is not a mid-scan reader interface in either mode. Clients that need the per-scan archive open it after the scan ends.
+
+#### GET /debug/sinks
+
+Per-pipeline counters for retention verification. Returns mode-specific JSON:
+
+```json
+// Live mode
+{
+  "mode": "live",
+  "live": {
+    "from_scanner": {"acq": 0, "img": 0, "wf": 1076, "open": false,
+                     "spool_records": 1076, "spool_bytes": ...,
+                     "dropped": 0, "queued_jobs": 0,
+                     "high_watermark_hit": false},
+    "from_reconstruction": { ... }
+  }
+}
+
+// Dump mode
+{
+  "mode": "dump",
+  "dump": {
+    "from_scanner":        { "converted_acq": 240000, "converted_img": 0,
+                             "converted_wf": 1875, "conversion_ok": true,
+                             "spool_records": ..., "spool_bytes": ..., ... },
+    "from_reconstruction": { ... },
+    "dropped_records": 0, "dropped_bytes": 0, "had_overflow": false,
+    "conversion_status": "complete"
+  }
+}
+```
+
+Use this (not viz_client FPS) to measure archival retention. `dropped_records` / `dropped` must remain zero under any non-disk-failure operating condition per the protocol contract.
 
 #### GET /transform
 
@@ -235,23 +268,26 @@ Scanner/K-Space Streamer
     │ MRD TCP (port 9100)
     │ CONFIG_FILE + METADATA_XML + ACQUISITION×N + WAVEFORM + CLOSE
     v
-MRI Marshal (appends to live/from_scanner/scan_<ts>.h5; with `--dump`, also dump/from_scanner/scan_<ts>.h5)
+MRI Marshal (writes MRD wire records to <mode>/from_scanner/scan_<ts>.h5.spool; convert→HDF5 at CLOSE)
     │
     │ MRD TCP (to recon-host:recon-port)
-    │ same messages forwarded
+    │ same messages forwarded, except scanner-origin IMAGE (archived but not sent to recon)
     v
 Reconstruction Service (MRD TCP server)
     │
     │ MRD TCP return messages on same connection
     v
-MRI Marshal (appends to live/from_reconstruction/scan_<ts>.h5; publishes closed companion live/from_reconstruction/latest_image.h5 per incoming IMAGE; with `--dump`, also mirrors to dump/from_reconstruction/scan_<ts>.h5)
+MRI Marshal (writes to <mode>/from_reconstruction/scan_<ts>.h5.spool; in live mode also publishes
+             live/from_reconstruction/latest_image.h5 via atomic-rename per incoming IMAGE)
     │                              │
-    │ MRD TCP return messages      │ HTTP GET /image/latest -> {"path", "error"}
-    │ pushed back to scanner       │
+    │ MRD TCP return messages      │ HTTP GET /image/latest → {"path","error"} in live mode
+    │ pushed back to scanner       │                       → 404 in dump mode
     v                              v
-Scanner                        Viz Client (opens companion file, reads group "image_0", renders with OpenCV)
+Scanner                        Viz Client (opens latest_image.h5, reads "image_0", renders with OpenCV)
 ```
 
-Scanner data transport is MRD TCP. Query/control is HTTP. Each scan produces a per-scan `scan_<ts>.h5` file under `live/` (and, with `--dump`, a mirror under `dump/`). The per-scan file is open for writing during the scan and closed on CLOSE — it is not part of the live reader contract. The stable companion `latest_image.h5` is a closed HDF5 atomically renamed on each incoming live IMAGE; any reader opens it with default HDF5 settings.
+Scanner data transport is MRD TCP. Query/control is HTTP. `<mode>` is `live` (default) or `dump` (with `--dump`); the two modes are mutually exclusive and only the selected mode's subtree is populated.
+
+Each scan produces a `.spool` (raw MRD wire frames, written during scan) and, on CLOSE, a `.h5` (canonical ISMRMRD). The per-scan `scan_<ts>.h5` is an archival output finalized at close — not a mid-scan reader interface (HDF5 file locking would block that anyway). The only mid-scan readable interface is `latest_image.h5` (live mode only), which `LatestImageWriter` publishes via atomic rename.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system diagram and wire protocol reference.

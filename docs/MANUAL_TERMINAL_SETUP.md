@@ -298,7 +298,9 @@ K-Space Streamer                  MRI Marshal                    Recon Service
 
 ### Manual Dump Mode
 
-Dump mode is for retrospective analysis. It records canonical ISMRMRD H5 evidence trails while the marshal still behaves as the same MRD TCP proxy.
+Dump mode is for retrospective analysis. It records canonical ISMRMRD H5 evidence trails (full stream including raw acquisitions) while the marshal still behaves as the same MRD TCP proxy.
+
+Dump mode is **exclusive**: when `--dump` is set, only the `dump/` subtree is populated — `live/` is not. `GET /image/latest` returns `404 Not Found` in dump mode.
 
 Do not run `mri-marshal` and `mri-marshal-dump` at the same time; both bind ports `8080` and `9100`.
 
@@ -318,7 +320,7 @@ ls -lh session-data/dump/from_reconstruction/
 ls -lh session-data/live/from_scanner/
 ```
 
-Expected: `dump/from_scanner/scan_*.h5` exists (and `live/from_scanner/scan_*.h5` mirrors it with the same timestamp). `dump/from_reconstruction/` has no recon H5 for that run because no recon service was started.
+Expected: `dump/from_scanner/scan_<ts>.h5` exists (produced on CLOSE from `scan_<ts>.h5.spool`). `live/` is NOT populated (mutual exclusion). `dump/from_reconstruction/` has no recon H5 for that run because no recon service was started.
 
 **Full proxy dump**:
 
@@ -341,7 +343,7 @@ ls -lh session-data/live/from_scanner/
 ls -lh session-data/live/from_reconstruction/
 ```
 
-Expected: scanner-side H5 appears under `dump/from_scanner/` and `live/from_scanner/` (same `<ts>`); recon-side H5 appears under `dump/from_reconstruction/` and `live/from_reconstruction/` (same `<ts>`).
+Expected: scanner-side H5 appears under `dump/from_scanner/` (produced on CLOSE); recon-side H5 appears under `dump/from_reconstruction/`. `live/` is NOT populated (dump mode is exclusive).
 
 For more dump cases, including image-input dump and failure behavior, see [DUMP_QUICK_START.md](DUMP_QUICK_START.md).
 
@@ -349,20 +351,20 @@ For more dump cases, including image-input dump and failure behavior, see [DUMP_
 
 Marshal does not expose a DELETE route or a sticky in-memory latest-frame cache.
 
-Current behavior:
+Current behavior (live mode only):
 
 - Before the current scan has published any live IMAGE, `GET /image/latest` returns `204 No Content`.
 - After the first live IMAGE arrives, `GET /image/latest` returns the path to the closed `live/from_*/latest_image.h5` companion file for whichever lane most recently published an image.
 - On reconstruction failure, `GET /image/latest` returns `{"path": "...latest_error.png", "error": true}`.
-- The open per-scan history file `live/from_*/scan_<ts>.h5` is not the live-reader contract.
+- The per-scan `scan_<ts>.h5` is an archival output produced on CLOSE from the `.spool`; it is NOT a mid-scan reader interface. The only mid-scan readable interface is `latest_image.h5` via `/image/latest`.
 
-Typical callers:
+In **dump mode** (`--dump`), `GET /image/latest` returns `404 Not Found` with `{"error":"dump mode; no live snapshot"}`. Dump mode is archival-only — there is no mid-scan snapshot pipeline and no `latest_image.h5` companion.
+
+Typical callers (live mode):
 
 - An operator running the curl above manually at end-of-experiment.
 - A session orchestration script in a `trap` / `finally` block.
 - A scanner / producer shutdown hook that fires on Ctrl-C.
-
-The endpoint is purely additive and optional: if nobody calls it, marshal behaves exactly as before.
 
 ---
 

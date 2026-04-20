@@ -2,13 +2,14 @@
 
 Use this to validate the MRI marshal's retrospective dump evidence trails.
 
-Dump is not the live viz path. Dump means the marshal records the MRD traffic it receives on each side of the proxy so the two sides can be compared after an experiment.
+Dump is not the live viz path. Dump means the marshal records the full MRD traffic it receives on each side of the proxy (including raw acquisitions) so the two sides can be compared after an experiment.
 
+- Dump mode is **exclusive**: marshal is started with `--dump` and only the `dump/` subtree is populated. Live mode (default, no `--dump`) populates only the `live/` subtree. The two modes are mutually exclusive — the selected mode is fixed at process startup.
 - Scanner-side records go under `session-data/dump/from_scanner/`.
 - Reconstruction-side records go under `session-data/dump/from_reconstruction/`.
-- Standard ISMRMRD objects are written to canonical per-scan `scan_<ts>.h5` files.
-- The `live/` subtree (always populated) holds the same kind of per-scan files for live viewing. Dump is the extra mirror you opt into with `--dump`.
-- `/image/latest` points at the closed `live/from_*/latest_image.h5` companion file. It is not the dump.
+- Each scan produces a `scan_<ts>.h5.spool` (raw MRD wire frames, written during the scan) and, on CLOSE, a canonical `scan_<ts>.h5` (ISMRMRD HDF5 produced by replaying the spool through the converter). The `.spool` is retained by default.
+- The per-scan `scan_<ts>.h5` is archival and only exists after CLOSE; it is NOT a mid-scan reader interface.
+- In dump mode, `GET /image/latest` returns `404 Not Found` (`{"error":"dump mode; no live snapshot"}`). The closed `latest_image.h5` companion that serves the live viz path exists only in live mode.
 
 ## Case 1 -- scanner-side dump only
 
@@ -32,9 +33,9 @@ ls -lh session-data/dump/from_reconstruction/
 
 Expected:
 
-- `dump/from_scanner/scan_*.h5` exists and contains standard scanner ISMRMRD objects.
-- `dump/from_reconstruction/` should not contain a recon `.h5` for this run.
-- `live/from_scanner/scan_*.h5` exists and mirrors the scanner data (live side is always populated).
+- `dump/from_scanner/scan_<ts>.h5.spool` exists during the scan; after CLOSE, `dump/from_scanner/scan_<ts>.h5` is produced by the converter and contains the full scanner stream (acquisitions + images + waveforms + text + config).
+- `dump/from_reconstruction/` should not contain a recon `.h5` for this run (no recon was started).
+- `live/` is NOT populated in dump mode (mutual exclusion).
 
 Do not run `mri-marshal` and `mri-marshal-dump` at the same time; they both bind ports `8080` and `9100`.
 
@@ -66,10 +67,10 @@ ls -lh session-data/live/from_reconstruction/
 
 Expected:
 
-- `dump/from_scanner/scan_*.h5` contains scanner-side acquisitions/images/waveforms.
-- `dump/from_reconstruction/scan_*.h5` contains recon-side standard ISMRMRD objects — images grouped by `image_<image_series_index>` and any waveforms returned by recon.
-- The matching `live/from_scanner/scan_*.h5` and `live/from_reconstruction/scan_*.h5` files have the same timestamps (live and dump pair up per scan).
-- The scanner client logs reconstructed images received back over MRD TCP.
+- `dump/from_scanner/scan_<ts>.h5` (produced on CLOSE from the spool) contains the full scanner stream — acquisitions, images, waveforms, text, config.
+- `dump/from_reconstruction/scan_<ts>.h5` contains recon-side standard ISMRMRD objects — images grouped by `image_<image_series_index>` and any waveforms returned by recon.
+- `live/` is NOT populated (dump mode is exclusive).
+- The scanner client logs reconstructed images received back over MRD TCP (recon pushback is independent of archival mode).
 
 ## Case 3 -- scanner-origin images
 
@@ -86,12 +87,13 @@ cdd --profile dump run --rm --no-deps image-streamer \
 
 Expected:
 
-- `dump/from_scanner/scan_*.h5` contains images sent by `image-streamer` (and `live/from_scanner/scan_*.h5` mirrors them).
+- `dump/from_scanner/scan_<ts>.h5` contains images sent by `image-streamer`.
+- `live/` is NOT populated (dump mode is exclusive).
 - Recon-side output appears only in full proxy mode when a recon service actually returns messages.
 
-## Latest File Pointer Is Separate
+## Latest File Pointer Is Separate (Live Mode Only)
 
-Non-scanner clients can ask for the latest live display file:
+In **live mode**, non-scanner clients can ask for the latest live display file. In dump mode this endpoint returns `404 Not Found` with `{"error":"dump mode; no live snapshot"}`.
 
 ```bash
 curl -s http://localhost:8080/image/latest | jq

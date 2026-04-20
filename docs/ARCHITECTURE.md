@@ -117,30 +117,40 @@ docker-compose.demo.yml services:
 
 ## Storage Layout
 
+`--dump` selects the archival mode. Modes are mutually exclusive — marshal commits to one at process startup. The selected mode's subtree is the only one populated.
+
+Both modes use the same raw-MRD spool + post-close HDF5 convert model: incoming wire frames are written to `scan_<ts>.h5.spool` during the scan; on scan close the spool is replayed through the converter to produce the canonical `scan_<ts>.h5`. The `.spool` file is retained by default for forensic recovery.
+
 ```
 ${dump_dir}/                          session-data umbrella (--dump-dir flag)
-├── live/                             always populated
+│
+├── live/                             ONLY in live mode (no --dump)
 │   ├── from_scanner/
-│   │   ├── scan_<ts>.h5              per-scan history, open during scan, closed on CLOSE
-│   │   └── latest_image.h5           closed companion, atomic-rename per live IMAGE (reader-facing)
+│   │   ├── scan_<ts>.h5.spool        raw MRD wire frames, written during scan
+│   │   ├── scan_<ts>.h5              ISMRMRD HDF5, produced by converter on CLOSE
+│   │   └── latest_image.h5           closed companion, atomic-rename per IMAGE
 │   └── from_reconstruction/
-│       ├── scan_<ts>.h5              per-scan history
-│       ├── latest_image.h5           closed companion (reader-facing)
+│       ├── scan_<ts>.h5.spool
+│       ├── scan_<ts>.h5
+│       ├── latest_image.h5
 │       └── latest_error.png          single overwritten recon-failure indicator
-└── dump/                             populated only when --dump is on
+│
+└── dump/                             ONLY in dump mode (--dump)
     ├── from_scanner/
-    │   └── scan_<ts>.h5              mirror of live scanner history file
+    │   ├── scan_<ts>.h5.spool        raw MRD wire frames (full stream incl. ACQ)
+    │   └── scan_<ts>.h5              ISMRMRD HDF5, produced on CLOSE
     └── from_reconstruction/
-        └── scan_<ts>.h5              mirror of live recon history file
+        ├── scan_<ts>.h5.spool
+        └── scan_<ts>.h5
 ```
 
-- Each scan produces `scan_<ts>.h5`; `<ts>` is shared between the live and dump file of the same scan.
-- Images are appended with varname `image_<image_series_index>`, one HDF5 group per volume, matching python-ismrmrd-server's on-disk convention.
-- Old scans stay on disk. `latest_error.png` is the only overwritten file.
+- `<ts>` is shared between scanner and recon lanes within the active mode.
+- In live mode: `scan_<ts>.h5` archives images + waveforms (ECG). Raw acquisitions are NOT archived in live mode.
+- In dump mode: `scan_<ts>.h5` archives the full scanner stream — acquisitions + images + waveforms + text + config. No files under `live/`, no `latest_image.h5`.
 - HDF5 files use canonical libismrmrd layout (`appendAcquisition`, `appendImage`, `appendWaveform`).
-- The live per-scan file `scan_<ts>.h5` is open for writing while the scan runs and is not part of the live reader contract (POSIX file lock). It is readable after CLOSE. The closed companion `latest_image.h5` is always safe to open while marshal is writing the per-scan file.
-- `GET /image/latest` returns `204 No Content` before the current scan has published any live IMAGE.
-- After the first live IMAGE, `GET /image/latest` returns `{path, error}` — `path` is the companion file from whichever lane most recently published an image. Readers open the companion's only group, `image_0`, which holds the most recently published image update (2D slice, 2D multi-slice stack image, or 3D volume image).
+- The per-scan `scan_<ts>.h5` is an archival output finalized on CLOSE. It is NOT a mid-scan readable interface (HDF5's default file locking would block mid-scan opens on an open writer anyway). Clients that need mid-scan reads use `latest_image.h5` (live mode only).
+- `GET /image/latest` in live mode: `204 No Content` before first IMAGE; `{path, error}` after. Readers open the companion file's `image_0` group. In dump mode: `404 Not Found` with `{"error":"dump mode; no live snapshot"}`.
+- The `.spool` file is present throughout the scan; it is a private format (`[uint16 tag][uint32 length][body]` per record) intended for post-scan replay, not a client-facing interface.
 
 ## Fault Tolerance
 
