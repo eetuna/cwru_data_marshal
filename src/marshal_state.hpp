@@ -103,6 +103,8 @@ struct MarshalState {
     std::string current_config;
     std::string current_scan_filename;
     uint16_t recon_expected_slices{0};
+    bool scanner_lane_finalized{false};
+    bool recon_lane_finalized{false};
 
     // Async H5 dump recorder, present only when --dump is enabled.
     std::unique_ptr<mrd::DumpRecorder> dump_recorder;
@@ -150,6 +152,8 @@ struct MarshalState {
         current_config.clear();
         current_scan_filename.clear();
         recon_expected_slices = 0;
+        scanner_lane_finalized = false;
+        recon_lane_finalized = false;
         header_received.store(false);
         config_received.store(false);
         recon_failure_reported.store(false);

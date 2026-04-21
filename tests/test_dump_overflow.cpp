@@ -313,6 +313,44 @@ TEST_CASE("DumpRecorder scanner+recon archives share the same <ts> stem",
     CHECK(scanner_h5.stem() == recon_h5.stem());
 }
 
+TEST_CASE("DumpRecorder close_lane finalizes only the selected lane",
+          "[dump][spool][lane-close]") {
+    auto dir = fs::temp_directory_path() / "test_dump_lane_close";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    mrd::DumpRecorder rec(dir);
+    REQUIRE(dump_start_scan(rec, "lane_close.h5",
+                           "<?xml version=\"1.0\"?><ismrmrdHeader/>")
+            == mrd::DumpEnqueueResult::Accepted);
+    REQUIRE(rec.append_scanner_text(text_body("scanner done"))
+            == mrd::DumpEnqueueResult::Accepted);
+    REQUIRE(rec.append_recon_text(text_body("recon still running"))
+            == mrd::DumpEnqueueResult::Accepted);
+
+    rec.close_lane(mrd::DumpLane::Scanner);
+
+    auto scanner_h5 = find_single_h5(mrd::dump_scanner_dir(dir));
+    REQUIRE(!scanner_h5.empty());
+    CHECK(read_string_dataset_or_empty(scanner_h5, "text_0") == "scanner done");
+    CHECK(find_single_h5(mrd::dump_recon_dir(dir)).empty());
+
+    REQUIRE(rec.append_recon_text(text_body("recon finished later"))
+            == mrd::DumpEnqueueResult::Accepted);
+    rec.close_lane(mrd::DumpLane::Recon);
+
+    auto recon_h5 = find_single_h5(mrd::dump_recon_dir(dir));
+    REQUIRE(!recon_h5.empty());
+    CHECK(read_string_dataset_or_empty(recon_h5, "text_0") == "recon still running");
+
+    for (auto& ent : fs::directory_iterator(mrd::dump_scanner_dir(dir))) {
+        CHECK(ent.path().extension() != ".spool");
+    }
+    for (auto& ent : fs::directory_iterator(mrd::dump_recon_dir(dir))) {
+        CHECK(ent.path().extension() != ".spool");
+    }
+}
+
 TEST_CASE("DumpRecorder close-barrier race: strict scan boundary "
           "(post-close records go to a different h5)",
           "[dump][spool][race]") {
@@ -676,7 +714,7 @@ TEST_CASE("DumpRecorder preserves byte-exact TEXT bodies (embedded NULs)",
     auto body = text_body(payload);
 
     {
-        mrd::DumpRecorder rec(dir);
+        mrd::DumpRecorder rec(dir, /*delete_spool_after_convert=*/false);
         REQUIRE(dump_start_scan(rec, "byte_exact.h5",
                                "<?xml version=\"1.0\"?><ismrmrdHeader/>")
                 == mrd::DumpEnqueueResult::Accepted);
@@ -765,7 +803,7 @@ TEST_CASE("DumpRecorder preserves byte-exact METADATA_XML (embedded NUL)",
     body[sizeof(inner) + payload.size()] = '\0';
 
     {
-        mrd::DumpRecorder rec(dir);
+        mrd::DumpRecorder rec(dir, /*delete_spool_after_convert=*/false);
         // Strip-at-NUL "header_xml" matches what the listener's own
         // state keeps; dump treats the raw body as authoritative.
         std::string header_xml = xml_pre;

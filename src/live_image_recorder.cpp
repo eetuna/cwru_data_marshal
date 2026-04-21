@@ -13,6 +13,7 @@
 
 #include <cstring>
 #include <future>
+#include <system_error>
 
 #include "mrd_sink.hpp"
 #include "mrd_stream_tags.hpp"
@@ -148,6 +149,9 @@ void LiveImageRecorder::close_and_convert_on_worker()
                   << " records=" << stats.records_read
                   << " truncated=" << stats.truncated
                   << " error=" << stats.error);
+    } else {
+        std::error_code ec;
+        std::filesystem::remove(spool_path, ec);
     }
     // Publish final converted counts for /debug/sinks.
     pub_acq_count_.store(stats.acq_written);

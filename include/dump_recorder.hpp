@@ -44,14 +44,19 @@ enum class DumpEnqueueResult {
     Stopped,     // recorder is shutting down; no further writes accepted
 };
 
+enum class DumpLane {
+    Scanner,
+    Recon,
+};
+
 class DumpRecorder {
 public:
     // delete_spool_after_convert controls cleanup policy:
-    //   false (default) -- keep the .spool file next to the .h5 file
-    //     after successful conversion for forensic recovery.
-    //   true -- delete the .spool after the converter returns ok().
+    //   true (default) -- delete the .spool after the converter returns ok().
+    //   false -- keep the .spool file next to the .h5 file after
+    //     successful conversion for forensic / byte-exact tests.
     explicit DumpRecorder(std::filesystem::path dump_dir,
-                          bool delete_spool_after_convert = false);
+                          bool delete_spool_after_convert = true);
     ~DumpRecorder();
 
     DumpRecorder(const DumpRecorder&) = delete;
@@ -72,6 +77,7 @@ public:
                                  std::vector<uint8_t> xml_body,
                                  std::string header_xml);
     void close_scan();
+    void close_lane(DumpLane lane);
 
     // Byte-exact dump: these accept the FULL wire body exactly as
     // read off the socket. DumpRecorder does not reparse, strip NULs,
@@ -143,6 +149,7 @@ private:
         // (which would reject concurrent enqueues from other threads).
         struct Record {
             uint16_t tag{0};
+            std::string stem;
             std::vector<uint8_t> body;
             bool barrier{false};
             std::shared_ptr<std::promise<void>> signal;
@@ -195,6 +202,7 @@ private:
         uint32_t converted_img{0};
         uint32_t converted_wf{0};
         bool conversion_ok{false};
+        bool closed_for_stem{false};
     };
 
     std::filesystem::path dump_dir_;
@@ -223,8 +231,10 @@ private:
     void worker_loop(Lane& lane);
     // Lazily open the spool on first record arrival. No lock required:
     // only the worker thread touches lane.spool / current_filename.
-    void ensure_spool_on_worker(Lane& lane);
+    void ensure_spool_on_worker(Lane& lane, const std::string& stem);
     void close_spool_on_worker(Lane& lane);
+    void queue_lane_barrier(Lane& lane,
+                            std::shared_ptr<std::promise<void>> sig);
     void convert_lane(Lane& lane, const std::string& stem, bool is_scanner);
 };
 

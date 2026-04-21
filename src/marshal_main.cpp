@@ -361,6 +361,16 @@ int main(int argc, char** argv)
     std::unique_ptr<mrd::ReconForwarder> forwarder;
     if (!recon_host.empty()) {
         auto on_failure = [&state]() {
+            LOG_INFO("Finalizing recon lane after recon socket ended");
+            if (state.dump_enabled) {
+                if (state.dump_recorder) {
+                    state.dump_recorder->close_lane(mrd::DumpLane::Recon);
+                }
+            } else {
+                mrd::flush_live_lane(state, mrd::LiveLane::Recon);
+            }
+            mrd::mark_lane_finalized_after_eof(state, mrd::LiveLane::Recon);
+
             // Live mode only: write the latest_error.png snapshot under
             // live/from_reconstruction so /image/latest can return an error
             // marker. In dump mode there is no live snapshot path and

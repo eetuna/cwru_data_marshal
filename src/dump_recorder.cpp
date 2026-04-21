@@ -121,12 +121,16 @@ DumpEnqueueResult DumpRecorder::enqueue_on(Lane& lane, uint16_t tag,
     // close_scan is pending (barriers issued, convert not yet
     // complete), force a fresh stem so a post-barrier record cannot
     // reopen the closed spool path with "wb" and truncate it.
+    std::string stem;
     {
         std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
         if (scan_stem_.empty() || close_scan_pending_) {
             scan_stem_ = scan_filename_now();
             close_scan_pending_ = false;
+            scanner_.closed_for_stem = false;
+            recon_.closed_for_stem = false;
         }
+        stem = scan_stem_;
     }
     // Contract: no drop on queue pressure. We append unconditionally;
     // memory pressure is bounded by the scanner's actual throughput
@@ -134,20 +138,21 @@ DumpEnqueueResult DumpRecorder::enqueue_on(Lane& lane, uint16_t tag,
     {
         std::lock_guard<std::mutex> lk(lane.mtx);
         if (lane.stopping) return DumpEnqueueResult::Stopped;
-        lane.queue.push_back(Lane::Record{tag, std::move(body)});
+        Lane::Record rec;
+        rec.tag = tag;
+        rec.stem = stem;
+        rec.body = std::move(body);
+        lane.queue.push_back(std::move(rec));
     }
     lane.cv.notify_one();
     return DumpEnqueueResult::Accepted;
 }
 
-void DumpRecorder::ensure_spool_on_worker(Lane& lane)
+void DumpRecorder::ensure_spool_on_worker(Lane& lane, const std::string& stem)
 {
     if (lane.spool) return;
     if (lane.current_filename.empty()) {
-        // Adopt the shared scan stem. enqueue_on generates it on first
-        // record, so by the time the worker runs it is non-empty.
-        std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
-        lane.current_filename = scan_stem_;
+        lane.current_filename = stem;
     }
     auto spool_path = lane.lane_dir / (lane.current_filename + ".spool");
     lane.spool = std::make_unique<SpoolWriter>(spool_path);
@@ -232,7 +237,7 @@ void DumpRecorder::worker_loop(Lane& lane)
             continue;
         }
 
-        ensure_spool_on_worker(lane);
+        ensure_spool_on_worker(lane, rec.stem);
         if (!lane.spool || !lane.spool->healthy()) {
             // Disk-write failure. Count as a hard drop.
             lane.dropped_records.fetch_add(1);
@@ -297,13 +302,15 @@ DumpEnqueueResult DumpRecorder::start_scan(std::string filename,
     // already opened (or is about to) uses consistent names.
     {
         std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
-        if (scan_stem_.empty()) {
+        if (scan_stem_.empty() || scanner_.closed_for_stem) {
             // Honor caller-supplied filename if reasonable; strip .h5 suffix.
             std::string stem = filename;
             if (stem.size() > 3 &&
                 stem.compare(stem.size() - 3, 3, ".h5") == 0)
                 stem.resize(stem.size() - 3);
             scan_stem_ = stem.empty() ? scan_filename_now() : stem;
+            scanner_.closed_for_stem = false;
+            recon_.closed_for_stem = false;
         }
     }
     auto align = [&header_xml](Lane& lane) {
@@ -346,22 +353,8 @@ void DumpRecorder::close_scan()
         stem = scan_stem_;
         close_scan_pending_ = true;
 
-        auto queue_barrier = [](Lane& lane,
-                                std::shared_ptr<std::promise<void>> sig) {
-            std::lock_guard<std::mutex> lk(lane.mtx);
-            if (lane.stopping) {
-                // Destructor path: worker is exiting. Satisfy the
-                // promise now so the wait below returns.
-                sig->set_value();
-                return;
-            }
-            Lane::Record barrier;
-            barrier.barrier = true;
-            barrier.signal = std::move(sig);
-            lane.queue.push_back(std::move(barrier));
-        };
-        queue_barrier(scanner_, scanner_signal);
-        queue_barrier(recon_,   recon_signal);
+        queue_lane_barrier(scanner_, scanner_signal);
+        queue_lane_barrier(recon_,   recon_signal);
     }
     scanner_.cv.notify_one();
     recon_.cv.notify_one();
@@ -381,6 +374,8 @@ void DumpRecorder::close_scan()
     {
         std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
         close_scan_pending_ = false;
+        scanner_.closed_for_stem = false;
+        recon_.closed_for_stem = false;
         if (scan_stem_ == stem) {
             scan_stem_.clear();
         }
@@ -389,6 +384,60 @@ void DumpRecorder::close_scan()
     const bool ok = scanner_.conversion_ok && recon_.conversion_ok;
     status_.store(ok ? ConversionStatus::Complete : ConversionStatus::Failed);
     LOG_INFO("Dump conversion " << (ok ? "complete" : "FAILED"));
+}
+
+void DumpRecorder::close_lane(DumpLane lane_id)
+{
+    Lane& lane = (lane_id == DumpLane::Scanner) ? scanner_ : recon_;
+    const bool is_scanner = (lane_id == DumpLane::Scanner);
+    std::string stem;
+    auto signal = std::make_shared<std::promise<void>>();
+    auto fut = signal->get_future();
+    {
+        std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
+        stem = scan_stem_;
+        queue_lane_barrier(lane, signal);
+    }
+    lane.cv.notify_one();
+    fut.wait();
+
+    status_.store(ConversionStatus::Converting);
+    LOG_INFO("Converting dump spool to HDF5 lane=" << lane.component_tag);
+    convert_lane(lane, stem, is_scanner);
+
+    bool all_closed = false;
+    {
+        std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
+        lane.closed_for_stem = true;
+        all_closed = scanner_.closed_for_stem && recon_.closed_for_stem;
+        if (all_closed && scan_stem_ == stem) {
+            scan_stem_.clear();
+            close_scan_pending_ = false;
+            scanner_.closed_for_stem = false;
+            recon_.closed_for_stem = false;
+        }
+    }
+
+    if (all_closed) {
+        const bool ok = scanner_.conversion_ok && recon_.conversion_ok;
+        status_.store(ok ? ConversionStatus::Complete : ConversionStatus::Failed);
+    } else {
+        status_.store(ConversionStatus::Spooling);
+    }
+}
+
+void DumpRecorder::queue_lane_barrier(
+    Lane& lane, std::shared_ptr<std::promise<void>> sig)
+{
+    std::lock_guard<std::mutex> lk(lane.mtx);
+    if (lane.stopping) {
+        sig->set_value();
+        return;
+    }
+    Lane::Record barrier;
+    barrier.barrier = true;
+    barrier.signal = std::move(sig);
+    lane.queue.push_back(std::move(barrier));
 }
 
 void DumpRecorder::convert_lane(Lane& lane, const std::string& stem,

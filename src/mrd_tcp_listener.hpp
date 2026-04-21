@@ -340,6 +340,7 @@ private:
     void handle_session(std::shared_ptr<tcp::socket> sock) {
         LOG_INFO("MRD session started");
         std::vector<std::pair<uint16_t, std::vector<uint8_t>>> recon_preamble;
+        bool normal_close_seen = false;
 
         auto send_or_buffer_recon = [&](uint16_t tag, const std::vector<uint8_t>& body) {
             if (!forwarder_) return;
@@ -350,9 +351,21 @@ private:
             }
         };
 
+        // Throttle begin_session retries. DNS-fail + TCP connect can
+        // take seconds per attempt; calling it per-frame from the
+        // scanner thread wedges scanner EOF detection. Once a retry
+        // fails, hold off for this interval before trying again.
+        auto last_recon_retry = std::chrono::steady_clock::time_point::min();
+        const auto recon_retry_interval = std::chrono::seconds(10);
+
         auto ensure_recon_session = [&]() -> bool {
             if (!forwarder_) return false;
             if (!session_active_.load() || !forwarder_->is_connected()) {
+                auto now = std::chrono::steady_clock::now();
+                if (now - last_recon_retry < recon_retry_interval) {
+                    return false;  // within cooldown, don't retry
+                }
+                last_recon_retry = now;
                 session_active_.store(forwarder_->begin_session());
                 if (!session_active_.load()) return false;
                 for (const auto& [tag, body] : recon_preamble) {
@@ -366,6 +379,9 @@ private:
             while (sock->is_open()) {
                 uint16_t msg_id = 0;
                 if (!read_exact(*sock, &msg_id, sizeof(msg_id))) break;
+                if (msg_id != MRD_MESSAGE_CLOSE) {
+                    normal_close_seen = false;
+                }
 
                 switch (msg_id) {
 
@@ -458,6 +474,11 @@ private:
                     std::string scan_file;
                     {
                         std::lock_guard<std::mutex> lk(state_.scan_mtx);
+                        if (state_.scanner_lane_finalized) {
+                            state_.current_scan_filename.clear();
+                            state_.scanner_lane_finalized = false;
+                            state_.recon_lane_finalized = false;
+                        }
                         if (state_.current_scan_filename.empty())
                             state_.current_scan_filename = scan_filename();
                         scan_file = state_.current_scan_filename;
@@ -509,6 +530,7 @@ private:
                     flush_all_live_lanes(state_);
                     state_.close_scan();
                     session_active_.store(false);
+                    normal_close_seen = true;
                     break;
                 }
 
@@ -681,11 +703,28 @@ private:
         }
 
     done:
-        if (forwarder_ && session_active_.load()) {
-            forwarder_->end_session();
+        if (!normal_close_seen) {
+            const bool recon_was_active = session_active_.load();
+            LOG_INFO("Finalizing scanner lane after scanner socket ended");
+            if (state_.dump_enabled) {
+                if (state_.dump_recorder) {
+                    state_.dump_recorder->close_lane(DumpLane::Scanner);
+                }
+            } else {
+                flush_live_lane(state_, LiveLane::Scanner);
+            }
+            mark_lane_finalized_after_eof(state_, LiveLane::Scanner);
+            if (!recon_was_active) {
+                if (state_.dump_enabled) {
+                    if (state_.dump_recorder) {
+                        state_.dump_recorder->close_lane(DumpLane::Recon);
+                    }
+                } else {
+                    flush_live_lane(state_, LiveLane::Recon);
+                }
+                mark_lane_finalized_after_eof(state_, LiveLane::Recon);
+            }
         }
-        flush_all_live_lanes(state_);
-        state_.close_scan();
         LOG_INFO("MRD session ended");
         session_active_.store(false);
         {

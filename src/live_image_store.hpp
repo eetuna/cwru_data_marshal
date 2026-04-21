@@ -233,6 +233,29 @@ inline void flush_all_live_lanes(MarshalState& state)
     flush_live_lane(state, LiveLane::Recon);
 }
 
+inline void mark_lane_finalized_after_eof(MarshalState& state, LiveLane lane)
+{
+    std::lock_guard<std::mutex> lk(state.scan_mtx);
+    if (lane == LiveLane::Scanner) {
+        state.scanner_lane_finalized = true;
+    } else {
+        state.recon_lane_finalized = true;
+        state.recon_latest_group.reset();
+    }
+
+    if (state.scanner_lane_finalized && state.recon_lane_finalized) {
+        state.current_xml_header.clear();
+        state.current_config.clear();
+        state.current_scan_filename.clear();
+        state.recon_expected_slices = 0;
+        state.header_received.store(false);
+        state.config_received.store(false);
+        state.recon_failure_reported.store(false);
+        state.scanner_lane_finalized = false;
+        state.recon_lane_finalized = false;
+    }
+}
+
 inline void reset_live_outputs_for_new_scan(MarshalState& state)
 {
     state.latest_image_generation.fetch_add(1);
@@ -241,6 +264,8 @@ inline void reset_live_outputs_for_new_scan(MarshalState& state)
         std::lock_guard<std::mutex> lk(state.scan_mtx);
         state.scanner_live.close();
         state.recon_live.close();
+        state.scanner_lane_finalized = false;
+        state.recon_lane_finalized = false;
         state.recon_failure_reported.store(false);
         state.recon_latest_group.reset();
     }
