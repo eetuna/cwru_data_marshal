@@ -351,21 +351,24 @@ private:
             }
         };
 
-        // Throttle begin_session retries. DNS-fail + TCP connect can
-        // take seconds per attempt; calling it per-frame from the
-        // scanner thread wedges scanner EOF detection. Once a retry
-        // fails, hold off for this interval before trying again.
-        auto last_recon_retry = std::chrono::steady_clock::time_point::min();
-        const auto recon_retry_interval = std::chrono::seconds(10);
+        // One-shot recon session. begin_session is attempted at most
+        // ONCE per scanner session: on the first frame that needs it.
+        // If that attempt fails (or recon dies mid-scan), marshal does
+        // NOT retry. Rationale:
+        //   - Per-frame retries do a ~3s DNS/TCP timeout on each call,
+        //     which wedges the scanner thread and hides scanner EOF.
+        //   - Recon is a demo-style placeholder; once it's gone it's
+        //     gone until the operator restarts the whole scan.
+        //   - Scanner frames still archive locally (live/dump spool);
+        //     only recon-side reconstructed images are lost for
+        //     frames after recon died.
+        bool recon_attempted = false;
 
         auto ensure_recon_session = [&]() -> bool {
             if (!forwarder_) return false;
             if (!session_active_.load() || !forwarder_->is_connected()) {
-                auto now = std::chrono::steady_clock::now();
-                if (now - last_recon_retry < recon_retry_interval) {
-                    return false;  // within cooldown, don't retry
-                }
-                last_recon_retry = now;
+                if (recon_attempted) return false;   // one-shot, no retry
+                recon_attempted = true;
                 session_active_.store(forwarder_->begin_session());
                 if (!session_active_.load()) return false;
                 for (const auto& [tag, body] : recon_preamble) {
