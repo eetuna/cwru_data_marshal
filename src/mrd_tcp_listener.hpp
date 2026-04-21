@@ -351,23 +351,19 @@ private:
             }
         };
 
-        // One-shot recon session. begin_session is attempted at most
-        // ONCE per scanner session: on the first frame that needs it.
-        // If that attempt fails (or recon dies mid-scan), marshal does
-        // NOT retry. Rationale:
-        //   - Per-frame retries do a ~3s DNS/TCP timeout on each call,
-        //     which wedges the scanner thread and hides scanner EOF.
-        //   - Recon is a demo-style placeholder; once it's gone it's
-        //     gone until the operator restarts the whole scan.
-        //   - Scanner frames still archive locally (live/dump spool);
-        //     only recon-side reconstructed images are lost for
-        //     frames after recon died.
+        // Per contract (line 119): "Recon connection state must be
+        // reset so a later scan can reconnect." Implementation:
+        // begin_session() is attempted at most once per logical scan
+        // (scanner MRD CLOSE resets the flag). If recon is down when
+        // scanner starts a scan, marshal archives scanner frames
+        // locally and skips forwarding until the scan ends. Operator
+        // restarts recon between scans; the NEXT scan reconnects.
         bool recon_attempted = false;
 
         auto ensure_recon_session = [&]() -> bool {
             if (!forwarder_) return false;
             if (!session_active_.load() || !forwarder_->is_connected()) {
-                if (recon_attempted) return false;   // one-shot, no retry
+                if (recon_attempted) return false;   // one-shot per scan
                 recon_attempted = true;
                 session_active_.store(forwarder_->begin_session());
                 if (!session_active_.load()) return false;
@@ -518,6 +514,11 @@ private:
                         forwarder_->wait_for_close(std::chrono::milliseconds(2000));
                         forwarder_->end_session();
                     }
+                    // Allow the NEXT scan on this same scanner TCP
+                    // connection to attempt a recon reconnect once.
+                    // Recon may have been restarted by the operator
+                    // between scans.
+                    recon_attempted = false;
                     // HIGH #10: surface dump overflow to the operator via log
                     // before close_scan() tears the recorder down. Previously
                     // this was only visible as the dump_complete="false" HDF5
