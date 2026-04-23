@@ -16,7 +16,7 @@ echo ""
 git worktree prune
 
 # Ensure required branches exist (fetch directly from upstream repo)
-MRI_BRANCH="${MRI_BRANCH:-mri-data-marshal}"
+MRI_BRANCH="${MRI_BRANCH:-fix/marshal-dump-mode-switch-2026-04-19}"
 ROBOT_BRANCH="${ROBOT_BRANCH:-robot_data_marshal_with_catheter_system_components}"
 UPSTREAM_REPO="https://github.com/cwru-mercis/cwru_data_marshal.git"
 
