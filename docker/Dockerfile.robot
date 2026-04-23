@@ -26,12 +26,12 @@ WORKDIR /opt/robot
 # Initialize all data files with seed data (required for robot clients to work)
 # The server reads from /files/ directory - each file needs valid JSON
 RUN python3 -c "import json, os; \
-    seed = {'client_id': 'seed', 'sent_at': 1, 'values': [1.0, 2.0, 3.0]}; \
+    seed = {'client_id': 'seed', 'sent_at': 1, 'values': [0.0, 0.0, 0.0]}; \
     files = json.load(open('files.json')); \
     [open(f'/files/{f}', 'w').write(json.dumps(seed)) for f in files]"
 
-# Data volume mount point
-VOLUME ["/data/robot_data"]
+# Session data volume mount point (bind-mounted by docker-compose to SESSION_DATA_DIR)
+VOLUME ["/session-data"]
 
 # Expose HTTP port
 EXPOSE 8081

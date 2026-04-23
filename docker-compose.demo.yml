@@ -80,8 +80,18 @@ services:
       - sh
       - -c
       - |
+        SESSION=/session-data/run_$$(date +%Y%m%d_%H%M%S)/robot
+        mkdir -p $$SESSION
+        if ! cp /files/*.json $$SESSION/ 2>/dev/null; then
+          echo "[Robot Marshal] WARNING: no seed JSON files found in /files/, session directory may be empty"
+        fi
+        rm -rf /files
+        ln -s $$SESSION /files
         echo "[Robot Marshal] Starting on http://0.0.0.0:8081"
-        exec ./server --http 0.0.0.0:8081 >/dev/null 2>&1
+        echo "[Robot Marshal] Session data: $$SESSION"
+        exec ./server --http 0.0.0.0:8081
+    volumes:
+      - ${SESSION_DATA_DIR:-./session-data}:/session-data
     ports:
       - "8081:8081"
     healthcheck:
@@ -193,6 +203,20 @@ services:
     networks:
       - cwru-net
 
+  force-sensor:
+    image: cwru/robot-clients:latest
+    container_name: cwru-force-sensor
+    command: ["./force-sensor"]
+    environment:
+      - ROBOT_MARSHAL_HOST=robot-marshal
+      - ROBOT_MARSHAL_PORT=8081
+    depends_on:
+      robot-marshal:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - cwru-net
+
   controller:
     image: cwru/robot-clients:latest
     container_name: cwru-controller
@@ -245,8 +269,31 @@ services:
     networks:
       - cwru-net
 
-  # Run all robot clients with op count summary
+  webgl-client:
+    image: cwru/webgl-client:latest
+    container_name: cwru-webgl-client
+    environment:
+      - ROBOT_MARSHAL_HOST=robot-marshal
+      - ROBOT_MARSHAL_PORT=8081
+      - MRI_MARSHAL_HOST=mri-marshal
+      - MRI_MARSHAL_PORT=8080
+      - HDF5_USE_FILE_LOCKING=FALSE
+    volumes:
+      - ${SESSION_DATA_DIR:-./session-data}:/session-data:ro
+    depends_on:
+      robot-marshal:
+        condition: service_healthy
+      mri-marshal:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+    restart: unless-stopped
+    networks:
+      - cwru-net
+  # Run all robot clients with op count summary (webgl-client runs as a separate container)
   robot-clients:
+
     image: cwru/robot-clients:latest
     container_name: cwru-robot-clients
     command:
@@ -255,6 +302,7 @@ services:
       - |
         # Start all clients, redirect output to files for counting
         ./catheter-tracking >> /tmp/cath.log 2>&1 &
+        ./force-sensor >> /tmp/force.log 2>&1 &
         ./controller >> /tmp/ctrl.log 2>&1 &
         ./planning >> /tmp/plan.log 2>&1 &
         ./front-end >> /tmp/fe.log 2>&1 &
@@ -264,11 +312,12 @@ services:
         while true; do
           sleep $${MONITOR_INTERVAL:-10}
           CATH=$$(grep -c "CATHETER:" /tmp/cath.log 2>/dev/null || echo 0)
+          FORCE=$$(grep -c "FORCESENSOR:" /tmp/force.log 2>/dev/null || echo 0)
           CTRL=$$(grep -c "CONTROLLER:" /tmp/ctrl.log 2>/dev/null || echo 0)
           PLAN=$$(grep -c "PLANNING:" /tmp/plan.log 2>/dev/null || echo 0)
           FE=$$(grep -c "FRONTEND:" /tmp/fe.log 2>/dev/null || echo 0)
           SURF=$$(grep -c "SURFACE:" /tmp/surf.log 2>/dev/null || echo 0)
-          printf "[%s] Robot Clients: cath=%s ctrl=%s plan=%s fe=%s surf=%s\n" "$$(date +%H:%M:%S)" "$$CATH" "$$CTRL" "$$PLAN" "$$FE" "$$SURF"
+          printf "[%s] Robot Clients: cath=%s force=%s ctrl=%s plan=%s fe=%s surf=%s\n" "$$(date +%H:%M:%S)" "$$CATH" "$$FORCE" "$$CTRL" "$$PLAN" "$$FE" "$$SURF"
         done
     environment:
       - ROBOT_MARSHAL_HOST=robot-marshal
@@ -277,6 +326,10 @@ services:
     depends_on:
       robot-marshal:
         condition: service_healthy
+      mri-marshal:
+        condition: service_healthy
+      webgl-client:
+        condition: service_started
     networks:
       - cwru-net
     profiles:
