@@ -102,6 +102,11 @@ services:
         condition: service_healthy
     networks:
       - cwru-net
+    # Flow B (direct images, no recon). Not started by default. Enable
+    # with --profile images. Default demo uses Flow A (kspace-streamer
+    # + mock-recon).
+    profiles:
+      - images
 
   # ecg-client service removed — waveforms (ECG, waveform_id=0) are produced by
   # kspace-streamer with --ecg flag on the same MRD TCP connection as acquisitions,
@@ -131,13 +136,18 @@ services:
   kspace-streamer:
     image: cwru/kspace-streamer:latest
     container_name: cwru-kspace-streamer
+    # $$VAR double-dollar escapes tell compose to leave the substitution
+    # literal, so the container shell (sh -c) resolves it using the
+    # environment: block below. With single $VAR, compose expands at
+    # parse time using host env, which silently drops --ecg when
+    # KSPACE_ECG isn't set on the host.
     command:
       - sh
       - -c
       - |
         exec ./build/kspace_streamer --host mri-marshal --port 9100 \
-          ${KSPACE_ECG:+--ecg} \
-          --interval ${KSPACE_INTERVAL:-0.033} --slices ${KSPACE_SLICES:-5}
+          $${KSPACE_ECG:+--ecg} \
+          --interval $${KSPACE_INTERVAL:-0.033} --slices $${KSPACE_SLICES:-5}
     environment:
       - KSPACE_ECG=${KSPACE_ECG:-1}
       - KSPACE_INTERVAL=${KSPACE_INTERVAL:-0.033}
