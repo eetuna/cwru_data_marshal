@@ -1,0 +1,23 @@
+FROM python:3.11-slim
+
+# Install requests library
+RUN pip install --no-cache-dir requests
+
+# Copy mock clients
+COPY clients/mocks/ecg_client.py /app/ecg_client.py
+
+WORKDIR /app
+
+# Default connection to MRI marshal
+ENV MRI_MARSHAL_HTTP=http://mri-marshal:8080
+
+# Patch ECG client to simplify log output for demo
+RUN sed -i "s/sample_preview = f\"\[{samples\[0\]:.3f}, {samples\[1\]:.3f}, {samples\[2\]:.3f}, ..., {samples\[-1\]:.3f}\]\"/sample_preview = f\"ECG={samples[0]:.3f}\"/" ecg_client.py && \
+    sed -i "s/print(f\"\[{sent_count:04d}\] HR={args.heart_rate} BPM | {len(samples)} samples @ {args.rate_hz} Hz | Data: {sample_preview} | Success: {100.0 \* success_count \/ sent_count:.1f}%\")/print(f\"[{sent_count:04d}] {sample_preview} | HR={args.heart_rate} BPM\")/" ecg_client.py
+
+# Disable Python output buffering so logs appear immediately
+ENV PYTHONUNBUFFERED=1
+
+# Default: run ecg_client continuously
+# Note: docker-compose.demo.yml overrides with env vars
+CMD ["python3", "-u", "ecg_client.py", "--endpoint", "http://mri-marshal:8080", "--count", "0", "--interval", "1.0", "--heart-rate", "72", "--samples", "1"]

@@ -85,6 +85,7 @@ fi
 
 echo "[1/3] Building MRI Marshal and Clients..."
 echo "  - cwru/mri-marshal"
+echo "  - cwru/ecg-client"
 echo "  - cwru/pose-client"
 echo "  - cwru/image-streamer"
 echo "  - cwru/viz-client"
@@ -97,6 +98,10 @@ cd "$MRI_WORKTREE"
 # Build MRI Marshal
 echo "Building cwru/mri-marshal..."
 docker build -f "$PROJECT_ROOT/docker/Dockerfile.mri" -t cwru/mri-marshal:latest .
+
+# Build ECG Client
+echo "Building cwru/ecg-client..."
+docker build -f "$PROJECT_ROOT/docker/Dockerfile.ecg-client" -t cwru/ecg-client:latest .
 
 # Build Pose Client
 echo "Building cwru/pose-client..."
@@ -122,6 +127,7 @@ echo ""
 echo "[2/3] Building Robot Marshal and Clients..."
 echo "  - cwru/robot-marshal"
 echo "  - cwru/robot-clients"
+echo "  - cwru/webgl-client"
 echo ""
 
 cd "$ROBOT_WORKTREE"
@@ -134,17 +140,23 @@ docker build -f "$PROJECT_ROOT/docker/Dockerfile.robot" -t cwru/robot-marshal:la
 echo "Building cwru/robot-clients..."
 docker build -f "$PROJECT_ROOT/docker/Dockerfile.robot-clients" -t cwru/robot-clients:latest .
 
+# Build WebGL Client (front-end UI)
+echo "Building cwru/webgl-client..."
+docker build -f "$PROJECT_ROOT/docker/Dockerfile.webgl-client" -t cwru/webgl-client:latest .
+
 echo ""
 echo "[3/3] Verifying images..."
 REQUIRED_IMAGES=(
     "cwru/mri-marshal"
     "cwru/robot-marshal"
     "cwru/image-streamer"
+    "cwru/ecg-client"
     "cwru/pose-client"
     "cwru/kspace-streamer"
     "cwru/mock-recon"
     "cwru/viz-client"
     "cwru/robot-clients"
+    "cwru/webgl-client"
 )
 
 ALL_GOOD=true
@@ -161,7 +173,7 @@ done
 echo ""
 if [ "$ALL_GOOD" = true ]; then
     echo "============================================"
-    echo "  Build complete! All 8 images ready."
+    echo "  Build complete! All 10 images ready."
     echo "============================================"
     echo ""
     echo "Next steps:"
