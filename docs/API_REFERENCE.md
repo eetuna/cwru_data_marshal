@@ -92,6 +92,49 @@ Per-pipeline counters for retention verification. Returns mode-specific JSON:
 
 Use this (not viz_client FPS) to measure archival retention. `dropped_records` / `dropped` must remain zero under any non-disk-failure operating condition per the protocol contract.
 
+#### GET /debug/perf
+
+Free-running performance counters since process start. Two snapshots and a delta between them give per-second rates. Intended for FPS / throughput debugging, regression detection, and the contract tripwires below.
+
+```json
+{
+  "uptime_s": 95,
+  "recv": {
+    "scanner_images": 0,
+    "recon_images": 234,
+    "scanner_waveforms": 237
+  },
+  "publish_attempts": {"scanner": 0, "recon": 46},
+  "latest_writer": {
+    "enqueued": 46,
+    "coalesced": 0,
+    "dropped_oldest": 0,
+    "completed": 46,
+    "failed": 0,
+    "max_queue_depth": 1,
+    "last_write_us": 3625,
+    "max_write_us": 41135,
+    "last_drain_lag_us": 88,
+    "max_drain_lag_us": 473
+  }
+}
+```
+
+Field meanings:
+
+- `recv.*` — counts of MRD wire messages observed entering marshal per lane.
+- `publish_attempts.*` — counts of `publish_latest_snapshot` calls per lane.
+- `latest_writer.enqueued` — jobs accepted by `LatestImageWriter::enqueue`.
+- `latest_writer.coalesced` — **contract tripwire**, must remain `0`. Same-dest coalescing was removed in the 2026-04-22 fix; non-zero means the coalesce path was reintroduced.
+- `latest_writer.dropped_oldest` — overload-backstop drops at the 64-job queue cap. Should be 0 under normal load; non-zero indicates sustained writer stall (look at `max_write_us`).
+- `latest_writer.completed` — jobs that finished writing successfully. **Should equal `enqueued - dropped_oldest`** in steady state.
+- `latest_writer.failed` — exceptions during `write_latest_image_h5_file`.
+- `latest_writer.max_queue_depth` — high-watermark queue depth.
+- `latest_writer.{last,max}_write_us` — write durations (microseconds).
+- `latest_writer.{last,max}_drain_lag_us` — time from `enqueue` to the worker popping the job (microseconds). High values indicate writer is the bottleneck.
+
+Use this endpoint instead of (or alongside) viz client FPS to localize regressions. `viz_client` FPS = `latest_writer.completed/sec` in steady state.
+
 #### GET /transform
 
 Returns the current slice transform delta and atomically zeros it (consume-on-read):

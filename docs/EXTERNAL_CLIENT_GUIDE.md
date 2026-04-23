@@ -110,14 +110,19 @@ Scanner and reconstruction data do not use HTTP. They use the MRD TCP protocol o
 | `/health` | GET | Health check |
 | `/pose` | POST | Submit position/orientation data |
 | `/pose` | GET | Get current pose |
-| `/image/latest` | GET | Get the latest closed live-image snapshot path |
+| `/transform` | GET | Get + atomically zero the slice transform delta (consume-on-read) |
+| `/transform` | PUT | Submit a slice transform delta |
+| `/image/latest` | GET | Get the path to the latest atomic image snapshot (`latest_image.h5`) |
 | `/dump/scanner` | GET | List scanner archive files |
 | `/dump/recon` | GET | List reconstruction archive files |
+| `/debug/sinks` | GET | Per-pipeline sink counters (archival retention) |
+| `/debug/perf` | GET | Free-running perf counters (FPS / throughput debugging) |
 
-### WebSocket (Real-time Streaming)
+See `docs/API_REFERENCE.md` for full request/response shapes for each endpoint.
 
-- **URL:** `ws://localhost:8090`
-- Used for real-time data streaming (image frames, etc.)
+### WebSocket (opt-in)
+
+WebSocket streaming is **disabled by default** in the demo deployment. To enable, launch marshal with `--ws-port 8090` (or any port) and expose that port in your compose file. When enabled, WS pushes the JSON envelope `state.ws_emit(...)` populates. The default demo `docker-compose.demo.yml` does not pass `--ws-port` and does not publish the port; HTTP polling of `/image/latest` is the supported live interface.
 
 ---
 
