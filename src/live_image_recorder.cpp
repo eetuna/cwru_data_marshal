@@ -144,14 +144,33 @@ void LiveImageRecorder::close_and_convert_on_worker()
     // MRD message kinds we might encounter (live mode today only
     // spools IMAGE + WAVEFORM, but passing true costs nothing).
     auto stats = convert_spool_to_hdf5(spool_path, h5_path, /*is_scanner_side=*/true);
-    if (!stats.ok()) {
+    // Remove the spool whenever the converter did not hit a replay
+    // error. A tail-truncated spool (last record cut by SIGTERM /
+    // container stop) is the common shutdown case: every complete
+    // record made it into the H5, only a partial record is lost,
+    // and that record would be lost either way. Only keep the spool
+    // on a genuine replay error — that's the case where the H5 is
+    // missing records that still exist in the spool.
+    const bool replay_error = !stats.error.empty();
+    if (replay_error) {
         LOG_ERROR("Live spool->HDF5 convert failed on lane=" << component_tag_
                   << " records=" << stats.records_read
                   << " truncated=" << stats.truncated
-                  << " error=" << stats.error);
+                  << " error=" << stats.error
+                  << " (spool kept for forensics at " << spool_path.string() << ")");
     } else {
+        if (stats.truncated) {
+            LOG_INFO("Live spool convert finished on lane=" << component_tag_
+                     << " records=" << stats.records_read
+                     << " (truncated tail — normal on shutdown)");
+        }
         std::error_code ec;
         std::filesystem::remove(spool_path, ec);
+        if (ec) {
+            LOG_WARN("Spool remove failed on lane=" << component_tag_
+                     << " path=" << spool_path.string()
+                     << " error=" << ec.message());
+        }
     }
     // Publish final converted counts for /debug/sinks.
     pub_acq_count_.store(stats.acq_written);

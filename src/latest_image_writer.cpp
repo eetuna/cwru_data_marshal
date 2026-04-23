@@ -6,6 +6,8 @@
 
 #include "latest_image_writer.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -448,6 +450,7 @@ struct LatestImageWriter::Job {
     std::string xml;
     std::vector<std::vector<uint8_t>> images;
     Completion completion;
+    std::chrono::steady_clock::time_point enqueued_at{};
 };
 
 struct LatestImageWriter::Impl {
@@ -463,6 +466,17 @@ struct LatestImageWriter::Impl {
     bool stopping{false};
     std::atomic<bool> drop_logged{false};
     std::atomic<uint64_t> dropped_count{0};
+    // Perf counters exposed via perf(). All free-running; computed deltas
+    // between two snapshots give rates. max_* are high-watermarks.
+    std::atomic<uint64_t> perf_enqueued{0};
+    std::atomic<uint64_t> perf_coalesced{0};
+    std::atomic<uint64_t> perf_completed{0};
+    std::atomic<uint64_t> perf_failed{0};
+    std::atomic<uint64_t> perf_max_queue_depth{0};
+    std::atomic<uint64_t> perf_last_write_us{0};
+    std::atomic<uint64_t> perf_max_write_us{0};
+    std::atomic<uint64_t> perf_last_drain_lag_us{0};
+    std::atomic<uint64_t> perf_max_drain_lag_us{0};
     std::thread worker;
 
     Impl()
@@ -481,22 +495,19 @@ struct LatestImageWriter::Impl {
 
     void enqueue(Job job)
     {
+        job.enqueued_at = std::chrono::steady_clock::now();
+        perf_enqueued.fetch_add(1, std::memory_order_relaxed);
         {
             std::lock_guard<std::mutex> lk(mtx);
-            // Coalesce: if any pending job already targets this dest, replace
-            // its payload with the newer one. This keeps latency bounded
-            // and matches "publish the newest snapshot" semantics.
-            for (auto& pending : jobs) {
-                if (pending.dest == job.dest) {
-                    pending.xml = std::move(job.xml);
-                    pending.images = std::move(job.images);
-                    pending.completion = std::move(job.completion);
-                    cv.notify_one();
-                    return;
-                }
-            }
+            // No same-dest coalescing: silently replacing a pending payload
+            // with a newer one skips published snapshots between viz polls,
+            // which violates the losslessness contract. Writer stalls (seen
+            // as multi-second max_write_us on Docker bind mounts) used to
+            // make coalesce fire on ~34% of attempts, invisibly dropping
+            // frames. Instead, queue each publish and rely on the 64-entry
+            // bound + drop-oldest as overload backstop. Under normal load
+            // the writer drains fast and depth stays near 1.
             if (jobs.size() >= kMaxQueuedJobs) {
-                // No coalesce opportunity and queue full: drop the oldest.
                 jobs.pop_front();
                 dropped_count.fetch_add(1);
                 if (!drop_logged.exchange(true)) {
@@ -505,12 +516,18 @@ struct LatestImageWriter::Impl {
                 }
             }
             jobs.push_back(std::move(job));
+            const auto depth = static_cast<uint64_t>(jobs.size());
+            uint64_t prev = perf_max_queue_depth.load(std::memory_order_relaxed);
+            while (depth > prev &&
+                   !perf_max_queue_depth.compare_exchange_weak(
+                       prev, depth, std::memory_order_relaxed)) {}
         }
         cv.notify_one();
     }
 
     void run()
     {
+        using clk = std::chrono::steady_clock;
         for (;;) {
             Job job;
             {
@@ -521,10 +538,33 @@ struct LatestImageWriter::Impl {
                 jobs.pop_front();
             }
 
+            auto t0 = clk::now();
+            const auto drain_lag_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    t0 - job.enqueued_at).count());
+            perf_last_drain_lag_us.store(drain_lag_us, std::memory_order_relaxed);
+            {
+                uint64_t prev = perf_max_drain_lag_us.load(std::memory_order_relaxed);
+                while (drain_lag_us > prev &&
+                       !perf_max_drain_lag_us.compare_exchange_weak(
+                           prev, drain_lag_us, std::memory_order_relaxed)) {}
+            }
             try {
                 write_latest_image_h5_file(job.dest, job.xml, job.images);
+                auto t1 = clk::now();
                 if (job.completion) job.completion(job.dest);
+                const auto write_us = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+                perf_last_write_us.store(write_us, std::memory_order_relaxed);
+                {
+                    uint64_t prev = perf_max_write_us.load(std::memory_order_relaxed);
+                    while (write_us > prev &&
+                           !perf_max_write_us.compare_exchange_weak(
+                               prev, write_us, std::memory_order_relaxed)) {}
+                }
+                perf_completed.fetch_add(1, std::memory_order_relaxed);
             } catch (const std::exception& e) {
+                perf_failed.fetch_add(1, std::memory_order_relaxed);
                 LOG_WARN("Latest H5 write failed: " << e.what());
             }
         }
@@ -543,7 +583,23 @@ void LatestImageWriter::enqueue(std::filesystem::path dest,
                                 Completion completion)
 {
     impl_->enqueue(Job{std::move(dest), std::move(xml), std::move(images),
-                       std::move(completion)});
+                       std::move(completion), {}});
+}
+
+LatestImageWriter::PerfSnapshot LatestImageWriter::perf() const
+{
+    PerfSnapshot s;
+    s.enqueued          = impl_->perf_enqueued.load(std::memory_order_relaxed);
+    s.coalesced         = impl_->perf_coalesced.load(std::memory_order_relaxed);
+    s.dropped_oldest    = impl_->dropped_count.load(std::memory_order_relaxed);
+    s.completed         = impl_->perf_completed.load(std::memory_order_relaxed);
+    s.failed            = impl_->perf_failed.load(std::memory_order_relaxed);
+    s.max_queue_depth   = impl_->perf_max_queue_depth.load(std::memory_order_relaxed);
+    s.last_write_us     = impl_->perf_last_write_us.load(std::memory_order_relaxed);
+    s.max_write_us      = impl_->perf_max_write_us.load(std::memory_order_relaxed);
+    s.last_drain_lag_us = impl_->perf_last_drain_lag_us.load(std::memory_order_relaxed);
+    s.max_drain_lag_us  = impl_->perf_max_drain_lag_us.load(std::memory_order_relaxed);
+    return s;
 }
 
 } // namespace mrd

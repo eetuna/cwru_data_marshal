@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -82,6 +83,12 @@ inline void publish_latest_snapshot(MarshalState& state,
 {
     if (images.empty()) return;
 
+    if (lane == LiveLane::Scanner) {
+        state.perf_publish_attempts_scanner.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        state.perf_publish_attempts_recon.fetch_add(1, std::memory_order_relaxed);
+    }
+
     auto dest = lane_latest_path(state.dump_dir, lane);
     const auto generation = state.latest_image_generation.load();
     auto on_complete = [&state, generation](const std::filesystem::path& path) {
@@ -124,6 +131,12 @@ inline void append_live_image(MarshalState& state, LiveLane lane, const uint8_t*
 {
     ParsedWireImage parsed;
     if (!parse_wire_image(data, size, parsed)) return;
+
+    if (lane == LiveLane::Scanner) {
+        state.perf_scanner_images_received.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        state.perf_recon_images_received.fetch_add(1, std::memory_order_relaxed);
+    }
 
     std::string xml;
     std::string filename;
@@ -191,6 +204,10 @@ inline void append_live_waveform(MarshalState& state, LiveLane lane,
                                  const uint8_t* data, size_t size)
 {
     if (size < WAVEFORM_HEADER_BYTES) return;
+
+    if (lane == LiveLane::Scanner) {
+        state.perf_scanner_waveforms_received.fetch_add(1, std::memory_order_relaxed);
+    }
 
     std::string xml;
     std::string filename;

@@ -340,6 +340,41 @@ static auto handle_get_debug_sinks(const http::request<Body>& req, MarshalState&
 }
 
 // ---------------------------------------------------------------------------
+// GET /debug/perf — FPS-regression instrumentation. Free-running totals
+// since process start. Deltas between two polls give rates.
+// ---------------------------------------------------------------------------
+template <class Body>
+static auto handle_get_debug_perf(const http::request<Body>& req, MarshalState& state)
+{
+    nlohmann::json j;
+
+    auto now = std::chrono::steady_clock::now();
+    j["uptime_s"] = std::chrono::duration_cast<std::chrono::seconds>(now - state.start).count();
+
+    j["recv"]["scanner_images"]    = state.perf_scanner_images_received.load();
+    j["recv"]["recon_images"]      = state.perf_recon_images_received.load();
+    j["recv"]["scanner_waveforms"] = state.perf_scanner_waveforms_received.load();
+    j["publish_attempts"]["scanner"] = state.perf_publish_attempts_scanner.load();
+    j["publish_attempts"]["recon"]   = state.perf_publish_attempts_recon.load();
+
+    if (state.latest_writer) {
+        auto p = state.latest_writer->perf();
+        j["latest_writer"]["enqueued"]          = p.enqueued;
+        j["latest_writer"]["coalesced"]         = p.coalesced;
+        j["latest_writer"]["dropped_oldest"]    = p.dropped_oldest;
+        j["latest_writer"]["completed"]         = p.completed;
+        j["latest_writer"]["failed"]            = p.failed;
+        j["latest_writer"]["max_queue_depth"]   = p.max_queue_depth;
+        j["latest_writer"]["last_write_us"]     = p.last_write_us;
+        j["latest_writer"]["max_write_us"]      = p.max_write_us;
+        j["latest_writer"]["last_drain_lag_us"] = p.last_drain_lag_us;
+        j["latest_writer"]["max_drain_lag_us"]  = p.max_drain_lag_us;
+    }
+
+    return json_response(req, http::status::ok, j);
+}
+
+// ---------------------------------------------------------------------------
 // Main dispatcher
 // ---------------------------------------------------------------------------
 template <class Body, class Send>
@@ -390,6 +425,10 @@ void handle_http_request(http::request<Body>&& req, MarshalState& state, Send&& 
     }
     if (method == http::verb::get && target == "/debug/sinks") {
         send(handle_get_debug_sinks(req, state));
+        return;
+    }
+    if (method == http::verb::get && target == "/debug/perf") {
+        send(handle_get_debug_perf(req, state));
         return;
     }
 

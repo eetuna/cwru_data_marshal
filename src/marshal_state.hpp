@@ -133,6 +133,16 @@ struct MarshalState {
     // Current logical recon result for /image/latest publication.
     ReconLatestGroupState recon_latest_group;
 
+    // ------ Perf instrumentation (exposed via GET /debug/perf) ------
+    // Bumped in append_live_image / append_live_waveform / publish_latest_snapshot.
+    // Free-running totals since process start. Rates are computed by the
+    // caller (or by subtracting two snapshots).
+    std::atomic<uint64_t> perf_scanner_images_received{0};
+    std::atomic<uint64_t> perf_recon_images_received{0};
+    std::atomic<uint64_t> perf_scanner_waveforms_received{0};
+    std::atomic<uint64_t> perf_publish_attempts_scanner{0};
+    std::atomic<uint64_t> perf_publish_attempts_recon{0};
+
     // WS emit hook (set by WsServer on init, optional)
     std::function<void(const std::string&)> ws_emit = [](const std::string&) {};
 

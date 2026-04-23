@@ -34,6 +34,20 @@ public:
                  std::vector<std::vector<uint8_t>> images,
                  Completion completion);
 
+    struct PerfSnapshot {
+        uint64_t enqueued{0};
+        uint64_t coalesced{0};
+        uint64_t dropped_oldest{0};
+        uint64_t completed{0};
+        uint64_t failed{0};
+        uint64_t max_queue_depth{0};
+        uint64_t last_write_us{0};
+        uint64_t max_write_us{0};
+        uint64_t last_drain_lag_us{0};
+        uint64_t max_drain_lag_us{0};
+    };
+    PerfSnapshot perf() const;
+
 private:
     struct Job;
     struct Impl;

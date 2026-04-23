@@ -685,12 +685,15 @@ private:
                                 state_.dump_recorder->append_scanner_waveform(
                                     whdr, std::vector<uint8_t>(wf_data)));
                         }
-                    } else {
-                        // Live mode: persist scanner waveforms (e.g. ECG) into
-                        // per-lane live history alongside images.
-                        append_live_waveform(state_, LiveLane::Scanner,
-                                             body.data(), body.size());
                     }
+                    // Live mode: waveforms forward to recon but are not
+                    // archived into the per-lane live H5. The archive was
+                    // unusable anyway (HDF5 lock blocks mid-scan readers)
+                    // and gated scanner TCP throughput via scan_mtx
+                    // contention. See docs/fps-regression-2026-04-22.md.
+                    // For a future ECG-with-image consumer (e.g. cardiac
+                    // MPC), bundle waveforms into latest_image.h5 via an
+                    // in-memory ring buffer; do not reinstate this spool.
                     if (ensure_recon_session()) {
                         forwarder_->post_frame(MRD_MESSAGE_ISMRMRD_WAVEFORM, body);
                     }
