@@ -1,0 +1,71 @@
+version: '3.3'
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    volumes:
+      - /home/rza3/cwru_front_end/log_files/:/log_files/
+      - /home/rza3/cwru_front_end/files/:/files/
+    container_name: cpp_server
+    ports:
+      - "8080:8080"
+    networks:
+      cppnet:
+        ipv4_address: 172.28.1.10
+  client-a:
+    build:
+      context: .
+      dockerfile: Dockerfile.client-a
+    container_name: cpp_client-a
+    depends_on:
+      - server
+    networks:
+      cppnet:
+        ipv4_address: 172.28.1.11
+
+  client-b:
+    build:
+      context: .
+      dockerfile: Dockerfile.client-b
+    container_name: cpp_client-b
+    depends_on:
+      - server   
+    networks:
+      cppnet:
+        ipv4_address: 172.28.1.12
+
+  client-c:
+    build:
+      context: .
+      dockerfile: Dockerfile.client-c
+    container_name: cpp_client-c
+    depends_on:
+      - server
+    networks:
+      cppnet:
+        ipv4_address: 172.28.1.13
+
+  webgl-frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.client-webgl
+    container_name: webgl_frontend
+    depends_on:
+      - server
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+    networks:
+      cppnet:
+        ipv4_address: 172.28.1.14
+
+networks:
+  cppnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
