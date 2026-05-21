@@ -113,6 +113,7 @@ async function main() {
   let lastTipTimestamp = -1;
   let lastFKTimestamp = -1;
   let lastForceTimestamp = -1;
+  let currentForceSensingData = null;
 
   // Create 2D image renderer
   const image2DRenderer = new Image2DRenderer(gl);
@@ -273,12 +274,20 @@ initCurrentSliders();
   // POST rendered 2D image data to C++ server (write_to3 = fileKey 2)
   async function postRendered2DImageToServer(imageData) {
     try {
+      const receivedInWebglDemoAt = imageData.received_in_webgl_demo_at || Date.now();
       const payload = {
         client_id: clientId,
         sent_at: Date.now(),
         width: imageData.width,
         height: imageData.height,
         frame_index: imageData.frame_index,
+        sent_from_serverjs: imageData.sent_from_serverjs || null,
+        metadata_duration_ms: imageData.metadata_duration_ms ?? null,
+        hdf5_read_duration_ms: imageData.hdf5_read_duration_ms ?? null,
+        received_in_webgl_demo_at: receivedInWebglDemoAt,
+        serverjs_to_webgl_demo_ms: typeof imageData.sent_from_serverjs === 'number'
+          ? receivedInWebglDemoAt - imageData.sent_from_serverjs
+          : null,
         values: [1]
       };
       const response = await fetch(`${writeServerUrl}/api/write/${clientId}/2`, {
@@ -290,6 +299,113 @@ initCurrentSliders();
       console.log(`✓ Rendered 2D image posted to server (${imageData.width}x${imageData.height})`);
     } catch (error) {
       console.error('Error posting rendered 2D image:', error);
+    }
+  }
+
+  // POST will-render 2D image marker to C++ server (write_to4 = fileKey 3)
+  async function postWillRender2DImageToServer(imageData) {
+    try {
+      const payload = {
+        client_id: clientId,
+        sent_at: Date.now(),
+        width: imageData.width,
+        height: imageData.height,
+        frame_index: imageData.frame_index,
+        values: [1]
+      };
+      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/3`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      console.log(`✓ Will-render 2D image posted to server (${imageData.width}x${imageData.height})`);
+    } catch (error) {
+      console.error('Error posting will-render 2D image:', error);
+    }
+  }
+
+  // POST marker right before updateTextureFromServer fetch starts (write_to5 = fileKey 4)
+  async function postWillUpdateTextureFromServerToServer(imageData) {
+    try {
+      const payload = {
+        client_id: clientId,
+        sent_at: Date.now(),
+        width: imageData?.width || 0,
+        height: imageData?.height || 0,
+        frame_index: imageData?.frame_index,
+        values: [1]
+      };
+      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/4`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    } catch (error) {
+      console.error('Error posting will_update_texture_from_server:', error);
+    }
+  }
+
+  // POST marker right after updateTextureFromServer fetch finishes (write_to6 = fileKey 5)
+  async function postUpdatedTextureFromServerToServer(imageData) {
+    try {
+      const payload = {
+        client_id: clientId,
+        sent_at: Date.now(),
+        width: imageData?.width || 0,
+        height: imageData?.height || 0,
+        frame_index: imageData?.frame_index,
+        values: [1]
+      };
+      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/5`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    } catch (error) {
+      console.error('Error posting updated_texture_from_server:', error);
+    }
+  }
+
+  // POST marker right before updateForceSensingFromServer fetch starts (write_to7 = fileKey 6)
+  async function postWillUpdateForceSensingFromServerToServer(forceData) {
+    try {
+      const payload = {
+        client_id: clientId,
+        sent_at: Date.now(),
+        source_timestamp: forceData?.sent_at || forceData?.received_at || forceData?.timestamp || 0,
+        values: [1]
+      };
+      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/6`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    } catch (error) {
+      console.error('Error posting will_update_force_sensing_from_server:', error);
+    }
+  }
+
+  // POST marker right after updateForceSensingFromServer fetch finishes (write_to8 = fileKey 7)
+  async function postUpdatedForceSensingFromServerToServer(forceData) {
+    try {
+      const payload = {
+        client_id: clientId,
+        sent_at: Date.now(),
+        source_timestamp: forceData?.sent_at || forceData?.received_at || forceData?.timestamp || 0,
+        values: [1]
+      };
+      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/7`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    } catch (error) {
+      console.error('Error posting updated_force_sensing_from_server:', error);
     }
   }
 
@@ -324,17 +440,23 @@ initCurrentSliders();
 
   // Fetch 2D image from server
   async function updateTextureFromServer() {
+    //postWillRender2DImageToServer(data);
     try {
+     //postWillRender2DImageToServer(data);
       const response = await fetch(`${readServerUrl}/api/read/${clientId}/0`);
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
       
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      //postWillRender2DImageToServer(data);
       const data = await response.json();
+      data.received_in_webgl_demo_at = Date.now();
+      //postWillRender2DImageToServer(data);
       
       if (data.timestamp && data.timestamp !== lastTimestamp) {
         lastTimestamp = data.timestamp;
         
         if (data.values && Array.isArray(data.values)) {
           currentImageData = data;
+          postWillRender2DImageToServer(data);
           render2DImage(gl2d, data);
           postRendered2DImageToServer(data);
           
@@ -399,6 +521,7 @@ initCurrentSliders();
         lastForceTimestamp = ts;
 
         if (data.values && Array.isArray(data.values)) {
+          currentForceSensingData = data;
           const v = data.values;
           const valuesStr = v.map(val => val.toFixed(3)).join(", ");
           updateStatus("forceSensing", `[${valuesStr}]`);
@@ -971,9 +1094,15 @@ initCurrentSliders();
     then = now;
 
     // Each fetch runs independently; a slow fetch won't block the others
+    
     if (!fetchingTexture) {
+      postWillUpdateTextureFromServerToServer(currentImageData);
       fetchingTexture = true;
-      updateTextureFromServer().catch(() => {}).finally(() => { fetchingTexture = false; });
+      
+      updateTextureFromServer().catch(() => {}).finally(() => {
+        fetchingTexture = false;
+        postUpdatedTextureFromServerToServer(currentImageData);
+      });
     }
     if (!fetchingVolume) {
       fetchingVolume = true;
@@ -989,7 +1118,11 @@ initCurrentSliders();
     }
     if (!fetchingForceSensing) {
       fetchingForceSensing = true;
-      updateForceSensingFromServer().catch(() => {}).finally(() => { fetchingForceSensing = false; });
+      postWillUpdateForceSensingFromServerToServer(currentForceSensingData);
+      updateForceSensingFromServer().catch(() => {}).finally(() => {
+        fetchingForceSensing = false;
+        postUpdatedForceSensingFromServerToServer(currentForceSensingData);
+      });
     }
 
     gl.clearColor(0.0, 0.0, 0.0, 1.0);

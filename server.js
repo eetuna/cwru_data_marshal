@@ -22,6 +22,17 @@ const MRI_MARSHAL_SERVER = process.env.NODE_ENV === 'production'
 // Path to the Python HDF5 reader script (co-located with server.js)
 const HDF5_READER = path.join(__dirname, 'read_hdf5.py');
 
+// Writable metrics log path inside the container
+const HDF5_READ_METRICS_FILE = process.env.HDF5_READ_METRICS_FILE || '/tmp/webgl-client-hdf5-read-metrics.jsonl';
+
+async function appendHdf5ReadMetric(entry) {
+  try {
+    await fs.promises.appendFile(HDF5_READ_METRICS_FILE, `${JSON.stringify(entry)}\n`);
+  } catch (error) {
+    console.error(`Failed to append HDF5 read metric: ${error.message}`);
+  }
+}
+
 // ============================================================================
 // HDF5 reader using Python h5py (mirrors viz_client_main.cpp logic)
 //
@@ -146,14 +157,33 @@ app.get('/api/read/:clientId/:fileKey', async (req, res) => {
     // ------------------------------------------------------------------
     if (fileName === 'file_streaming_2D_images.json') {
       try {
+        const readStartedAtMs = Date.now();
         const meta = await fetchMriLatest();
         if (!meta.path) {
           return res.status(503).json({ error: 'No MRI data available yet' });
         }
+        const hdf5ReadStartedAtMs = Date.now();
         const sliceData = await readHdf5Frame(meta.path, meta.frame_index, '2d');
+        const readEndedAtMs = Date.now();
+        const metadataDurationMs = hdf5ReadStartedAtMs - readStartedAtMs;
+        const hdf5ReadDurationMs = readEndedAtMs - hdf5ReadStartedAtMs;
         sliceData.timestamp = meta.timestamp;
         sliceData.frame_index = meta.frame_index;
+        sliceData.sent_from_serverjs = Date.now();
+        sliceData.metadata_duration_ms = metadataDurationMs;
+        sliceData.hdf5_read_duration_ms = hdf5ReadDurationMs;
         console.log(`[2D] frame ${meta.frame_index} -> ${sliceData.width}x${sliceData.height} from ${path.basename(meta.path)}`);
+        appendHdf5ReadMetric({
+          ts: new Date().toISOString(),
+          frame_index: meta.frame_index,
+          file: path.basename(meta.path),
+          read_started_at_ms: readStartedAtMs,
+          hdf5_read_started_at_ms: hdf5ReadStartedAtMs,
+          read_ended_at_ms: readEndedAtMs,
+          metadata_duration_ms: metadataDurationMs,
+          hdf5_read_duration_ms: hdf5ReadDurationMs,
+          total_duration_ms: readEndedAtMs - readStartedAtMs
+        });
         return res.json(sliceData);
       } catch (err) {
         console.error(`[2D] MRI read error: ${err.message}`);
@@ -221,6 +251,16 @@ app.post('/api/write/:clientId/:fileKey', async (req, res) => {
       fileName = clientRoutes.write_to2;
     } else if (fileKey === '2') {
       fileName = clientRoutes.write_to3;
+    } else if (fileKey === '3') {
+      fileName = clientRoutes.write_to4;
+    } else if (fileKey === '4') {
+      fileName = clientRoutes.write_to5;
+    } else if (fileKey === '5') {
+      fileName = clientRoutes.write_to6;
+    } else if (fileKey === '6') {
+      fileName = clientRoutes.write_to7;
+    } else if (fileKey === '7') {
+      fileName = clientRoutes.write_to8;
     } else {
       return res.status(400).json({ error: `Invalid fileKey: ${fileKey}` });
     }

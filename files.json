@@ -9,6 +9,11 @@
     "file_surface_model_parameters.json",
     "file_tip_position_orientation.json",
     "file_rendered_2D_image.json",
+    "file_will_render_2D_image.json",
+    "file_will_update_texture_from_server.json",
+    "file_updated_texture_from_server.json",
+    "file_will_update_force_sensing_from_server.json",
+    "file_updated_force_sensing_from_server.json",
     "file_user_input.json",
     "file_force_sensing.json"
 ]

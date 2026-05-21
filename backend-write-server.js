@@ -69,7 +69,18 @@ app.post('/api/write/:clientId/:fileKey', async (req, res) => {
     } else if (fileKey === '1') {
       fileName = clientRoutes.write_to2;
     } else if (fileKey === '2') {
-      fileName = clientRoutes.write_to3
+
+      fileName = clientRoutes.write_to3;
+    } else if (fileKey === '3') {
+      fileName = clientRoutes.write_to4;
+    } else if (fileKey === '4') {
+      fileName = clientRoutes.write_to5;
+    } else if (fileKey === '5') {
+      fileName = clientRoutes.write_to6;
+    } else if (fileKey === '6') {
+      fileName = clientRoutes.write_to7;
+    } else if (fileKey === '7') {
+      fileName = clientRoutes.write_to8;
     }  else {
       console.warn(`[Backend Write Server] Invalid fileKey: ${fileKey}`);
       return res.status(400).json({ error: `Invalid fileKey: ${fileKey}` });

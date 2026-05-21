@@ -41,7 +41,12 @@
       "read_from5": "file_force_sensing.json",
       "write_to": "file_user_input.json",
       "write_to2": "file_catheter_base_configuration.json",
-      "write_to3": "file_rendered_2D_image.json"
+      "write_to3": "file_rendered_2D_image.json",
+      "write_to4": "file_will_render_2D_image.json",
+      "write_to5": "file_will_update_texture_from_server.json",
+      "write_to6": "file_updated_texture_from_server.json",
+      "write_to7": "file_will_update_force_sensing_from_server.json",
+      "write_to8": "file_updated_force_sensing_from_server.json"
     },
     "client-force-sensor": {
       "read_from": "file_forward_kinematics.json",
