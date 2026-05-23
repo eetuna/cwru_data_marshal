@@ -6,11 +6,16 @@ const path = require('path');
 const app = express();
 const PORT = 3001;
 
-// Data marshal server address - use service name for Docker inter-container communication
+// Robot data marshal server address - use service name for Docker inter-container communication
 // Inside Docker, services communicate using their service name from docker-compose.yml
 const DATA_MARSHAL_SERVER = process.env.NODE_ENV === 'production'
   ? `http://${process.env.ROBOT_MARSHAL_HOST || 'robot-marshal'}:${process.env.ROBOT_MARSHAL_PORT || '8081'}`
   : 'http://localhost:8080';   // Local development
+
+// MRI data marshal server address (for MRI-specific write channels)
+const MRI_MARSHAL_SERVER = process.env.NODE_ENV === 'production'
+  ? `http://${process.env.MRI_MARSHAL_HOST || 'mri-marshal'}:${process.env.MRI_MARSHAL_PORT || '8080'}`
+  : 'http://127.0.0.1:8080';
 
 // Load routing configuration (shared with all C++ clients)
 let routesConfig = {};
@@ -81,6 +86,8 @@ app.post('/api/write/:clientId/:fileKey', async (req, res) => {
       fileName = clientRoutes.write_to7;
     } else if (fileKey === '7') {
       fileName = clientRoutes.write_to8;
+    } else if (fileKey === '8') {
+      fileName = clientRoutes.write_to9;
     }  else {
       console.warn(`[Backend Write Server] Invalid fileKey: ${fileKey}`);
       return res.status(400).json({ error: `Invalid fileKey: ${fileKey}` });
@@ -91,23 +98,28 @@ app.post('/api/write/:clientId/:fileKey', async (req, res) => {
       return res.status(404).json({ error: `File mapping not found for fileKey: ${fileKey}` });
     }
 
+    const isSliceTranslationWrite = fileName === 'file_slice_translation.json' || fileName === 'file_slice_translation';
+    const targetServer = isSliceTranslationWrite ? MRI_MARSHAL_SERVER : DATA_MARSHAL_SERVER;
+    const targetFileKey = isSliceTranslationWrite ? fileName.replace(/\.json$/, '') : fileName;
+
     console.log(`[Backend Write Server] Resolved file name: ${fileName}`);
-    console.log(`[Backend Write Server] Posting to C++ server at: ${DATA_MARSHAL_SERVER}/write/${fileName}`);
+    console.log(`[Backend Write Server] Posting to ${isSliceTranslationWrite ? 'MRI' : 'Robot'} marshal at: ${targetServer}/write/${targetFileKey}`);
 
     // Write directly to C++ data marshal
     try {
-      const response = await axios.post(`${DATA_MARSHAL_SERVER}/write/${fileName}`, data, {
+      const response = await axios.post(`${targetServer}/write/${targetFileKey}`, data, {
         timeout: 5000
       });
-      console.log(`✓ [Backend Write Server] Successfully posted data to C++ server for ${fileName}`);
+      console.log(`✓ [Backend Write Server] Successfully posted data to ${isSliceTranslationWrite ? 'MRI' : 'Robot'} marshal for ${fileName}`);
       console.log(`✓ [Backend Write Server] Server response:`, response.data);
       return res.json({
         success: true,
         message: `Data written to ${fileName}`,
+        target_marshal: isSliceTranslationWrite ? 'mri' : 'robot',
         backend_response: response.data
       });
     } catch (backendError) {
-      console.error(`✗ [Backend Write Server] Failed to reach C++ server at ${DATA_MARSHAL_SERVER}/write/${fileName}`);
+      console.error(`✗ [Backend Write Server] Failed to reach ${isSliceTranslationWrite ? 'MRI' : 'Robot'} marshal at ${targetServer}/write/${targetFileKey}`);
       console.error(`✗ [Backend Write Server] Error details:`, backendError.message);
 
       if (backendError.response) {
@@ -116,9 +128,10 @@ app.post('/api/write/:clientId/:fileKey', async (req, res) => {
       }
 
       return res.status(503).json({
-        error: 'Failed to reach C++ data marshal server',
+        error: `Failed to reach ${isSliceTranslationWrite ? 'MRI' : 'Robot'} data marshal server`,
         details: backendError.message,
-        backend_url: `${DATA_MARSHAL_SERVER}/write/${fileName}`,
+        backend_url: `${targetServer}/write/${targetFileKey}`,
+        target_marshal: isSliceTranslationWrite ? 'mri' : 'robot',
         fileName: fileName
       });
     }
@@ -136,7 +149,8 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'backend-write-server',
-    data_marshal_server: DATA_MARSHAL_SERVER,
+    robot_data_marshal_server: DATA_MARSHAL_SERVER,
+    mri_data_marshal_server: MRI_MARSHAL_SERVER,
     timestamp: Date.now()
   });
 });
@@ -165,7 +179,8 @@ app.get('/status', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n[Backend Write Server] Started successfully`);
   console.log(`[Backend Write Server] Listening on http://0.0.0.0:${PORT}`);
-  console.log(`[Backend Write Server] Connected to C++ Data Marshal Server at: ${DATA_MARSHAL_SERVER}`);
+  console.log(`[Backend Write Server] Robot Marshal: ${DATA_MARSHAL_SERVER}`);
+  console.log(`[Backend Write Server] MRI Marshal: ${MRI_MARSHAL_SERVER}`);
   console.log(`[Backend Write Server] Health check: GET http://localhost:${PORT}/health`);
   console.log(`[Backend Write Server] Status check: GET http://localhost:${PORT}/status\n`);
 });

@@ -148,6 +148,47 @@
         font-family: monospace;
         text-align: center;
       }
+
+      .slice-translation-controls {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-top: 10px;
+        padding: 10px;
+        background-color: #2a2a2a;
+        border: 1px solid #444;
+        border-radius: 6px;
+      }
+
+      .slice-translation-controls h3 {
+        margin: 0;
+        font-size: 28px;
+        color: #00ccff;
+      }
+
+      .slice-translation-buttons {
+        display: flex;
+        gap: 10px;
+      }
+
+      .slice-translation-buttons button {
+        flex: 1;
+        font-size: 28px;
+        font-weight: bold;
+        color: #111;
+        border: none;
+        border-radius: 6px;
+        padding: 8px 0;
+        cursor: pointer;
+      }
+
+      #slicePlusBtn {
+        background-color: #51cf66;
+      }
+
+      #sliceMinusBtn {
+        background-color: #ff8787;
+      }
     </style>
     <script src="gl-matrix-min.js"></script>
     <script src="webgl-demo.js" type="module"></script>
@@ -207,6 +248,13 @@
             <label>I6</label>
             <input type="range" id="sliderI6" min="-2" max="2" step="0.01" value="0">
             <span class="slider-value" id="valI6">0.00</span>
+          </div>
+        </div>
+        <div class="slice-translation-controls">
+          <h3>Slice Translation</h3>
+          <div class="slice-translation-buttons">
+            <button id="sliceMinusBtn" type="button">-</button>
+            <button id="slicePlusBtn" type="button">+</button>
           </div>
         </div>
       </div>

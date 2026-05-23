@@ -438,6 +438,36 @@ initCurrentSliders();
     }
   }
 
+  // POST slice translation command (+1 or -1) to file_slice_translation endpoint
+  async function postSliceTranslationToServer(direction) {
+    if (direction !== 1 && direction !== -1) {
+      return;
+    }
+
+    try {
+      const payload = {
+        client_id: clientId,
+        sent_at: Date.now(),
+        values: [direction]
+      };
+
+      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/8`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+      updateStatus('debug', `Sent slice translation ${direction > 0 ? '+1' : '-1'}`);
+    } catch (error) {
+      console.error('Error posting slice translation:', error);
+      updateStatus('debug', `✗ Failed to post slice translation: ${error.message}`);
+    }
+  }
+
   // Fetch 2D image from server
   async function updateTextureFromServer() {
     //postWillRender2DImageToServer(data);
@@ -702,6 +732,37 @@ initCurrentSliders();
     },
   };
 
+  // Mesh shader: simple position + flat color (renders on same gl context as volume)
+  const meshVsSource = `
+    attribute vec3 aMeshPosition;
+    uniform mat4 uModelViewMatrix;
+    uniform mat4 uProjectionMatrix;
+    void main(void) {
+      gl_Position = uProjectionMatrix * uModelViewMatrix * vec4(aMeshPosition, 1.0);
+    }
+  `;
+
+  const meshFsSource = `
+    precision mediump float;
+    uniform vec4 uColor;
+    void main(void) {
+      gl_FragColor = uColor;
+    }
+  `;
+
+  const meshShaderProgram = initShaderProgram(gl, meshVsSource, meshFsSource);
+  const meshProgramInfo = {
+    program: meshShaderProgram,
+    attribLocations: {
+      position: gl.getAttribLocation(meshShaderProgram, "aMeshPosition"),
+    },
+    uniformLocations: {
+      projectionMatrix: gl.getUniformLocation(meshShaderProgram, "uProjectionMatrix"),
+      modelViewMatrix: gl.getUniformLocation(meshShaderProgram, "uModelViewMatrix"),
+      color: gl.getUniformLocation(meshShaderProgram, "uColor"),
+    },
+  };
+
   // Generate a distinct color for each control point index using HSL
   function getPointColor(index, total) {
     const hue = (index / Math.max(total, 1)) * 360;
@@ -904,6 +965,50 @@ initCurrentSliders();
     gl.drawArrays(gl.LINES, 0, 6);
   }
 
+  // Render OFF surface mesh overlaid on the 3D volume canvas
+  function renderMesh(gl, programInfo, meshBuffers) {
+    if (!meshBuffers) return;
+
+    const fieldOfView = (45 * Math.PI) / 180;
+    const aspect = gl.canvas.clientWidth / gl.canvas.clientHeight;
+    const projectionMatrix = glMatrix.mat4.create();
+    glMatrix.mat4.perspective(projectionMatrix, fieldOfView, aspect, 0.1, 100.0);
+
+    const modelViewMatrix = glMatrix.mat4.create();
+    glMatrix.mat4.translate(modelViewMatrix, modelViewMatrix, [0.0, 0.0, -6.0]);
+    glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, mouseRotationX, [1, 0, 0]);
+    glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, mouseRotationY, [0, 1, 0]);
+    glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, mouseRotationZ, [0, 0, 1]);
+    glMatrix.mat4.scale(modelViewMatrix, modelViewMatrix, [2.5, 2.5, 2.5]);
+
+    gl.useProgram(programInfo.program);
+    gl.uniformMatrix4fv(programInfo.uniformLocations.projectionMatrix, false, projectionMatrix);
+    gl.uniformMatrix4fv(programInfo.uniformLocations.modelViewMatrix, false, modelViewMatrix);
+    gl.uniform4fv(programInfo.uniformLocations.color, [0.3, 0.8, 1.0, 0.2]);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, meshBuffers.position);
+    gl.vertexAttribPointer(programInfo.attribLocations.position, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(programInfo.attribLocations.position);
+
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, meshBuffers.indices);
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+
+    gl.drawElements(gl.TRIANGLES, meshBuffers.indexCount, gl.UNSIGNED_SHORT, 0);
+
+    gl.uniform4fv(programInfo.uniformLocations.color, [0.0, 0.95, 1.0, 1.0]);
+    gl.disable(gl.DEPTH_TEST);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, meshBuffers.edgeIndices);
+    gl.drawElements(gl.LINES, meshBuffers.edgeIndexCount, gl.UNSIGNED_SHORT, 0);
+
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+    gl.enable(gl.DEPTH_TEST);
+  }
+
   // Mouse controls for FK canvas (independent rotation)
   canvasFK.addEventListener('mousedown', (e) => {
     fkIsMouseDown = true;
@@ -1033,6 +1138,21 @@ initCurrentSliders();
     }, 40); //50->40 
   }
 
+  const slicePlusBtn = document.getElementById('slicePlusBtn');
+  const sliceMinusBtn = document.getElementById('sliceMinusBtn');
+
+  if (slicePlusBtn) {
+    slicePlusBtn.addEventListener('click', () => {
+      postSliceTranslationToServer(1);
+    });
+  }
+
+  if (sliceMinusBtn) {
+    sliceMinusBtn.addEventListener('click', () => {
+      postSliceTranslationToServer(-1);
+    });
+  }
+
   // Mouse controls for 3D volume
   canvas3D.addEventListener('mousedown', (e) => {
     isMouseDown = true;
@@ -1076,7 +1196,41 @@ initCurrentSliders();
   updateStatus('status', 'Loading data from server...');
   await updateTextureFromServer();
   await updateVolumeFromServer();
-  
+
+  // Load chest surface mesh from static file
+  let meshBuffers = null;
+  async function loadMesh() {
+    const meshUrls = [
+      `${readServerUrl}/1_0_chest_surface.off`,
+      '/1_0_chest_surface.off',
+      './1_0_chest_surface.off',
+    ];
+
+    let lastError = null;
+    for (const meshUrl of meshUrls) {
+      try {
+        const response = await fetch(meshUrl, { cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const text = await response.text();
+        const { positions, indices } = parseOFFMesh(text);
+        meshBuffers = createMeshBuffers(gl, positions, indices);
+        updateStatus('status3d', `✓ volume + mesh (${positions.length / 3}v, ${indices.length / 3}f)`);
+        console.log(`✓ Mesh loaded from ${meshUrl}: ${positions.length / 3} vertices, ${indices.length / 3} faces`);
+        return;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    console.error('Error loading mesh from all candidates:', lastError);
+    updateStatus('status3d', `✗ mesh load failed (${lastError ? lastError.message : 'unknown'})`);
+  }
+
+  await loadMesh();
+
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
   let then = 0;
@@ -1132,6 +1286,7 @@ initCurrentSliders();
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
     renderVolumeCube(gl, programInfo, volumeSlices);
+    renderMesh(gl, meshProgramInfo, meshBuffers);
 
     // Render FK control points on the separate canvas
     renderFKControlPoints(glFK, fkProgramInfo, fkControlPoints);
@@ -1207,4 +1362,102 @@ function createTextureFromMatrix(gl, matrix, width, height) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
   return texture;
+}
+
+// Parse an ASCII .OFF mesh file and return normalized Float32Array positions + Uint16Array indices.
+// Vertices are centered at their centroid and scaled to fit within a unit sphere (radius 1.0).
+function parseOFFMesh(text) {
+  const lines = text.trim().split('\n').filter(l => l.trim() && !l.trim().startsWith('#'));
+  let i = 0;
+  if (lines[i].trim() === 'OFF') i++;
+  const header = lines[i++].trim().split(/\s+/).map(Number);
+  const nVerts = header[0];
+  const nFaces = header[1];
+
+  const rawPositions = new Float32Array(nVerts * 3);
+  for (let v = 0; v < nVerts; v++, i++) {
+    const parts = lines[i].trim().split(/\s+/);
+    rawPositions[v * 3]     = parseFloat(parts[0]);
+    rawPositions[v * 3 + 1] = parseFloat(parts[1]);
+    rawPositions[v * 3 + 2] = parseFloat(parts[2]);
+  }
+
+  // Compute centroid
+  let cx = 0, cy = 0, cz = 0;
+  for (let v = 0; v < nVerts; v++) {
+    cx += rawPositions[v * 3];
+    cy += rawPositions[v * 3 + 1];
+    cz += rawPositions[v * 3 + 2];
+  }
+  cx /= nVerts; cy /= nVerts; cz /= nVerts;
+
+  // Compute bounding radius and scale to unit sphere
+  let maxDist = 0.001;
+  for (let v = 0; v < nVerts; v++) {
+    const dx = rawPositions[v * 3] - cx;
+    const dy = rawPositions[v * 3 + 1] - cy;
+    const dz = rawPositions[v * 3 + 2] - cz;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (d > maxDist) maxDist = d;
+  }
+  const scale = 1.0 / maxDist;
+
+  const positions = new Float32Array(nVerts * 3);
+  for (let v = 0; v < nVerts; v++) {
+    positions[v * 3]     = (rawPositions[v * 3]     - cx) * scale;
+    positions[v * 3 + 1] = (rawPositions[v * 3 + 1] - cy) * scale;
+    positions[v * 3 + 2] = (rawPositions[v * 3 + 2] - cz) * scale;
+  }
+
+  const indices = new Uint16Array(nFaces * 3);
+  let k = 0;
+  for (let f = 0; f < nFaces; f++, i++) {
+    const parts = lines[i].trim().split(/\s+/).map(Number);
+    // parts[0] = vertex count (3 for triangle), parts[1..3] = indices
+    indices[k++] = parts[1];
+    indices[k++] = parts[2];
+    indices[k++] = parts[3];
+  }
+
+  return { positions, indices };
+}
+
+// Upload parsed mesh data to WebGL buffers
+function createMeshBuffers(gl, positions, indices) {
+  const posBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+
+  const idxBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuffer);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+
+  const edgeSet = new Set();
+  const edgeIndices = [];
+  for (let i = 0; i < indices.length; i += 3) {
+    const tri = [indices[i], indices[i + 1], indices[i + 2]];
+    for (let j = 0; j < 3; j++) {
+      const a = tri[j];
+      const b = tri[(j + 1) % 3];
+      const lo = Math.min(a, b);
+      const hi = Math.max(a, b);
+      const key = `${lo}:${hi}`;
+      if (!edgeSet.has(key)) {
+        edgeSet.add(key);
+        edgeIndices.push(a, b);
+      }
+    }
+  }
+
+  const edgeIdxBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, edgeIdxBuffer);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(edgeIndices), gl.STATIC_DRAW);
+
+  return {
+    position: posBuffer,
+    indices: idxBuffer,
+    indexCount: indices.length,
+    edgeIndices: edgeIdxBuffer,
+    edgeIndexCount: edgeIndices.length,
+  };
 }
