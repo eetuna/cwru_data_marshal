@@ -337,6 +337,81 @@ http::response<http::string_body> handle_http_request(const http::request<Body> 
         }
     }
 
+    // POST /write/file_slice_translation
+    // Body (JSON): { "client_id": "...", "sent_at": 123, "values": [1] }
+    // Stores the latest slice translation command for MRI-side consumers.
+    if (req.method() == http::verb::post &&
+        (req.target() == "/write/file_slice_translation" || req.target() == "/write/file_slice_translation.json"))
+    {
+        try
+        {
+            auto body = json::parse(req.body());
+
+            if (!body.contains("values") || !body["values"].is_array() || body["values"].size() != 1)
+            {
+                return make_response(http::status::bad_request,
+                    {{"error", "missing or invalid values"}, {"required", {"values[1]"}}});
+            }
+
+            const auto &direction_value = body["values"][0];
+            if (!direction_value.is_number())
+            {
+                return make_response(http::status::bad_request, {{"error", "values[0] must be numeric"}});
+            }
+
+            double direction = 0.0;
+            direction_value.get_to(direction);
+            if (direction != 1.0 && direction != -1.0)
+            {
+                return make_response(http::status::bad_request,
+                    {{"error", "values[0] must be +1 or -1"}, {"got", direction}});
+            }
+
+            body["ts"] = mrd::iso8601_now_ms();
+            const std::string slice_translation_json = body.dump();
+
+            {
+                std::lock_guard<std::mutex> lock(state.latest_slice_translation_mutex);
+                state.latest_slice_translation_json = slice_translation_json;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(state.json_queue_mutex);
+                state.json_write_queue.push({MarshalState::WriteType::SLICE_TRANSLATION, slice_translation_json});
+            }
+            state.json_queue_cv.notify_one();
+
+            return make_response(http::status::ok,
+                {{"file", "file_slice_translation"}, {"direction", direction}});
+        }
+        catch (const std::exception &e)
+        {
+            return make_response(http::status::bad_request, {{"error", "bad json"}, {"what", e.what()}});
+        }
+    }
+
+    // GET /read/file_slice_translation  (reads from in-memory cache)
+    if (req.method() == http::verb::get &&
+        (req.target() == "/read/file_slice_translation" || req.target() == "/read/file_slice_translation.json"))
+    {
+        std::string cached_json;
+        {
+            std::lock_guard<std::mutex> lock(state.latest_slice_translation_mutex);
+            cached_json = state.latest_slice_translation_json;
+        }
+
+        if (!cached_json.empty())
+        {
+            try {
+                return make_response(http::status::ok, json::parse(cached_json));
+            } catch (...) {
+                return make_response(http::status::internal_server_error,
+                    {{"error", "failed to parse slice translation cache"}});
+            }
+        }
+        return make_response(http::status::no_content, json::object());
+    }
+
     // GET /v1/bio/latest  (reads from in-memory cache)
     if (req.method() == http::verb::get && req.target() == "/v1/bio/latest")
     {

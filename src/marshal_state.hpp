@@ -79,7 +79,7 @@ struct MarshalState
     std::shared_ptr<mrd::MrdSink> mrd_sink;
 
     // JSON write queue (non-blocking) - for async disk I/O
-    enum class WriteType { MRD, BIO, POSE };
+    enum class WriteType { MRD, BIO, POSE, SLICE_TRANSLATION };
     struct WriteRequest {
         WriteType type;
         std::string data;
@@ -93,6 +93,7 @@ struct MarshalState
     std::filesystem::path json_latest_path;  // MRD latest.json
     std::filesystem::path json_bio_path;     // bio.jsonl
     std::filesystem::path json_pose_path;    // poses.jsonl
+    std::filesystem::path json_slice_translation_path; // file_slice_translation.jsonl
 
     // In-memory latest (for fast endpoint reads)
     std::mutex latest_mrd_mutex;
@@ -103,6 +104,9 @@ struct MarshalState
 
     std::mutex latest_pose_mutex;
     std::string latest_pose_json;
+
+    std::mutex latest_slice_translation_mutex;
+    std::string latest_slice_translation_json;
 
     // Reconstruction service configuration (Phase 2)
     std::string recon_endpoint;    // e.g., "http://localhost:9002"

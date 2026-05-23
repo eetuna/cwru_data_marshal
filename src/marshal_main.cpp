@@ -100,6 +100,7 @@ void json_writer_thread_func(MarshalState& state)
     std::ofstream idx_out(state.json_index_path, std::ios::app);
     std::ofstream bio_out(state.json_bio_path, std::ios::app);
     std::ofstream pose_out(state.json_pose_path, std::ios::app);
+    std::ofstream slice_translation_out(state.json_slice_translation_path, std::ios::app);
 
     while (state.json_writer_running)
     {
@@ -138,6 +139,9 @@ void json_writer_thread_func(MarshalState& state)
             case MarshalState::WriteType::POSE:
                 if (pose_out) pose_out << req.data << '\n';
                 break;
+            case MarshalState::WriteType::SLICE_TRANSLATION:
+                if (slice_translation_out) slice_translation_out << req.data << '\n';
+                break;
             }
 
             batch.pop();
@@ -147,6 +151,7 @@ void json_writer_thread_func(MarshalState& state)
         if (idx_out) idx_out.flush();
         if (bio_out) bio_out.flush();
         if (pose_out) pose_out.flush();
+        if (slice_translation_out) slice_translation_out.flush();
 
         // Update latest.json with last MRD entry (if any)
         if (!last_mrd_entry.empty())
@@ -285,6 +290,7 @@ int main(int argc, char **argv)
     state.json_latest_path = fs::path(state.data_dir) / "mrd" / "latest.json";
     state.json_bio_path = fs::path(state.data_dir) / "mrd" / "bio.jsonl";
     state.json_pose_path = fs::path(state.data_dir) / "mrd" / "poses.jsonl";
+    state.json_slice_translation_path = fs::path(state.data_dir) / "mrd" / "file_slice_translation.jsonl";
     state.json_writer_running = true;
     state.json_writer_thread = std::thread(json_writer_thread_func, std::ref(state));
 

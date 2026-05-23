@@ -124,6 +124,76 @@ TEST_CASE("HTTP Handler: Pose Operations", "[http]")
     fs::remove_all(temp);
 }
 
+TEST_CASE("HTTP Handler: Slice Translation Writes", "[http]")
+{
+    std::string temp = unique_temp_dir();
+    MarshalState state;
+    state.data_dir = temp;
+    state.sink_mode = SinkMode::MRD;
+    state.ws_emit = [](const std::string &) {};
+
+    fs::create_directories(fs::path(temp) / "mrd");
+
+    SECTION("Get slice translation (initial empty)")
+    {
+        http::request<http::string_body> req{http::verb::get, "/read/file_slice_translation", 11};
+        auto res = handle_http_request(req, state);
+        REQUIRE(res.result() == http::status::no_content);
+    }
+
+    SECTION("Write slice translation valid")
+    {
+        json payload = {
+            {"client_id", "client-webgl"},
+            {"sent_at", 1700000000000LL},
+            {"values", {1}}
+        };
+        http::request<http::string_body> req{http::verb::post, "/write/file_slice_translation", 11};
+        req.body() = payload.dump();
+        req.prepare_payload();
+
+        auto res = handle_http_request(req, state);
+        REQUIRE(res.result() == http::status::ok);
+        auto body = json::parse(res.body());
+        CHECK(body["data"]["file"] == "file_slice_translation");
+        CHECK(body["data"]["direction"] == 1.0);
+
+        {
+            std::lock_guard<std::mutex> lock(state.latest_slice_translation_mutex);
+            CHECK(!state.latest_slice_translation_json.empty());
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(state.json_queue_mutex);
+            CHECK(!state.json_write_queue.empty());
+            CHECK(state.json_write_queue.front().type == MarshalState::WriteType::SLICE_TRANSLATION);
+        }
+
+        http::request<http::string_body> read_req{http::verb::get, "/read/file_slice_translation", 11};
+        auto read_res = handle_http_request(read_req, state);
+        REQUIRE(read_res.result() == http::status::ok);
+        auto read_body = json::parse(read_res.body());
+        CHECK(read_body["data"]["values"][0] == 1);
+    }
+
+    SECTION("Write slice translation invalid direction")
+    {
+        json payload = {
+            {"client_id", "client-webgl"},
+            {"sent_at", 1700000000000LL},
+            {"values", {2}}
+        };
+        http::request<http::string_body> req{http::verb::post, "/write/file_slice_translation", 11};
+        req.body() = payload.dump();
+        req.prepare_payload();
+
+        auto res = handle_http_request(req, state);
+        REQUIRE(res.result() == http::status::bad_request);
+    }
+
+    fs::remove_all(temp);
+}
+
 TEST_CASE("HTTP Handler: MRD Ingest and Retrieval", "[http][mrd]")
 {
     std::string temp = unique_temp_dir();
