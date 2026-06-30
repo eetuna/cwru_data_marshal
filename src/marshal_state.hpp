@@ -115,6 +115,12 @@ struct MarshalState {
     std::mutex transform_mtx;
     SliceTransform transform;
 
+    // Latest slice-translation command (±1) from WebGL client; cached for
+    // MRI-side reads. Empty until the first POST. GET returns the cache
+    // without clearing (repeated reads return the same value).
+    std::mutex slice_translation_mtx;
+    std::string latest_slice_translation_json;
+
     // Pose cache
     PoseStore poses;
 

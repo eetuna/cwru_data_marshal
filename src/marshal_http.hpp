@@ -176,6 +176,74 @@ static auto handle_put_transform(const http::request<Body>& req, MarshalState& s
 }
 
 // ---------------------------------------------------------------------------
+// POST /write/file_slice_translation and GET /read/file_slice_translation
+//
+// Command channel: the WebGL client nudges the MRI imaging slice by ±1.
+// Body (JSON): { "client_id": "...", "sent_at": 123, "values": [ ±1 ] }
+// The latest command is cached in memory; GET returns it without clearing.
+// ---------------------------------------------------------------------------
+template <class Body>
+static auto handle_post_slice_translation(const http::request<Body>& req, MarshalState& state)
+    -> http::response<http::string_body>
+{
+    nlohmann::json body;
+    try {
+        body = nlohmann::json::parse(req.body());
+    } catch (const std::exception& e) {
+        return json_response(req, http::status::bad_request,
+                             {{"error", std::string("bad JSON: ") + e.what()}});
+    }
+
+    if (!body.contains("values") || !body["values"].is_array() || body["values"].size() != 1) {
+        return json_response(req, http::status::bad_request,
+                             {{"error", "missing or invalid values"}, {"required", "values[1]"}});
+    }
+    const auto& direction_value = body["values"][0];
+    if (!direction_value.is_number()) {
+        return json_response(req, http::status::bad_request,
+                             {{"error", "values[0] must be numeric"}});
+    }
+    const double direction = direction_value.get<double>();
+    if (direction != 1.0 && direction != -1.0) {
+        return json_response(req, http::status::bad_request,
+                             {{"error", "values[0] must be +1 or -1"}, {"got", direction}});
+    }
+
+    body["ts"] = mrd::iso8601_now_ms();
+    {
+        std::lock_guard<std::mutex> lk(state.slice_translation_mtx);
+        state.latest_slice_translation_json = body.dump();
+    }
+    return json_response(req, http::status::ok,
+                         {{"file", "file_slice_translation"}, {"direction", direction}});
+}
+
+template <class Body>
+static auto handle_get_slice_translation(const http::request<Body>& req, MarshalState& state)
+    -> http::response<http::string_body>
+{
+    std::string cached;
+    {
+        std::lock_guard<std::mutex> lk(state.slice_translation_mtx);
+        cached = state.latest_slice_translation_json;
+    }
+    if (cached.empty()) {
+        // 204 must be body-less; json_response would set a body and
+        // prepare_payload() would throw.
+        http::response<http::string_body> res{http::status::no_content, req.version()};
+        res.keep_alive(req.keep_alive());
+        res.prepare_payload();
+        return res;
+    }
+    try {
+        return json_response(req, http::status::ok, nlohmann::json::parse(cached));
+    } catch (...) {
+        return json_response(req, http::status::internal_server_error,
+                             {{"error", "failed to parse slice translation cache"}});
+    }
+}
+
+// ---------------------------------------------------------------------------
 // POST /pose and GET /pose
 // ---------------------------------------------------------------------------
 template <class Body>
@@ -401,6 +469,16 @@ void handle_http_request(http::request<Body>&& req, MarshalState& state, Send&& 
     }
     if (method == http::verb::put && target == "/transform") {
         send(handle_put_transform(req, state));
+        return;
+    }
+    if (method == http::verb::post &&
+        (target == "/write/file_slice_translation" || target == "/write/file_slice_translation.json")) {
+        send(handle_post_slice_translation(req, state));
+        return;
+    }
+    if (method == http::verb::get &&
+        (target == "/read/file_slice_translation" || target == "/read/file_slice_translation.json")) {
+        send(handle_get_slice_translation(req, state));
         return;
     }
     if (method == http::verb::post && target == "/pose") {

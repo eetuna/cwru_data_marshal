@@ -61,6 +61,66 @@ TEST_CASE("GET /health returns ok", "[http]") {
     CHECK(j.contains("uptime_s"));
 }
 
+TEST_CASE("HTTP Handler: Slice Translation", "[http]") {
+    MarshalState state; init_state(state);
+
+    SECTION("GET before any POST returns no content") {
+        http::request<http::string_body> req{http::verb::get, "/read/file_slice_translation", 11};
+        auto res = dispatch(req, state);
+        REQUIRE(res.result() == http::status::no_content);
+    }
+
+    SECTION("POST valid +1 then GET round-trips") {
+        json payload = {{"client_id", "client-webgl"}, {"sent_at", 1700000000000LL}, {"values", {1}}};
+        http::request<http::string_body> req{http::verb::post, "/write/file_slice_translation", 11};
+        req.body() = payload.dump();
+        req.prepare_payload();
+
+        auto res = dispatch(req, state);
+        REQUIRE(res.result() == http::status::ok);
+        auto body = json::parse(res.body());
+        CHECK(body["file"] == "file_slice_translation");
+        CHECK(body["direction"] == 1.0);
+
+        http::request<http::string_body> get_req{http::verb::get, "/read/file_slice_translation", 11};
+        auto get_res = dispatch(get_req, state);
+        REQUIRE(get_res.result() == http::status::ok);
+        auto get_body = json::parse(get_res.body());
+        CHECK(get_body["values"][0] == 1);
+        CHECK(get_body.contains("ts"));
+    }
+
+    SECTION("POST valid -1") {
+        json payload = {{"client_id", "client-webgl"}, {"values", {-1}}};
+        http::request<http::string_body> req{http::verb::post, "/write/file_slice_translation", 11};
+        req.body() = payload.dump();
+        req.prepare_payload();
+
+        auto res = dispatch(req, state);
+        REQUIRE(res.result() == http::status::ok);
+        CHECK(json::parse(res.body())["direction"] == -1.0);
+    }
+
+    SECTION("POST invalid direction is rejected") {
+        json payload = {{"client_id", "client-webgl"}, {"values", {2}}};
+        http::request<http::string_body> req{http::verb::post, "/write/file_slice_translation", 11};
+        req.body() = payload.dump();
+        req.prepare_payload();
+
+        auto res = dispatch(req, state);
+        REQUIRE(res.result() == http::status::bad_request);
+    }
+
+    SECTION("POST malformed body is rejected") {
+        http::request<http::string_body> req{http::verb::post, "/write/file_slice_translation", 11};
+        req.body() = "not json";
+        req.prepare_payload();
+
+        auto res = dispatch(req, state);
+        REQUIRE(res.result() == http::status::bad_request);
+    }
+}
+
 static std::vector<uint8_t> make_wire_image(uint16_t series,
                                             uint16_t slice = 0,
                                             float value = 1.0f,
