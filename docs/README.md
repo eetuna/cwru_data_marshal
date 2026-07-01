@@ -1,70 +1,33 @@
 # MRI Data Marshal Documentation
 
-This directory contains the official documentation for the MRI Data Marshal project.
+All documentation lives in the umbrella repo's `docs/` directory to avoid duplication.
 
-## Documentation Structure
+From this worktree, the canonical docs are at `../../docs/`:
 
-### Core Documentation
-- **[MRI_DATA_MARSHAL_PRESENTATION.md](MRI_DATA_MARSHAL_PRESENTATION.md)** - Professional presentation for faculty and researchers
-- **[DEMO_GUIDE.md](DEMO_GUIDE.md)** - How to run the simultaneous operations demo
-- **[USAGE_AND_API.md](USAGE_AND_API.md)** - Complete usage instructions and API reference
-- **[CLIENT_API_REFERENCE.md](CLIENT_API_REFERENCE.md)** - HTTP endpoint specs with curl, Python, and C++ examples
-- **[CACHING_ARCHITECTURE.md](CACHING_ARCHITECTURE.md)** - Write-behind caching design for MRD, Bio, and Pose
-- **[IMPROVEMENTS_AND_OPTIMIZATION.md](IMPROVEMENTS_AND_OPTIMIZATION.md)** - Performance tuning and optimization guide
+- **[ARCHITECTURE.md](../../docs/ARCHITECTURE.md)** — system diagram, MRD TCP wire protocol, compose topology
+- **[API_REFERENCE.md](../../docs/API_REFERENCE.md)** — complete HTTP + MRD TCP API reference
+- **[RECONSTRUCTION_INTERFACE.md](../../docs/RECONSTRUCTION_INTERFACE.md)** — MRD TCP recon contract
+- **[MRI_MARSHAL_PROTOCOL_CONTRACT.md](../../docs/MRI_MARSHAL_PROTOCOL_CONTRACT.md)** — scanner/recon proxy responsibilities
+- **[DEVELOPER_GUIDE.md](../../docs/DEVELOPER_GUIDE.md)** — repo organization, replacing mocks
+- **[MANUAL_TERMINAL_SETUP.md](../../docs/MANUAL_TERMINAL_SETUP.md)** — per-terminal run guide
+- **[QUICK_START.md](../../docs/QUICK_START.md)** — one-liner start
+- **[EXTERNAL_CLIENT_GUIDE.md](../../docs/EXTERNAL_CLIENT_GUIDE.md)** — external client integration
 
-### SWMR and HDF5
-- **[SWMR_AND_ROBOT_MARSHAL_OVERVIEW.md](SWMR_AND_ROBOT_MARSHAL_OVERVIEW.md)** - SWMR explanation and MRI/Robot marshal coordination
-- **[SWMR_CONTINUOUS_BENCH_ANALYSIS.md](SWMR_CONTINUOUS_BENCH_ANALYSIS.md)** - Detailed SWMR benchmark analysis
-- **[HDF5_LOCKING_NOTES.md](HDF5_LOCKING_NOTES.md)** - WSL2 file locking workarounds
+## Quick Start
 
-## Quick Links
-
-### For New Users
-Start here: [DEMO_GUIDE.md](DEMO_GUIDE.md)
 ```bash
-./scripts/run_demo_simultaneous.sh
+# Docker Compose (from umbrella repo root)
+docker compose --env-file .env.demo -f docker-compose.demo.yml up
+
+# Or manually (from this worktree)
+./build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir ./data --dump --recon-host localhost --recon-port 9002
 ```
 
-### For Developers
-See: [USAGE_AND_API.md](USAGE_AND_API.md)
-- Command-line options
-- HTTP API endpoints
-- Configuration parameters
-- Performance tuning
+## Key Design Points
 
-### For Researchers/Faculty
-See: [MRI_DATA_MARSHAL_PRESENTATION.md](MRI_DATA_MARSHAL_PRESENTATION.md)
-- Architecture overview
-- Performance characteristics
-- Use cases and limitations
-- Comparison with alternatives
-
-### For Performance Optimization
-See: [IMPROVEMENTS_AND_OPTIMIZATION.md](IMPROVEMENTS_AND_OPTIMIZATION.md)
-- Current limitations analysis
-- Improvement strategies with effort/gain estimates
-- Performance debugging guide
-
-## Key Facts
-
-- **Performance:** 19 fps @ 50ms intervals, 40 MB/s throughput
-- **Real-time:** SWMR HDF5 with HTTP APIs
-- **Multi-client:** Simultaneous visualization + data fusion
-- **Storage:** HDF5 with SWMR support
-- **Visualization:** OpenCV real-time display with slice navigation
-
-## System Components
-
-1. **MRI Marshal** - Data ingestion and HDF5 SWMR storage
-2. **Image Streamer** - Synthetic frame generator
-3. **Visualizer** - Real-time OpenCV display
-4. **Robot Marshal** - State blackboard for sensor fusion
-
-## Archive
-
-Previous documentation and test data have been archived in the `archive/` folder to keep the repo clean:
-- `archive/root_docs/` - Previous markdown documentation
-- `archive/docs_backup/` - Previous docs folder contents
-- `archive/test_data/` - Test data and experiment directories
-
-All previous work is preserved and can be referenced if needed.
+- **MRD TCP** for scanner ↔ marshal ↔ recon (same wire protocol as python-ismrmrd-server)
+- **HTTP** for query/control only (viz, pose, transform, health, dump)
+- **Canonical HDF5** via libismrmrd appendAcquisition/appendImage/appendWaveform
+- **Canonical latest-image H5** for live viz (closed companion file, atomically replaced per incoming IMAGE)
+- **Fault tolerant** — marshal stays up if recon crashes
+- **Bidirectional** — reconstructed images pushed back to scanner on the same MRD TCP socket

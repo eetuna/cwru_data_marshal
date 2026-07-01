@@ -1,906 +1,300 @@
+/*
+ * File: src/mrd_sink.cpp
+ * Project: CWRU Data Marshal - MRI Marshal
+ * Purpose: Implementation of canonical ISMRMRD HDF5 sink + standalone-file writer
+ */
+
 #undef LOG_COMPONENT
 #define LOG_COMPONENT "mrd_sink"
 #include "logging.hpp"
-
 #include "mrd_sink.hpp"
+#include "mrd_stream_tags.hpp"
+#include "wire_guards.hpp"
 
-#include <algorithm>
-#include <array>
-#include <chrono>
-#include <cctype>
-#include <cstdint>
-#include <fstream>
-#include <iomanip>
-#include <iostream>
-#include <mutex>
-#include <sstream>
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <hdf5.h>
 #include <stdexcept>
-#include <string_view>
+#include <sys/stat.h>
+#include <unistd.h>
 
-#include "mrd_io.hpp"
-#include <ismrmrd/ismrmrd.h>
+namespace mrd {
 
-namespace mrd
-{
-namespace
-{
-constexpr unsigned long long kTargetChunkBytes = 8ULL * 1024ULL * 1024ULL; // 8 MiB target chunk size
+// ---------------------------------------------------------------------------
+// MrdSink
+// ---------------------------------------------------------------------------
 
-hid_t element_hdf_type(ElementType type)
+MrdSink::MrdSink(const std::filesystem::path& path, const std::string& groupname)
+    : path_(path), groupname_(groupname)
 {
-    switch (type)
-    {
-    case ElementType::Float32:
-        return H5T_IEEE_F32LE;
-    case ElementType::Int16:
-        return H5T_STD_I16LE;
-    case ElementType::UInt16:
-        return H5T_STD_U16LE;
-    case ElementType::ComplexFloat32:
-    {
-        struct ComplexTypeHolder
-        {
-            hid_t type{-1};
-            ComplexTypeHolder()
-            {
-                type = H5Tcreate(H5T_COMPOUND, sizeof(float) * 2);
-                if (type < 0)
-                    throw std::runtime_error("H5Tcreate complex32 failed");
-                if (H5Tinsert(type, "r", 0, H5T_IEEE_F32LE) < 0)
-                {
-                    H5Tclose(type);
-                    throw std::runtime_error("H5Tinsert complex32 real failed");
-                }
-                if (H5Tinsert(type, "i", sizeof(float), H5T_IEEE_F32LE) < 0)
-                {
-                    H5Tclose(type);
-                    throw std::runtime_error("H5Tinsert complex32 imag failed");
-                }
-            }
-            ~ComplexTypeHolder()
-            {
-                if (type >= 0)
-                    H5Tclose(type);
-            }
-        };
-        static ComplexTypeHolder holder;
-        return holder.type;
-    }
-    }
-    throw std::runtime_error("unsupported element type");
+    namespace fs = std::filesystem;
+    fs::create_directories(path.parent_path());
+    dataset_ = std::make_unique<ISMRMRD::Dataset>(path.c_str(), groupname.c_str(), true);
+    if (path.filename().string().rfind("latest_image.h5", 0) == 0)
+        LOG_DEBUG("Opened HDF5 sink: " << path.string());
+    else
+        LOG_INFO("Opened HDF5 sink: " << path.string());
 }
 
-ImageDimensions normalize_dims(ImageDimensions dims)
-{
-    if (dims.spatial[2] == 0)
-        dims.spatial[2] = 1;
-    if (dims.channels == 0)
-        dims.channels = 1;
-    return dims;
-}
-
-std::array<hsize_t, 5> compute_chunk_shape(const ImageDimensions &dims, ElementType type)
-{
-    std::array<hsize_t, 5> chunk = {1,
-                                    dims.channels ? dims.channels : static_cast<hsize_t>(1),
-                                    dims.spatial[2] ? dims.spatial[2] : static_cast<hsize_t>(1),
-                                    dims.spatial[1] ? dims.spatial[1] : static_cast<hsize_t>(1),
-                                    dims.spatial[0] ? dims.spatial[0] : static_cast<hsize_t>(1)};
-
-    const unsigned long long element_bytes = static_cast<unsigned long long>(element_type_bytes(type));
-    auto chunk_bytes = [&]() -> unsigned long long
-    {
-        return static_cast<unsigned long long>(chunk[0]) * static_cast<unsigned long long>(chunk[1]) *
-               static_cast<unsigned long long>(chunk[2]) * static_cast<unsigned long long>(chunk[3]) *
-               static_cast<unsigned long long>(chunk[4]) * element_bytes;
-    };
-
-    auto try_reduce = [&](size_t idx) -> bool
-    {
-        if (chunk[idx] > 1)
-        {
-            chunk[idx] = (chunk[idx] + 1) / 2;
-            return true;
-        }
-        return false;
-    };
-
-    while (chunk_bytes() > kTargetChunkBytes)
-    {
-        bool reduced = try_reduce(4) || try_reduce(3) || try_reduce(2) || try_reduce(1);
-        if (!reduced)
-            break;
-    }
-
-    return chunk;
-}
-
-std::filesystem::path make_stream_file_path(const std::filesystem::path &root,
-                                            const std::string &canonical,
-                                            const ImageDimensions &dims,
-                                            size_t generation)
-{
-    std::ostringstream oss;
-    oss << canonical;
-    const auto z = dims.spatial[2] ? dims.spatial[2] : static_cast<hsize_t>(1);
-    oss << '-' << static_cast<unsigned long long>(dims.spatial[0]) << 'x'
-        << static_cast<unsigned long long>(dims.spatial[1]) << 'x'
-        << static_cast<unsigned long long>(z);
-    oss << "-g" << std::setw(4) << std::setfill('0') << generation;
-    oss << ".mrd";
-    return root / oss.str();
-}
-
-} // namespace
-
-MrdFile::MrdFile(const std::filesystem::path &path,
-                 const std::string &stream_id,
-                 ElementType type,
-                 const ImageDimensions &dims,
-                 std::string header_xml,
-                 FlushPolicy flush_policy)
-    : path_(path),
-      stream_id_(stream_id),
-      type_(type),
-      dims_(dims),
-      header_xml_(std::move(header_xml))
-{
-    if (dims_.spatial[0] == 0 || dims_.spatial[1] == 0 || dims_.channels == 0)
-        throw std::runtime_error("invalid MRD dimensions");
-    if (dims_.spatial[2] == 0)
-        dims_.spatial[2] = 1;
-    frame_bytes_ = element_type_bytes(type_) * static_cast<size_t>(dims_.spatial[0]) *
-                   static_cast<size_t>(dims_.spatial[1]) * static_cast<size_t>(dims_.spatial[2]) *
-                   static_cast<size_t>(dims_.channels);
-    set_flush_policy(flush_policy);
-    open();
-}
-
-MrdFile::~MrdFile()
+MrdSink::~MrdSink()
 {
     close();
 }
 
-void MrdFile::set_flush_policy(FlushPolicy policy)
+void MrdSink::set_header(const std::string& xml)
 {
-    if (policy.max_pending_frames == 0)
-        policy.max_pending_frames = 1;
-    if (policy.max_pending_interval < std::chrono::milliseconds{0})
-        policy.max_pending_interval = std::chrono::milliseconds{0};
-    flush_policy_ = policy;
-    frames_since_flush_ = 0;
-    last_flush_ = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!dataset_) return;
+    dataset_->writeHeader(xml);
 }
 
-void MrdFile::flush()
+void MrdSink::write_string_dataset(const std::string& name, const std::string& value)
 {
-    std::lock_guard<std::mutex> lk(write_mutex_);
-    perform_flush(true);
-}
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!dataset_) return;
 
-void MrdFile::open()
-{
-    namespace fs = std::filesystem;
-    fs::create_directories(path_.parent_path());
+    hid_t file = H5Fopen(path_.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+    if (file < 0) throw std::runtime_error("H5Fopen failed for " + path_.string());
 
-    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
-    if (fapl < 0)
-        throw std::runtime_error("H5Pcreate failed");
-
-    if (H5Pset_libver_bounds(fapl, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST) < 0)
-    {
-        H5Pclose(fapl);
-        throw std::runtime_error("H5Pset_libver_bounds failed");
+    hid_t group = H5Gopen2(file, groupname_.c_str(), H5P_DEFAULT);
+    if (group < 0) group = H5Gcreate2(file, groupname_.c_str(), H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    if (group < 0) {
+        H5Fclose(file);
+        throw std::runtime_error("H5Gopen/create failed for " + groupname_);
     }
 
-    if (H5Pset_fclose_degree(fapl, H5F_CLOSE_SEMI) < 0)
-    {
-        H5Pclose(fapl);
-        throw std::runtime_error("H5Pset_fclose_degree failed");
+    if (H5Lexists(group, name.c_str(), H5P_DEFAULT) > 0) {
+        H5Ldelete(group, name.c_str(), H5P_DEFAULT);
     }
 
-    file_ = H5Fcreate(path_.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
-    H5Pclose(fapl);
-    if (file_ < 0)
-        throw std::runtime_error("H5Fcreate failed");
+    hsize_t dims[1] = {1};
+    hid_t space = H5Screate_simple(1, dims, nullptr);
+    hid_t type = H5Tcopy(H5T_C_S1);
+    H5Tset_size(type, H5T_VARIABLE);
+    H5Tset_cset(type, H5T_CSET_UTF8);
 
-    hid_t images_group = H5Gcreate2(file_, "/images", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-    if (images_group < 0)
-    {
-        close();
-        throw std::runtime_error("H5Gcreate2(/images) failed");
-    }
-    H5Gclose(images_group);
-
-    hid_t header_space = H5Screate(H5S_SCALAR);
-    if (header_space < 0)
-    {
-        close();
-        throw std::runtime_error("H5Screate header failed");
-    }
-    hid_t str_type = H5Tcopy(H5T_C_S1);
-    if (str_type < 0)
-    {
-        H5Sclose(header_space);
-        close();
-        throw std::runtime_error("H5Tcopy failed");
-    }
-    H5Tset_size(str_type, header_xml_.size() + 1);
-    H5Tset_strpad(str_type, H5T_STR_NULLTERM);
-    hid_t header_dset = H5Dcreate2(file_, "/header", str_type, header_space, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-    if (header_dset < 0)
-    {
-        H5Tclose(str_type);
-        H5Sclose(header_space);
-        close();
-        throw std::runtime_error("H5Dcreate2(/header) failed");
-    }
-    if (H5Dwrite(header_dset, str_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, header_xml_.c_str()) < 0)
-    {
-        H5Dclose(header_dset);
-        H5Tclose(str_type);
-        H5Sclose(header_space);
-        close();
-        throw std::runtime_error("H5Dwrite(/header) failed");
-    }
-    H5Dclose(header_dset);
-    H5Tclose(str_type);
-    H5Sclose(header_space);
-
-    const hsize_t z = dims_.spatial[2];
-    hsize_t initial_dims[5] = {0, dims_.channels, z, dims_.spatial[1], dims_.spatial[0]};
-    hsize_t max_dims[5] = {H5S_UNLIMITED, dims_.channels, z, dims_.spatial[1], dims_.spatial[0]};
-    auto chunk = compute_chunk_shape(dims_, type_);
-
-    hid_t space = H5Screate_simple(5, initial_dims, max_dims);
-    if (space < 0)
-    {
-        close();
-        throw std::runtime_error("H5Screate_simple failed");
-    }
-
-    hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
-    if (dcpl < 0)
-    {
+    hid_t dset = H5Dcreate2(group, name.c_str(), type, space,
+                            H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    if (dset < 0) {
+        H5Tclose(type);
         H5Sclose(space);
-        close();
-        throw std::runtime_error("H5Pcreate (dcpl) failed");
+        H5Gclose(group);
+        H5Fclose(file);
+        throw std::runtime_error("H5Dcreate failed for " + name);
     }
 
-    if (H5Pset_chunk(dcpl, 5, chunk.data()) < 0 ||
-        H5Pset_fill_time(dcpl, H5D_FILL_TIME_NEVER) < 0 ||
-        H5Pset_alloc_time(dcpl, H5D_ALLOC_TIME_EARLY) < 0)
-    {
-        H5Pclose(dcpl);
-        H5Sclose(space);
-        close();
-        throw std::runtime_error("chunk configuration failed");
-    }
+    const char* ptr = value.c_str();
+    herr_t rc = H5Dwrite(dset, type, H5S_ALL, H5S_ALL, H5P_DEFAULT, &ptr);
 
-    dataset_ = H5Dcreate2(file_, "/images/data", element_hdf_type(type_), space, H5P_DEFAULT, dcpl, H5P_DEFAULT);
-    H5Pclose(dcpl);
+    H5Dclose(dset);
+    H5Tclose(type);
     H5Sclose(space);
-    if (dataset_ < 0)
-    {
-        close();
-        throw std::runtime_error("H5Dcreate2 failed");
-    }
-
-    if (H5Fflush(file_, H5F_SCOPE_GLOBAL) < 0)
-    {
-        close();
-        throw std::runtime_error("H5Fflush failed before SWMR start");
-    }
-
-    if (H5Fstart_swmr_write(file_) < 0)
-    {
-        close();
-        throw std::runtime_error("H5Fstart_swmr_write failed");
-    }
-
-    H5Fflush(file_, H5F_SCOPE_GLOBAL);
-}
-
-void MrdFile::close()
-{
-    perform_flush(true);
-    if (dataset_ >= 0)
-    {
-        H5Dclose(dataset_);
-        dataset_ = -1;
-    }
-    if (file_ >= 0)
-    {
-        H5Fflush(file_, H5F_SCOPE_GLOBAL);
-        H5Fclose(file_);
-        file_ = -1;
-    }
-}
-
-FrameAppendResult MrdFile::append_frame(const void *data, size_t bytes)
-{
-    std::lock_guard<std::mutex> guard(write_mutex_);
-    const size_t need = frame_bytes_;
-    if (bytes != need)
-        throw std::runtime_error("frame payload size mismatch");
-
-    hsize_t new_dims[5] = {frames_ + 1, dims_.channels, dims_.spatial[2],
-                           dims_.spatial[1], dims_.spatial[0]};
-    if (H5Dset_extent(dataset_, new_dims) < 0)
-        throw std::runtime_error("H5Dset_extent failed");
-
-    hid_t filespace = H5Dget_space(dataset_);
-    if (filespace < 0)
-        throw std::runtime_error("H5Dget_space failed");
-
-    hsize_t start[5] = {frames_, 0, 0, 0, 0};
-    hsize_t count[5] = {1, dims_.channels, new_dims[2], new_dims[3], new_dims[4]};
-    if (H5Sselect_hyperslab(filespace, H5S_SELECT_SET, start, nullptr, count, nullptr) < 0)
-    {
-        H5Sclose(filespace);
-        throw std::runtime_error("H5Sselect_hyperslab failed");
-    }
-
-    hid_t memspace = H5Screate_simple(5, count, nullptr);
-    if (memspace < 0)
-    {
-        H5Sclose(filespace);
-        throw std::runtime_error("H5Screate_simple (mem) failed");
-    }
-
-    if (H5Dwrite(dataset_, element_hdf_type(type_), memspace, filespace, H5P_DEFAULT, data) < 0)
-    {
-        H5Sclose(memspace);
-        H5Sclose(filespace);
-        throw std::runtime_error("H5Dwrite failed");
-    }
-
-    H5Sclose(memspace);
-    H5Sclose(filespace);
-
-    frames_since_flush_++;
-    const bool flushed = perform_flush(false);
-
-    FrameAppendResult result;
-    result.file_path = path_;
-    result.stream_id = stream_id_;
-    result.frame_index = frames_;
-    result.bytes = bytes;
-    result.element_type = type_;
-    result.dims = dims_;
-    result.timestamp = iso8601_now_ms();
-    result.flushed = flushed;
-
-    frames_++;
-    return result;
-}
-
-bool MrdFile::perform_flush(bool force)
-{
-    if (dataset_ < 0 || file_ < 0)
-        return false;
-
-    bool should_flush = force;
-    if (!should_flush)
-    {
-        if (frames_since_flush_ >= flush_policy_.max_pending_frames)
-        {
-            should_flush = true;
-        }
-        else if (flush_policy_.max_pending_interval.count() > 0)
-        {
-            auto now = std::chrono::steady_clock::now();
-            if (now - last_flush_ >= flush_policy_.max_pending_interval)
-                should_flush = true;
-        }
-    }
-
-    if (!should_flush)
-        return false;
-
-    if (H5Dflush(dataset_) < 0)
-        throw std::runtime_error("H5Dflush failed");
-
-    frames_since_flush_ = 0;
-    last_flush_ = std::chrono::steady_clock::now();
-    return true;
-}
-
-MrdSink::MrdSink(MarshalState &state)
-    : state_(state)
-{
-}
-
-std::shared_ptr<MrdSink::StreamState> MrdSink::ensure_stream(const std::string &stream_id,
-                                                             const ImageDimensions &dims,
-                                                             ElementType type,
-                                                             const std::filesystem::path &sink_root,
-                                                             std::string_view header_xml,
-                                                             std::string_view session_token)
-{
-    ImageDimensions normalized = normalize_dims(dims);
-    std::shared_ptr<StreamState> state;
-    bool create_new_state = false;
-    bool reopen_file = false;
-    bool header_was_empty = false;
-    bool update_session_only = false;
-    bool refresh_flush_policy = false;
-    bool root_changed = false;
-    size_t next_generation = 0;
-
-    {
-        std::lock_guard<std::mutex> guard(map_mutex_);
-        auto it = streams_.find(stream_id);
-        if (it != streams_.end())
-        {
-            state = it->second;
-            if (state->type != type)
-                throw std::runtime_error("stream element type mismatch");
-
-            root_changed = state->sink_root != sink_root;
-            bool dims_changed = state->dims.spatial != normalized.spatial || state->dims.channels != normalized.channels;
-            bool session_changed = !session_token.empty() && state->active_session != session_token;
-
-            reopen_file = dims_changed || root_changed || session_changed;
-            if (reopen_file)
-                next_generation = root_changed ? 0 : state->generation + 1;
-
-            header_was_empty = !header_xml.empty() && state->header_xml.empty();
-            update_session_only = !session_token.empty() && !reopen_file && state->active_session != session_token;
-            refresh_flush_policy = state->flush_policy.max_pending_frames != state_.flush_policy.max_pending_frames ||
-                                   state->flush_policy.max_pending_interval != state_.flush_policy.max_pending_interval;
-        }
-        else
-        {
-            const std::string canonical = canonical_scan_name(stream_id);
-            state = std::make_shared<StreamState>();
-            state->canonical_name = canonical;
-            streams_.emplace(stream_id, state);
-            create_new_state = true;
-        }
-    }
-
-    if (create_new_state)
-    {
-        std::lock_guard<std::mutex> state_guard(state->mutex);
-        state->dims = normalized;
-        state->type = type;
-        state->header_xml = header_xml.empty() ? default_ismrmrd_header(state->dims, state->type, stream_id)
-                                               : std::string(header_xml);
-        state->sink_root = sink_root;
-        state->generation = 0;
-        state->flush_policy = state_.flush_policy;
-        if (!session_token.empty())
-            state->active_session = std::string(session_token);
-
-        auto file_path = make_stream_file_path(state->sink_root, state->canonical_name, state->dims, state->generation);
-        state->file = std::make_unique<MrdFile>(file_path, stream_id, state->type, state->dims, state->header_xml, state->flush_policy);
-        return state;
-    }
-
-    if (reopen_file)
-    {
-        std::lock_guard<std::mutex> state_guard(state->mutex);
-        state->file.reset();
-        state->dims = normalized;
-        state->sink_root = sink_root;
-        state->generation = next_generation;
-        if (!session_token.empty())
-            state->active_session = std::string(session_token);
-
-        std::string next_header = header_xml.empty()
-                                      ? default_ismrmrd_header(state->dims, state->type, stream_id)
-                                      : std::string(header_xml);
-        state->header_xml = std::move(next_header);
-
-        state->flush_policy = state_.flush_policy;
-        auto file_path = make_stream_file_path(state->sink_root, state->canonical_name, state->dims, state->generation);
-        state->file = std::make_unique<MrdFile>(file_path, stream_id, state->type, state->dims, state->header_xml, state->flush_policy);
-    }
-    else if (header_was_empty)
-    {
-        std::lock_guard<std::mutex> state_guard(state->mutex);
-        state->header_xml = std::string(header_xml);
-    }
-
-    if (update_session_only)
-    {
-        std::lock_guard<std::mutex> state_guard(state->mutex);
-        state->active_session = std::string(session_token);
-    }
-
-    if (refresh_flush_policy)
-    {
-        std::lock_guard<std::mutex> state_guard(state->mutex);
-        state->flush_policy = state_.flush_policy;
-        if (state->file)
-            state->file->set_flush_policy(state->flush_policy);
-    }
-
-    return state;
-}
-
-void MrdSink::cleanup_idle_streams(std::chrono::seconds idle_timeout)
-{
-    auto now = std::chrono::steady_clock::now();
-    std::vector<std::shared_ptr<StreamState>> streams_to_destroy;
-
-    {
-        std::lock_guard<std::mutex> lk(map_mutex_);
-        auto it = streams_.begin();
-        while (it != streams_.end())
-        {
-            const auto &stream_state = it->second;
-            bool expired = false;
-            {
-                std::lock_guard<std::mutex> state_lk(stream_state->mutex);
-                auto age = std::chrono::duration_cast<std::chrono::seconds>(
-                    now - stream_state->last_accessed);
-                expired = age > idle_timeout;
-            }
-
-            if (expired)
-            {
-                streams_to_destroy.push_back(stream_state);
-                it = streams_.erase(it);
-            }
-            else
-            {
-                ++it;
-            }
-        }
-    }
-}
-
-void MrdSink::flush_all()
-{
-    std::vector<std::shared_ptr<StreamState>> streams_copy;
-    {
-        std::lock_guard<std::mutex> lk(map_mutex_);
-        for (const auto& [stream_id, stream_state] : streams_)
-        {
-            streams_copy.push_back(stream_state);
-        }
-    }
-
-    for (const auto& stream_state : streams_copy)
-    {
-        std::lock_guard<std::mutex> state_lk(stream_state->mutex);
-        if (stream_state->file)
-        {
-            try {
-                stream_state->file->flush();
-            } catch (const std::exception& e) {
-                LOG_ERROR("flush_all: failed to flush stream: " << e.what());
-            }
-        }
-    }
-}
-
-FrameAppendResult MrdSink::append_frame(const std::string &stream_id,
-                                        const ImageDimensions &dims,
-                                        ElementType type,
-                                        std::string_view header_xml,
-                                        const void *data,
-                                        size_t bytes,
-                                        std::string_view session_token)
-{
-    auto sink = resolve_sink_paths(state_);
-    auto stream_state = ensure_stream(stream_id, dims, type, sink.sink_root, header_xml, session_token);
-
-    std::lock_guard<std::mutex> guard(stream_state->mutex);
-    if (!header_xml.empty() && stream_state->header_xml != header_xml)
-    {
-        if (stream_state->header_xml.empty())
-        {
-            stream_state->header_xml.assign(header_xml);
-        }
-        else if (stream_state->header_xml != header_xml)
-        {
-            throw std::runtime_error("stream header mismatch");
-        }
-    }
-
-    // Update last_accessed timestamp for LRU eviction tracking
-    stream_state->last_accessed = std::chrono::steady_clock::now();
-
-    auto result = stream_state->file->append_frame(data, bytes);
-
-    auto seq = ingest_sequence().fetch_add(1);
-    nlohmann::json entry = make_entry_json(result);
-    entry["seq"] = seq;
-    const std::string entry_dump = entry.dump();
-
-    // Update in-memory cache (for /v1/mrd/latest endpoint)
-    {
-        std::lock_guard<std::mutex> lock(state_.latest_mrd_mutex);
-        state_.latest_mrd_json = entry_dump;
-    }
-
-    // Enqueue for background write (NON-BLOCKING!)
-    {
-        std::lock_guard<std::mutex> lock(state_.json_queue_mutex);
-        state_.json_write_queue.push({MarshalState::WriteType::MRD, entry_dump});
-    }
-    state_.json_queue_cv.notify_one();
-
-    // WebSocket emit
-    try
-    {
-        state_.ws_emit_topic(entry_dump, "mrd");
-    }
-    catch (const std::exception &e)
-    {
-        LOG_WARN("MRD sink WS emit failed: " << e.what());
-    }
-
-    return result;
-}
-
-FrameReadResult MrdSink::read_frame(const std::filesystem::path &mrd_path, int64_t frame_index)
-{
-    FrameReadResult result;
-
-    if (!std::filesystem::exists(mrd_path))
-        return result;
-
-    // Open in SWMR read mode - safe while writer is writing
-    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
-    if (fapl < 0)
-        return result;
-
-    H5Pset_libver_bounds(fapl, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
-    H5Pset_fclose_degree(fapl, H5F_CLOSE_SEMI);
-
-    hid_t file = H5Fopen(mrd_path.c_str(), H5F_ACC_RDONLY | H5F_ACC_SWMR_READ, fapl);
-    H5Pclose(fapl);
-
-    if (file < 0)
-        return result;
-
-    hid_t dataset = H5Dopen2(file, "/images/data", H5P_DEFAULT);
-    if (dataset < 0)
-    {
-        H5Fclose(file);
-        return result;
-    }
-
-    // Refresh to see latest writer data
-    H5Drefresh(dataset);
-
-    // Get current dimensions: [frames, channels, z, y, x]
-    hid_t space = H5Dget_space(dataset);
-    if (space < 0)
-    {
-        H5Dclose(dataset);
-        H5Fclose(file);
-        return result;
-    }
-
-    hsize_t dims[5] = {0};
-    H5Sget_simple_extent_dims(space, dims, nullptr);
-
-    uint64_t num_frames = dims[0];
-    if (num_frames == 0)
-    {
-        H5Sclose(space);
-        H5Dclose(dataset);
-        H5Fclose(file);
-        return result;
-    }
-
-    // Determine which frame to read
-    uint64_t idx = (frame_index < 0) ? (num_frames - 1) : static_cast<uint64_t>(frame_index);
-    if (idx >= num_frames)
-        idx = num_frames - 1;
-
-    // Get datatype info
-    hid_t dtype = H5Dget_type(dataset);
-    size_t elem_size = H5Tget_size(dtype);
-
-    // Determine element type
-    H5T_class_t type_class = H5Tget_class(dtype);
-    if (type_class == H5T_FLOAT)
-        result.element_type = ElementType::Float32;
-    else if (type_class == H5T_INTEGER)
-    {
-        if (H5Tget_sign(dtype) == H5T_SGN_NONE)
-            result.element_type = ElementType::UInt16;
-        else
-            result.element_type = ElementType::Int16;
-    }
-    else if (type_class == H5T_COMPOUND)
-        result.element_type = ElementType::ComplexFloat32;
-
-    H5Tclose(dtype);
-
-    // Calculate frame size
-    size_t frame_elements = dims[1] * dims[2] * dims[3] * dims[4];
-    size_t frame_bytes = frame_elements * elem_size;
-
-    // Select hyperslab for single frame
-    hsize_t start[5] = {idx, 0, 0, 0, 0};
-    hsize_t count[5] = {1, dims[1], dims[2], dims[3], dims[4]};
-
-    if (H5Sselect_hyperslab(space, H5S_SELECT_SET, start, nullptr, count, nullptr) < 0)
-    {
-        H5Sclose(space);
-        H5Dclose(dataset);
-        H5Fclose(file);
-        return result;
-    }
-
-    // Create memory space
-    hid_t memspace = H5Screate_simple(5, count, nullptr);
-    if (memspace < 0)
-    {
-        H5Sclose(space);
-        H5Dclose(dataset);
-        H5Fclose(file);
-        return result;
-    }
-
-    // Allocate and read data
-    result.data.resize(frame_bytes);
-    hid_t mem_dtype = H5Dget_type(dataset);
-    herr_t status = H5Dread(dataset, mem_dtype, memspace, space, H5P_DEFAULT, result.data.data());
-    H5Tclose(mem_dtype);
-
-    H5Sclose(memspace);
-    H5Sclose(space);
-    H5Dclose(dataset);
+    H5Gclose(group);
     H5Fclose(file);
 
-    if (status < 0)
-    {
-        result.data.clear();
-        return result;
+    if (rc < 0) throw std::runtime_error("H5Dwrite failed for " + name);
+}
+
+void MrdSink::append_acquisition(const ISMRMRD::Acquisition& acq)
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!dataset_) return;
+    dataset_->appendAcquisition(acq);
+    ++acq_count_;
+}
+
+void MrdSink::append_image(const std::string& varname, const ISMRMRD::ImageHeader& hdr,
+                           const char* attr_str, size_t attr_len,
+                           const void* pixel_data, size_t pixel_bytes)
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!dataset_) return;
+
+    // MEDIUM #16: recompute expected pixel_bytes from the header and reject
+    // if it doesn't match the caller-supplied pixel_bytes. Pre-fix this
+    // function trusted both inputs, so a caller with an overflowed
+    // pixel_bytes computation could memcpy past the Image<T> buffer.
+    size_t expected_pixel_bytes = 0;
+    if (!compute_pixel_bytes(hdr.matrix_size[0], hdr.matrix_size[1],
+                             hdr.matrix_size[2], hdr.channels,
+                             ISMRMRD::ismrmrd_sizeof_data_type(hdr.data_type),
+                             expected_pixel_bytes)) {
+        LOG_WARN("append_image rejected: invalid header dimensions");
+        return;
+    }
+    if (expected_pixel_bytes != pixel_bytes) {
+        LOG_WARN("append_image rejected: pixel_bytes mismatch (caller "
+                 << pixel_bytes << ", header implies " << expected_pixel_bytes << ")");
+        return;
     }
 
-    // Fill result metadata
-    result.frame_index = idx;
-    result.total_frames = num_frames;
-    result.dims.spatial = {dims[4], dims[3], dims[2]}; // x, y, z
-    result.dims.channels = dims[1];
-    result.success = true;
-
-    return result;
-}
-
-std::string MrdSink::canonical_scan_name(const std::string &stream_id)
-{
-    std::string out;
-    out.reserve(stream_id.size());
-    for (char c : stream_id)
-    {
-        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')
-            out.push_back(c);
-        else
-            out.push_back('_');
+    // Dispatch on data_type to construct the correctly-typed Image<T>
+    switch (hdr.data_type) {
+    case ISMRMRD::ISMRMRD_USHORT: {
+        ISMRMRD::Image<uint16_t> img;
+        img.setHead(hdr);
+        if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
+        std::memcpy(img.getDataPtr(), pixel_data, pixel_bytes);
+        dataset_->appendImage(varname, img);
+        break;
     }
-    if (out.empty())
-        out = "scan";
-    return out;
-}
-
-std::string MrdSink::element_type_string(ElementType t)
-{
-    return element_type_to_string(t);
-}
-
-nlohmann::json MrdSink::make_entry_json(const FrameAppendResult &result) const
-{
-    nlohmann::json dims_json = {
-        {"x", result.dims.spatial[0]},
-        {"y", result.dims.spatial[1]},
-        {"z", result.dims.spatial[2] ? result.dims.spatial[2] : 1},
-        {"channels", result.dims.channels}};
-
-    return {
-        {"type", "mrd"},
-        {"path", result.file_path.string()},
-        {"stream", result.stream_id},
-        {"ts", result.timestamp},
-        {"t_ms", now_ms_epoch()},
-        {"frame_index", result.frame_index},
-        {"flushed", result.flushed},
-        {"element_type", element_type_string(result.element_type)},
-        {"dims", dims_json},
-        {"size_bytes", result.bytes}};
-}
-
-ElementType parse_element_type(const std::string &value)
-{
-    if (value == "float32" || value == "float" || value == "f32")
-        return ElementType::Float32;
-    if (value == "int16" || value == "i16" || value == "short")
-        return ElementType::Int16;
-    if (value == "uint16" || value == "u16")
-        return ElementType::UInt16;
-    if (value == "complex64" || value == "cfloat" || value == "cf32")
-        return ElementType::ComplexFloat32;
-    throw std::runtime_error("unsupported element type: " + value);
-}
-
-std::string element_type_to_string(ElementType type)
-{
-    switch (type)
-    {
-    case ElementType::Float32:
-        return "float32";
-    case ElementType::Int16:
-        return "int16";
-    case ElementType::UInt16:
-        return "uint16";
-    case ElementType::ComplexFloat32:
-        return "complex64";
+    case ISMRMRD::ISMRMRD_SHORT: {
+        ISMRMRD::Image<int16_t> img;
+        img.setHead(hdr);
+        if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
+        std::memcpy(img.getDataPtr(), pixel_data, pixel_bytes);
+        dataset_->appendImage(varname, img);
+        break;
     }
-    return "unknown";
-}
-
-size_t element_type_bytes(ElementType type)
-{
-    switch (type)
-    {
-    case ElementType::Float32:
-        return sizeof(float);
-    case ElementType::Int16:
-        return sizeof(int16_t);
-    case ElementType::UInt16:
-        return sizeof(uint16_t);
-    case ElementType::ComplexFloat32:
-        return sizeof(float) * 2;
+    case ISMRMRD::ISMRMRD_UINT: {
+        ISMRMRD::Image<uint32_t> img;
+        img.setHead(hdr);
+        if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
+        std::memcpy(img.getDataPtr(), pixel_data, pixel_bytes);
+        dataset_->appendImage(varname, img);
+        break;
     }
-    throw std::runtime_error("unsupported element type");
-}
-
-ElementType element_type_from_ismrmrd(uint16_t data_type)
-{
-    switch (data_type)
-    {
-    case ISMRMRD::ISMRMRD_DataTypes::ISMRMRD_FLOAT:
-        return ElementType::Float32;
-    case ISMRMRD::ISMRMRD_DataTypes::ISMRMRD_SHORT:
-        return ElementType::Int16;
-    case ISMRMRD::ISMRMRD_DataTypes::ISMRMRD_USHORT:
-        return ElementType::UInt16;
-    case ISMRMRD::ISMRMRD_DataTypes::ISMRMRD_CXFLOAT:
-        return ElementType::ComplexFloat32;
+    case ISMRMRD::ISMRMRD_INT: {
+        ISMRMRD::Image<int32_t> img;
+        img.setHead(hdr);
+        if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
+        std::memcpy(img.getDataPtr(), pixel_data, pixel_bytes);
+        dataset_->appendImage(varname, img);
+        break;
+    }
+    case ISMRMRD::ISMRMRD_FLOAT: {
+        ISMRMRD::Image<float> img;
+        img.setHead(hdr);
+        if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
+        std::memcpy(img.getDataPtr(), pixel_data, pixel_bytes);
+        dataset_->appendImage(varname, img);
+        break;
+    }
+    case ISMRMRD::ISMRMRD_DOUBLE: {
+        ISMRMRD::Image<double> img;
+        img.setHead(hdr);
+        if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
+        std::memcpy(img.getDataPtr(), pixel_data, pixel_bytes);
+        dataset_->appendImage(varname, img);
+        break;
+    }
+    case ISMRMRD::ISMRMRD_CXFLOAT: {
+        ISMRMRD::Image<complex_float_t> img;
+        img.setHead(hdr);
+        if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
+        std::memcpy(img.getDataPtr(), pixel_data, pixel_bytes);
+        dataset_->appendImage(varname, img);
+        break;
+    }
+    case ISMRMRD::ISMRMRD_CXDOUBLE: {
+        ISMRMRD::Image<complex_double_t> img;
+        img.setHead(hdr);
+        if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
+        std::memcpy(img.getDataPtr(), pixel_data, pixel_bytes);
+        dataset_->appendImage(varname, img);
+        break;
+    }
     default:
-        throw std::runtime_error("unsupported ISMRMRD image data_type");
+        LOG_WARN("Unknown image data_type " << hdr.data_type << ", storing as float");
+        ISMRMRD::Image<float> img;
+        img.setHead(hdr);
+        if (attr_len > 0) img.setAttributeString(std::string(attr_str, attr_len));
+        std::memcpy(img.getDataPtr(), pixel_data, pixel_bytes);
+        dataset_->appendImage(varname, img);
+        break;
+    }
+
+    ++img_count_;
+}
+
+void MrdSink::append_waveform(const ISMRMRD::Waveform& wf)
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!dataset_) return;
+    dataset_->appendWaveform(wf);
+    ++wf_count_;
+}
+
+void MrdSink::append_unknown_bytes(const void* data, size_t len)
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!dataset_) return;
+
+    // Store unknown bytes as a 1D float NDArray (reinterpret, pad to float boundary)
+    // This is a last resort — UNKNOWN data should be rare.
+    size_t nfloats = (len + sizeof(float) - 1) / sizeof(float);
+    ISMRMRD::NDArray<float> arr;
+    std::vector<size_t> dims = {nfloats};
+    arr.resize(dims);
+    std::memset(arr.getDataPtr(), 0, nfloats * sizeof(float));
+    std::memcpy(arr.getDataPtr(), data, len);
+    dataset_->appendNDArray("unknown_data", arr);
+}
+
+void MrdSink::close()
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (dataset_) {
+        dataset_.reset(); // ISMRMRD::Dataset destructor closes HDF5
+        if (path_.filename().string().rfind("latest_image.h5", 0) == 0) {
+            LOG_DEBUG("Closed HDF5 sink: " << path_.string()
+                      << " (acq=" << acq_count_
+                      << " img=" << img_count_
+                      << " wf=" << wf_count_ << ")");
+        } else {
+            LOG_INFO("Closed HDF5 sink: " << path_.string()
+                     << " (acq=" << acq_count_
+                     << " img=" << img_count_
+                     << " wf=" << wf_count_ << ")");
+        }
     }
 }
 
-std::string default_ismrmrd_header(const ImageDimensions &dims, ElementType, std::string_view stream_id)
+// ---------------------------------------------------------------------------
+// Standalone file writer (atomic rename)
+// ---------------------------------------------------------------------------
+
+void write_standalone_file(const std::filesystem::path& dest,
+                           const void* data, size_t len)
 {
-    auto safe = stream_id.empty() ? std::string("scan") : std::string(stream_id);
-    std::ostringstream oss;
-    oss << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-    oss << "<ismrmrdHeader xmlns=\"http://www.ismrm.org/ISMRMRD\">\n";
-    oss << "  <experimentalConditions>\n";
-    oss << "    <H1resonanceFrequency_Hz>123000000</H1resonanceFrequency_Hz>\n";
-    oss << "  </experimentalConditions>\n";
-    oss << "  <acquisitionSystemInformation>\n";
-    oss << "    <systemVendor>CWRU</systemVendor>\n";
-    oss << "    <systemModel>marshal</systemModel>\n";
-    oss << "  </acquisitionSystemInformation>\n";
-    oss << "  <encoding>\n";
-    oss << "    <encodedSpace>\n";
-    const auto z = dims.spatial[2] ? dims.spatial[2] : static_cast<hsize_t>(1);
-    oss << "      <matrixSize><x>" << dims.spatial[0] << "</x><y>" << dims.spatial[1] << "</y><z>" << z << "</z></matrixSize>\n";
-    oss << "      <fieldOfView_mm><x>1</x><y>1</y><z>1</z></fieldOfView_mm>\n";
-    oss << "    </encodedSpace>\n";
-    oss << "    <reconSpace>\n";
-    oss << "      <matrixSize><x>" << dims.spatial[0] << "</x><y>" << dims.spatial[1] << "</y><z>" << z << "</z></matrixSize>\n";
-    oss << "      <fieldOfView_mm><x>1</x><y>1</y><z>1</z></fieldOfView_mm>\n";
-    oss << "    </reconSpace>\n";
-    oss << "    <trajectory>cartesian</trajectory>\n";
-    oss << "  </encoding>\n";
-    oss << "  <measurementInformation>\n";
-    oss << "    <measurementID>" << safe << "</measurementID>\n";
-    oss << "  </measurementInformation>\n";
-    oss << "</ismrmrdHeader>";
-    return oss.str();
+    namespace fs = std::filesystem;
+    fs::create_directories(dest.parent_path());
+
+    fs::path tmp = dest;
+    tmp += ".tmp";
+
+    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd == -1)
+        throw std::runtime_error("open tmp failed: " + tmp.string() + ": " + std::strerror(errno));
+
+    auto* ptr = static_cast<const char*>(data);
+    size_t remaining = len;
+    while (remaining > 0) {
+        ssize_t written = ::write(fd, ptr, remaining);
+        if (written == -1) {
+            int err = errno;
+            ::close(fd);
+            ::unlink(tmp.c_str());
+            throw std::runtime_error("write tmp failed: " + tmp.string() + ": " + std::strerror(err));
+        }
+        ptr += static_cast<size_t>(written);
+        remaining -= static_cast<size_t>(written);
+    }
+
+    if (::fsync(fd) == -1) {
+        int err = errno;
+        ::close(fd);
+        ::unlink(tmp.c_str());
+        throw std::runtime_error("fsync tmp failed: " + tmp.string() + ": " + std::strerror(err));
+    }
+
+    ::close(fd);
+
+    std::error_code ec;
+    fs::rename(tmp, dest, ec);
+    if (ec)
+        throw std::runtime_error("rename tmp->dst failed: " + ec.message());
 }
 
 } // namespace mrd

@@ -4,19 +4,12 @@ A high-performance, dual-marshal architecture for synchronized MRI and robotic d
 
 ---
 
-## 🛠️ Operational Modes
+## 🛠️ Storage & Transport
 
-The marshal runs in one of two explicit modes to ensure data integrity:
-
-### Mode A: Live Mode
-*   **Purpose:** Real-time data streaming and feedback.
-*   **Workflow:** Scanner → Marshal → **Live Files** → Clients.
-*   **Storage:** Data is written to `./data/mrd`.
-
-### Mode B: Dumpbox Mode
-*   **Purpose:** High-integrity archival recording and offline playback.
-*   **Workflow:** Scanner → Marshal → **Session Folders** → Playback → Live.
-*   **Storage:** Data is siloed into `./data/dumpbox/<session>`.
+- Scanner and reconstruction traffic use **MRD TCP**; the marshal listens on `--mrd-port` and forwards to recon over the same wire protocol.
+- `--dump` selects the persistence mode (mutually exclusive):
+  - **Live mode (default, no `--dump`):** writes images **and** waveforms (e.g. ECG) to `live/from_scanner/` and `live/from_reconstruction/`. Publishes the closed `latest_image.h5` snapshot under `live/` and serves `GET /image/latest`.
+  - **Dump mode (`--dump`):** archive-only. Writes the full stream — raw acquisitions, images, waveforms, text/config — to `dump/from_scanner/` and `dump/from_reconstruction/`. The live snapshot pipeline is disabled and `GET /image/latest` returns `404`.
 
 ---
 
@@ -29,10 +22,12 @@ To see the system in action (including real-time streaming, bio-signals, and the
 ```
 Robot marshal binaries are expected from an external repo. By default, the demo looks for `../robot_data_marshal_with_catheter_system_components`. If it is missing, the demo will create a git worktree from the `robot_data_marshal_with_catheter_system_components` branch in this repo. You can also set `ROBOT_MARSHAL_DIR` (and optional `ROBOT_MARSHAL_BIN` / `ROBOT_CLIENTS`) before running the demo.
 
-### 2. Run All Tests
-To verify the entire system (Unit, Integration, and Stress tests):
+### 2. Build and Test
+To configure, build, and run the current test suite:
 ```bash
-./scripts/run_all_tests.sh
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
 ---
@@ -40,26 +35,25 @@ To verify the entire system (Unit, Integration, and Stress tests):
 ## 📖 Documentation Map
 
 ### Guides
-- **[Usage & API](docs/USAGE_AND_API.md):** Configuration, endpoints, and client integration.
-- **[Client API Reference](docs/CLIENT_API_REFERENCE.md):** HTTP endpoint specifications.
-- **[Demo Guide](docs/DEMO_GUIDE.md):** How to run the interactive demo.
+- **[Quick Start](../../docs/QUICK_START.md):** Fastest path to build and run the MRI marshal.
+- **[Developer Guide](../../docs/DEVELOPER_GUIDE.md):** Development workflow, project layout, and implementation notes.
+- **[Manual Terminal Setup](../../docs/MANUAL_TERMINAL_SETUP.md):** Step-by-step manual startup and wiring.
+- **[External Client Guide](../../docs/EXTERNAL_CLIENT_GUIDE.md):** How external clients connect and interact.
 
 ### Architecture
-- **[SWMR & Robot Marshal Overview](docs/SWMR_AND_ROBOT_MARSHAL_OVERVIEW.md):** High-level design and data flow.
-- **[Caching Architecture](docs/CACHING_ARCHITECTURE.md):** Write-behind caching and async queue pattern.
-- **[HDF5 Locking Notes](docs/HDF5_LOCKING_NOTES.md):** WSL2-specific HDF5 file locking.
+- **[Architecture](../../docs/ARCHITECTURE.md):** Current MRI marshal design, storage layout, and transport flow.
+- **[MRI Marshal Protocol Contract](../../docs/MRI_MARSHAL_PROTOCOL_CONTRACT.md):** Protocol expectations for scanner, marshal, and downstream consumers.
+- **[Reconstruction Interface](../../docs/RECONSTRUCTION_INTERFACE.md):** MRI reconstruction integration and handoff contract.
 
 ### Performance
-- **[Improvements & Optimization](docs/IMPROVEMENTS_AND_OPTIMIZATION.md):** Throughput baselines and optimization strategies.
-- **[SWMR Stress Analysis](docs/SWMR_CONTINUOUS_BENCH_ANALYSIS.md):** Continuous benchmark results and HDF5 constraints.
-- **[Presentation](docs/MRI_DATA_MARSHAL_PRESENTATION.md):** Faculty/researcher overview.
+- **[API Reference](../../docs/API_REFERENCE.md):** Current HTTP and MRD TCP contract.
 
 ---
 
 ## 📂 Repository Structure
 
 - `scripts/`: Main entry points for demo and testing.
-  - `scripts/benchmarks/`: Exhaustive performance and chaos tests.
+  - `scripts/benchmarks/`: C++ test client harness used for targeted MRD/manual benchmarking.
   - `scripts/tools/`: Auxiliary helper and dev scripts.
 - `src/`: MRI Marshal core implementation (Boost.Asio/Beast).
 - `clients/`: Reference clients including the **Coordinator Bridge**, trackers, and streamers.
@@ -73,11 +67,8 @@ To verify the entire system (Unit, Integration, and Stress tests):
 ---
 
 ## 🛡️ Key Features
-- **HDF5 SWMR:** Concurrent read/write for real-time MRI visualization.
-- **Volume Support:** Native handling of **2D Multislice** series and **Full 3D Volumes**.
-- **Flexible Ingestion:** 
-    -   Use **Streaming Mode** (`/v1/mrd/frame`) for low-latency live feedback.
-    -   Use **Bulk Mode** (`/v1/mrd/ingest`) for efficient 3D volume archival.
-- **Process Isolation:** Decoupled Safety (Robot) and Volume (MRI) marshals.
-- **Clinical Readiness:** Standardized `/v1/mrd/` API with millisecond precision and error logging.
-- **Software E-Stop:** Active bridge monitoring for automated safety responses.
+- **MRD TCP transport:** Scanner-side clients connect to the marshal over MRD TCP, and recon replies travel back on the same transport.
+- **Closed snapshot handoff:** in live mode, `GET /image/latest` points readers at atomically replaced, closed `latest_image.h5` snapshots. In dump mode the endpoint returns `404`.
+- **Live vs dump are mutually exclusive:** live mode writes images + waveforms under `live/`; dump mode (`--dump`) writes the full stream (acqs + images + waveforms + text) under `dump/` and disables the live snapshot path.
+- **Canonical HDF5 history:** Scanner and reconstruction streams are recorded as standard ISMRMRD per-scan files.
+- **Volume support:** Handles **2D multislice** series and **full 3D volumes**.

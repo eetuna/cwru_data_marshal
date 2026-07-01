@@ -1,118 +1,178 @@
 /*
  * File: src/marshal_state.hpp
- * Project: CWRU Data Marshal
- * Purpose: Internal support module
- * Notes:
- *  - See docs/PURPOSE.md and docs/ARCHITECTURE.md
- *  - Atomic file writes via include/atomic_write.hpp
- *  - /health returns constant JSON; no shared state
- *  - WebSocket ping/pong keepalive recommended
- * Last updated: 2025-09-15
+ * Project: CWRU Data Marshal - MRI Marshal
+ * Purpose: Global mutable state shared across HTTP handlers
+ *
+ * Dump recorder, transform delta, pose cache, stored XML + config per scan,
+ * optional recon forwarding.
  */
 
 #pragma once
+
 #include <atomic>
-#include <mutex>
-#include <memory>
-#include <string>
 #include <chrono>
-#include <queue>
-#include <thread>
-#include <condition_variable>
-#include <unordered_map>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
-#include <boost/asio.hpp>
-#include <nlohmann/json.hpp>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+
 #include "common/pose.hpp"
+#include "dump_recorder.hpp"
+#include "latest_image_writer.hpp"
+#include "live_image_recorder.hpp"
+#include "mrd_sink.hpp"
 
-namespace mrd
-{
-class MrdSink;
+struct LiveImageLaneState {
+    std::unique_ptr<mrd::LiveImageRecorder> recorder;
 
-struct FlushPolicy
-{
-    std::size_t max_pending_frames{1};
-    std::chrono::milliseconds max_pending_interval{0};
-};
-}
-enum class SinkMode
-{
-    MRD,
-    DUMPBOX
+    void close() {
+        if (recorder) {
+            recorder->close_scan();
+        }
+    }
 };
 
-struct HubClient
-{
-    std::shared_ptr<void> ws;
-}; // opaque holder
+struct ReconLatestGroupState {
+    bool active{false};
+    bool published{false};
+    uint16_t image_series_index{0};
+    std::vector<std::vector<uint8_t>> images;
+    std::vector<uint16_t> seen_slices;
 
-struct IndexEntry
-{
-    std::chrono::system_clock::time_point t;
-    std::string file;
-    uint64_t seq{0};
-    std::string type{"acq"};
+    void reset() {
+        active = false;
+        published = false;
+        image_series_index = 0;
+        images.clear();
+        seen_slices.clear();
+    }
 };
 
-struct MarshalState
-{
-    SinkMode sink_mode{SinkMode::MRD};
-    std::string dumpbox_root{"./data/dumpbox"};
-    std::string dumpbox_session{};
-    std::atomic<uint64_t> seq{0};
-    mrd::FlushPolicy flush_policy{1, std::chrono::milliseconds{0}};
+struct SliceTransform {
+    double through_plane_mm{0};
+    double readout_mm{0};
+    double phase_mm{0};
+    double rotation_rad{0};
 
-    PoseStore poses;
-    std::string data_dir{"./data"};
-    std::mutex session_mtx; // Protects dumpbox_session initialization
-    std::size_t max_body_bytes{128ULL * 1024ULL * 1024ULL}; // Default 128 MiB
-    boost::asio::io_context *io = nullptr;
-    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    bool is_zero() const {
+        return through_plane_mm == 0 && readout_mm == 0
+            && phase_mm == 0 && rotation_rad == 0;
+    }
 
-    // WS emit hook (set by WsServer on init). Safe to call from HTTP handlers.
-    std::function<void(const std::string &)> ws_emit = [](const std::string &) {};
+    void clear() {
+        through_plane_mm = 0;
+        readout_mm = 0;
+        phase_mm = 0;
+        rotation_rad = 0;
+    }
+};
 
-    // Optional topic-based emit hook (set by WsServer on init).
-    std::function<void(const std::string &, const std::string &topic)> ws_emit_topic =
-        [](const std::string &, const std::string &) {};
+struct MarshalState {
+    // --dump-dir root
+    std::filesystem::path dump_dir{"./data"};
+    bool dump_enabled{false};
 
-    std::shared_ptr<mrd::MrdSink> mrd_sink;
+    // --recon-url (empty = no reconstruction target)
+    std::string recon_url;
 
-    // JSON write queue (non-blocking) - for async disk I/O
-    enum class WriteType { MRD, BIO, POSE, SLICE_TRANSLATION };
-    struct WriteRequest {
-        WriteType type;
-        std::string data;
-    };
-    std::queue<WriteRequest> json_write_queue;
-    std::mutex json_queue_mutex;
-    std::condition_variable json_queue_cv;
-    std::atomic<bool> json_writer_running{true};
-    std::thread json_writer_thread;
-    std::filesystem::path json_index_path;   // MRD index.jsonl
-    std::filesystem::path json_latest_path;  // MRD latest.json
-    std::filesystem::path json_bio_path;     // bio.jsonl
-    std::filesystem::path json_pose_path;    // poses.jsonl
-    std::filesystem::path json_slice_translation_path; // file_slice_translation.jsonl
+    // --http and --ws-port
+    std::string http_host{"0.0.0.0"};
+    uint16_t http_port{8080};
+    uint16_t ws_port{0}; // 0 = disabled
 
-    // In-memory latest (for fast endpoint reads)
-    std::mutex latest_mrd_mutex;
-    std::string latest_mrd_json;
+    // Max request body (128 MiB default)
+    std::size_t max_body_bytes{128ULL * 1024ULL * 1024ULL};
 
-    std::mutex latest_bio_mutex;
-    std::string latest_bio_json;
+    // Server uptime
+    std::chrono::steady_clock::time_point start{std::chrono::steady_clock::now()};
 
-    std::mutex latest_pose_mutex;
-    std::string latest_pose_json;
+    // ------ Per-scan state (reset by POST /close) ------
 
-    std::mutex latest_slice_translation_mutex;
+    // True after POST /header, cleared by POST /close
+    std::atomic<bool> header_received{false};
+    // True after POST /config, cleared by POST /close
+    std::atomic<bool> config_received{false};
+
+    // Stored XML header and config name for current scan
+    std::mutex scan_mtx;
+    std::string current_xml_header;
+    std::string current_config;
+    std::string current_scan_filename;
+    uint16_t recon_expected_slices{0};
+    bool scanner_lane_finalized{false};
+    bool recon_lane_finalized{false};
+
+    // Async H5 dump recorder, present only when --dump is enabled.
+    std::unique_ptr<mrd::DumpRecorder> dump_recorder;
+
+    // ------ Persistent state (survives across scans) ------
+
+    // Slice transform delta (GET zeros after returning)
+    std::mutex transform_mtx;
+    SliceTransform transform;
+
+    // Latest slice-translation command (±1) from WebGL client; cached for
+    // MRI-side reads. Empty until the first POST. GET returns the cache
+    // without clearing (repeated reads return the same value).
+    std::mutex slice_translation_mtx;
     std::string latest_slice_translation_json;
 
-    // Reconstruction service configuration (Phase 2)
-    std::string recon_endpoint;    // e.g., "http://localhost:9002"
-    bool recon_enabled{false};     // True if --recon-endpoint provided
+    // Pose cache
+    PoseStore poses;
 
-    // Reply-to mapping: job_id -> URL to POST reconstructed images back to
-    std::mutex reply_to_mutex;
-    std::unordered_map<std::string, std::string> reply_to_urls;
+    // Latest image path for GET /image/latest
+    std::mutex latest_image_mtx;
+    std::string latest_image_path;
+    bool latest_image_error{false};
+    std::atomic<uint64_t> latest_image_generation{0};
+    std::atomic<bool> recon_failure_reported{false};
+    std::unique_ptr<mrd::LatestImageWriter> latest_writer;
+
+    // Async live image-only history writers per provenance lane.
+    LiveImageLaneState scanner_live;
+    LiveImageLaneState recon_live;
+
+    // Current logical recon result for /image/latest publication.
+    ReconLatestGroupState recon_latest_group;
+
+    // ------ Perf instrumentation (exposed via GET /debug/perf) ------
+    // Bumped in append_live_image / append_live_waveform / publish_latest_snapshot.
+    // Free-running totals since process start. Rates are computed by the
+    // caller (or by subtracting two snapshots).
+    std::atomic<uint64_t> perf_scanner_images_received{0};
+    std::atomic<uint64_t> perf_recon_images_received{0};
+    std::atomic<uint64_t> perf_scanner_waveforms_received{0};
+    std::atomic<uint64_t> perf_publish_attempts_scanner{0};
+    std::atomic<uint64_t> perf_publish_attempts_recon{0};
+
+    // WS emit hook (set by WsServer on init, optional)
+    std::function<void(const std::string&)> ws_emit = [](const std::string&) {};
+
+    // MRD TCP return hook (set by MrdTcpListener, pushes recon messages to scanner)
+    std::function<void(uint16_t, const void*, size_t)> mrd_push_message =
+        [](uint16_t, const void*, size_t) {};
+
+    // ------ Methods ------
+
+    // Close both sinks and clear per-scan state. Ready for next POST /header.
+    void close_scan() {
+        std::lock_guard<std::mutex> lk(scan_mtx);
+        if (dump_recorder) dump_recorder->close_scan();
+        scanner_live.close();
+        recon_live.close();
+        current_xml_header.clear();
+        current_config.clear();
+        current_scan_filename.clear();
+        recon_expected_slices = 0;
+        scanner_lane_finalized = false;
+        recon_lane_finalized = false;
+        header_received.store(false);
+        config_received.store(false);
+        recon_failure_reported.store(false);
+        recon_latest_group.reset();
+    }
 };

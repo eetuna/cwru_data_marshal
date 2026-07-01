@@ -1,43 +1,54 @@
-import requests
-import time
-import sys
+#!/usr/bin/env python3
+"""
+HTTP Tracker - Polls GET /image/latest and GET /pose from the marshal.
 
-MRI_HTTP_BASE = "http://127.0.0.1:8080"
+Prints the latest image path and pose to stdout.
+"""
+
+import argparse
+import json
+import time
+import urllib.request
+
+
+def get_json(url: str):
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None
+
 
 def main():
-    print(f"[*] Starting HTTP-only Tracker polling {MRI_HTTP_BASE}")
-    last_ts = None
-    
-    try:
-        while True:
-            # 1. Poll for latest MRI/Frame metadata
-            try:
-                resp = requests.get(f"{MRI_HTTP_BASE}/v1/mrd/latest", timeout=0.5)
-                if resp.status_code == 200:
-                    envelope = resp.json()
-                    data = envelope.get("data", {})
-                    current_ts = data.get("ts")
-                    if current_ts != last_ts:
-                        print(f"[HTTP-MRD] New Data: {data.get('path')} | Frame: {data.get('frame_index')}")
-                        last_ts = current_ts
-            except Exception:
-                pass
+    parser = argparse.ArgumentParser(description='HTTP tracker')
+    parser.add_argument('--http', default='http://localhost:8080')
+    parser.add_argument('--interval', type=float, default=1.0)
+    parser.add_argument('--count', type=int, default=0, help='0=infinite')
+    args = parser.parse_args()
 
-            # 2. Poll for latest Pose
-            try:
-                p_resp = requests.get(f"{MRI_HTTP_BASE}/v1/pose/current", timeout=0.5)
-                if p_resp.status_code == 200:
-                    p_envelope = p_resp.json()
-                    p_data = p_envelope.get("data", {})
-                    pos = p_data.get("pose", {}).get("p")
-                    # (Optional: print pose if changed)
-            except Exception:
-                pass
+    print(f"http_tracker: polling {args.http}")
 
-            time.sleep(0.2) # 5Hz Polling
-    except KeyboardInterrupt:
-        print("\nExiting HTTP Tracker.")
+    counter = 0
+    while args.count == 0 or counter < args.count:
+        image = get_json(f"{args.http}/image/latest")
+        pose = get_json(f"{args.http}/pose")
 
-if __name__ == "__main__":
+        parts = []
+        if image:
+            path = image.get("path", "")
+            err = image.get("error", False)
+            parts.append(f"image={path}" + (" [ERROR]" if err else ""))
+        if pose:
+            p = pose.get("p", [0, 0, 0])
+            parts.append(f"pose=({p[0]:.1f},{p[1]:.1f},{p[2]:.1f})")
+
+        if parts:
+            print(f"[{counter}] {' | '.join(parts)}")
+
+        counter += 1
+        time.sleep(args.interval)
+
+
+if __name__ == '__main__':
     main()
-

@@ -1,373 +1,485 @@
 /*
  * File: clients/kspace_streamer/kspace_streamer_main.cpp
- * Project: CWRU Data Marshal
- * Purpose: Stream synthetic raw k-space data (AcquisitionHeader) to test reconstruction flow
+ * Project: CWRU Data Marshal - MRI Marshal
+ * Purpose: Full C ISMRMRD scanner mock over MRD TCP
  *
- * This client generates raw k-space data with valid ISMRMRD AcquisitionHeader
- * and sends it to the MRI marshal. The marshal will:
- * 1. Detect data type as ACQUISITION
- * 2. Forward to external reconstruction service (if configured)
- * 3. Store reconstructed image to SWMR
+ * Protocol: raw TCP to marshal --mrd-port using python-ismrmrd-server's
+ * 2-byte message ID framing (see connection.py).
  *
- * Usage:
- *   ./kspace_streamer --http http://localhost:8080 --stream test_scan
+ * Wire sequence:
+ *   CONFIG_FILE(1)    — 2B tag + 1024B null-padded config name
+ *   METADATA_XML(3)   — 2B tag + 4B length + XML bytes
+ *   ACQUISITION(1008) — 2B tag + 340B header + traj + samples  (× N)
+ *   WAVEFORM(1026)    — 2B tag + 40B header + uint32 samples   (optional, ECG)
+ *   CLOSE(4)          — 2B tag only
  *
- * Testing:
- *   # Terminal 1: Mock reconstruction service
- *   python3 tests/mock_recon_service.py
+ * Also runs a reader thread to receive IMAGE(1022) frames pushed back
+ * by the marshal (reconstructed images returned on the same socket).
  *
- *   # Terminal 2: Marshal with reconstruction enabled
- *   ./build/marshal --data ./data --recon-endpoint http://localhost:9002
- *
- *   # Terminal 3: K-space streamer
- *   ./build/kspace_streamer --http http://localhost:8080 --stream raw_scan
+ * Multi-slice, noise scans, ACQ_FIRST/LAST_IN_SLICE flags.
+ * No HTTP. No X-MRD-* headers. No /v1/* paths.
  */
 
 #include <boost/asio.hpp>
-#include <boost/beast/http.hpp>
-#include <boost/beast/core/flat_buffer.hpp>
-#include <boost/beast/core/tcp_stream.hpp>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <complex>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <random>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 #include <chrono>
 #include <stdexcept>
-#include <cstdlib>
 
 #include <ismrmrd/ismrmrd.h>
+#include <ismrmrd/waveform.h>
+#include "mrd_stream_tags.hpp"
+#include "phantom.hpp"
 
-namespace http = boost::beast::http;
+namespace net = boost::asio;
+using tcp = net::ip::tcp;
 
 struct Options {
-    std::string base_url{"http://localhost:8080"};
-    std::string stream{"kspace_stream"};
-    std::size_t readouts{0};        // 0 = infinite
-    double interval{0.1};           // seconds between readouts
-    std::uint16_t samples{256};     // samples per readout (k-space line width)
-    std::uint16_t channels{8};      // active coil channels
-    std::uint16_t lines{128};       // phase encode lines (total readouts per frame)
-    std::uint16_t slices{1};        // number of slices per volume
-    std::size_t log_stride{10};
+    std::string host{"localhost"};
+    std::string port{"9100"};         // marshal --mrd-port
+    std::string config_name{"simplefft"};
+    std::size_t volumes{0};           // 0 = infinite
+    double interval{0.5};             // seconds between volumes
+    std::uint16_t samples{128};
+    std::uint16_t channels{1};
+    std::uint16_t lines{128};
+    std::uint16_t slices{1};
+    std::size_t log_stride{1};
+    bool send_ecg{false};             // send synthetic ECG waveforms
 };
 
-Options parse_args(int argc, char **argv) {
+Options parse_args(int argc, char** argv) {
     Options opt;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        auto next = [&]() -> const char * {
-            if (i + 1 < argc) {
-                return argv[++i];
-            }
+        auto next = [&]() -> const char* {
+            if (i + 1 < argc) return argv[++i];
             throw std::runtime_error("missing value for " + arg);
         };
-        if (arg == "--http" || arg == "--marshal") {
-            opt.base_url = next();
-        } else if (arg == "--stream") {
-            opt.stream = next();
-        } else if (arg == "--readouts" || arg == "--frames") {
-            opt.readouts = static_cast<std::size_t>(std::stoull(next()));
-        } else if (arg == "--interval") {
-            opt.interval = std::stod(next());
-        } else if (arg == "--dt-ms") {
-            opt.interval = std::stod(next()) / 1000.0;
-        } else if (arg == "--samples") {
-            opt.samples = static_cast<std::uint16_t>(std::stoi(next()));
-        } else if (arg == "--channels") {
-            opt.channels = static_cast<std::uint16_t>(std::stoi(next()));
-        } else if (arg == "--lines") {
-            opt.lines = static_cast<std::uint16_t>(std::stoi(next()));
-        } else if (arg == "--slices") {
-            opt.slices = static_cast<std::uint16_t>(std::stoi(next()));
-        } else if (arg == "--log-stride") {
-            opt.log_stride = static_cast<std::size_t>(std::stoull(next()));
-        } else if (arg == "--help" || arg == "-h") {
-            std::cout << "K-Space Streamer - Send raw k-space data to MRI marshal\n\n"
-                      << "Usage: kspace_streamer [OPTIONS]\n\n"
-                      << "Options:\n"
-                      << "  --http URL       Marshal HTTP endpoint (default: http://localhost:8080)\n"
-                      << "  --stream NAME    Stream identifier (default: kspace_stream)\n"
-                      << "  --readouts N     Number of readouts to send, 0=infinite (default: 0)\n"
-                      << "  --interval SEC   Seconds between readouts (default: 0.1)\n"
-                      << "  --dt-ms MS       Interval in milliseconds\n"
-                      << "  --samples N      Samples per readout line (default: 256)\n"
-                      << "  --channels N     Active coil channels (default: 8)\n"
-                      << "  --lines N        Phase encode lines per frame (default: 128)\n"
-                      << "  --slices N       Number of slices per volume (default: 1)\n"
-                      << "  --log-stride N   Log every Nth readout (default: 10)\n"
-                      << "\nExample:\n"
-                      << "  kspace_streamer --http http://localhost:8080 --stream raw_scan --channels 4 --slices 5\n";
-            std::exit(0);
-        } else {
-            std::cerr << "Unknown option: " << arg << " (use --help for usage)\n";
-            std::exit(1);
-        }
+        if (arg == "--host")           opt.host = next();
+        else if (arg == "--port")      opt.port = next();
+        else if (arg == "--config")    opt.config_name = next();
+        else if (arg == "--volumes")   opt.volumes = std::stoull(next());
+        else if (arg == "--interval")  opt.interval = std::stod(next());
+        else if (arg == "--samples")   opt.samples = static_cast<uint16_t>(std::stoi(next()));
+        else if (arg == "--channels")  opt.channels = static_cast<uint16_t>(std::stoi(next()));
+        else if (arg == "--lines")     opt.lines = static_cast<uint16_t>(std::stoi(next()));
+        else if (arg == "--slices")    opt.slices = static_cast<uint16_t>(std::stoi(next()));
+        else if (arg == "--log-stride") opt.log_stride = std::stoull(next());
+        else if (arg == "--ecg")       opt.send_ecg = true;
     }
     return opt;
 }
 
-struct HttpTarget {
-    std::string host;
-    std::string port;
-};
-
-HttpTarget parse_base_url(const std::string &url) {
-    if (url.rfind("http://", 0) != 0) {
-        throw std::runtime_error("Only http:// URLs are supported");
-    }
-    auto rest = url.substr(7);
-    auto slash = rest.find('/');
-    std::string hostport = slash == std::string::npos ? rest : rest.substr(0, slash);
-    auto colon = hostport.find(':');
-    std::string host;
-    std::string port;
-    if (colon == std::string::npos) {
-        host = hostport;
-        port = "80";
-    } else {
-        host = hostport.substr(0, colon);
-        port = hostport.substr(colon + 1);
-    }
-    return {host, port};
+// Generate minimal ISMRMRD XML header
+std::string make_xml_header(uint16_t nx, uint16_t ny, uint16_t nz, uint16_t ncoils) {
+    std::ostringstream oss;
+    oss << "<?xml version=\"1.0\"?>\n"
+        << "<ismrmrdHeader xmlns=\"http://www.ismrmrd.org/ISMRMRD\">\n"
+        << "  <experimentalConditions>\n"
+        << "    <H1resonanceFrequency_Hz>123000000</H1resonanceFrequency_Hz>\n"
+        << "  </experimentalConditions>\n"
+        << "  <encoding>\n"
+        << "    <encodedSpace>\n"
+        << "      <matrixSize><x>" << nx << "</x><y>" << ny << "</y><z>" << nz << "</z></matrixSize>\n"
+        << "      <fieldOfView_mm><x>256</x><y>256</y><z>5</z></fieldOfView_mm>\n"
+        << "    </encodedSpace>\n"
+        << "    <reconSpace>\n"
+        << "      <matrixSize><x>" << nx << "</x><y>" << ny << "</y><z>" << nz << "</z></matrixSize>\n"
+        << "      <fieldOfView_mm><x>256</x><y>256</y><z>5</z></fieldOfView_mm>\n"
+        << "    </reconSpace>\n"
+        << "    <encodingLimits>\n"
+        << "      <kspace_encoding_step_1><minimum>0</minimum><maximum>" << (ny - 1)
+        << "</maximum><center>" << (ny / 2) << "</center></kspace_encoding_step_1>\n"
+        << "      <slice><minimum>0</minimum><maximum>" << (nz - 1)
+        << "</maximum><center>" << (nz / 2) << "</center></slice>\n"
+        << "    </encodingLimits>\n"
+        << "    <trajectory>cartesian</trajectory>\n"
+        << "  </encoding>\n"
+        << "</ismrmrdHeader>\n";
+    return oss.str();
 }
 
-int main(int argc, char **argv) {
+// ── MRD TCP helpers ────────────────────────────────────────────
+
+// Write all bytes to socket, blocking
+void write_all(tcp::socket& sock, const void* data, size_t len) {
+    net::write(sock, net::buffer(data, len));
+}
+
+// Send CONFIG_FILE (tag 1): 2B tag + 1024B null-padded name
+void send_config_file(tcp::socket& sock, const std::string& name) {
+    uint16_t tag = mrd::MRD_MESSAGE_CONFIG_FILE;
+    uint8_t buf[2 + 1024] = {};
+    std::memcpy(buf, &tag, 2);
+    std::memcpy(buf + 2, name.data(), std::min(name.size(), size_t(1024)));
+    write_all(sock, buf, sizeof(buf));
+}
+
+// Send METADATA_XML (tag 3): 2B tag + 4B length + XML\0
+void send_metadata_xml(tcp::socket& sock, const std::string& xml) {
+    std::string with_nul = xml + '\0';
+    uint16_t tag = mrd::MRD_MESSAGE_METADATA_XML_TEXT;
+    uint32_t len = static_cast<uint32_t>(with_nul.size());
+    write_all(sock, &tag, 2);
+    write_all(sock, &len, 4);
+    write_all(sock, with_nul.data(), len);
+}
+
+// Send ACQUISITION (tag 1008): 2B tag + header + traj + samples
+void send_acquisition(tcp::socket& sock, const ISMRMRD::AcquisitionHeader& hdr,
+                      const std::complex<float>* samples, size_t sample_count) {
+    uint16_t tag = mrd::MRD_MESSAGE_ISMRMRD_ACQUISITION;
+    write_all(sock, &tag, 2);
+    write_all(sock, &hdr, sizeof(hdr));
+    // trajectory_dimensions == 0 → no trajectory bytes
+    if (hdr.trajectory_dimensions > 0) {
+        size_t traj_bytes = hdr.trajectory_dimensions * hdr.number_of_samples * sizeof(float);
+        std::vector<float> traj(hdr.trajectory_dimensions * hdr.number_of_samples, 0.0f);
+        write_all(sock, traj.data(), traj_bytes);
+    }
+    write_all(sock, samples, sample_count * sizeof(std::complex<float>));
+}
+
+// Send WAVEFORM (tag 1026): 2B tag + 40B header + uint32 samples
+void send_waveform(tcp::socket& sock, uint16_t waveform_id,
+                   const uint32_t* data, uint16_t num_samples, uint16_t num_channels,
+                   float sample_time_us, uint32_t time_stamp) {
+    ISMRMRD::ISMRMRD_WaveformHeader whdr;
+    std::memset(&whdr, 0, sizeof(whdr));
+    whdr.version = 1;
+    whdr.number_of_samples = num_samples;
+    whdr.channels = num_channels;
+    whdr.sample_time_us = sample_time_us;
+    whdr.waveform_id = waveform_id;
+    whdr.time_stamp = time_stamp;
+
+    uint16_t tag = mrd::MRD_MESSAGE_ISMRMRD_WAVEFORM;
+    write_all(sock, &tag, 2);
+    write_all(sock, &whdr, sizeof(whdr));
+    write_all(sock, data, num_samples * num_channels * sizeof(uint32_t));
+}
+
+// Send CLOSE (tag 4): 2B tag only
+void send_close(tcp::socket& sock) {
+    uint16_t tag = mrd::MRD_MESSAGE_CLOSE;
+    write_all(sock, &tag, 2);
+}
+
+// ── Reader thread for pushed-back images ───────────────────────
+
+void reader_thread(tcp::socket& sock, std::atomic<bool>& running,
+                   std::atomic<size_t>& images_received) {
     try {
-        Options opt = parse_args(argc, argv);
-        auto http_target = parse_base_url(opt.base_url);
+        while (running.load()) {
+            uint16_t tag = 0;
+            boost::system::error_code ec;
+            net::read(sock, net::buffer(&tag, 2), ec);
+            if (ec) break;
 
-        std::cout << "kspace_streamer: Starting\n"
-                  << "  marshal: " << opt.base_url << "\n"
-                  << "  stream: " << opt.stream << "\n"
-                  << "  samples: " << opt.samples << "\n"
-                  << "  channels: " << opt.channels << "\n"
-                  << "  lines/frame: " << opt.lines << "\n"
-                  << "  slices/volume: " << opt.slices << "\n"
-                  << "  interval: " << opt.interval << "s\n";
+            if (tag == mrd::MRD_MESSAGE_ISMRMRD_IMAGE) {
+                // Read ImageHeader (198 bytes)
+                std::vector<uint8_t> ihdr(mrd::IMAGE_HEADER_BYTES);
+                net::read(sock, net::buffer(ihdr.data(), ihdr.size()), ec);
+                if (ec) break;
 
-        boost::asio::io_context ioc;
-        boost::asio::ip::tcp::resolver resolver{ioc};
-        boost::beast::tcp_stream stream{ioc};
-        boost::beast::flat_buffer read_buffer;
-        auto next_deadline = std::chrono::steady_clock::now();
-        std::uint64_t session_counter = 0;
-        std::string session_token;
+                // Read attribute length (8 bytes, uint64 LE)
+                uint64_t attr_len = 0;
+                net::read(sock, net::buffer(&attr_len, 8), ec);
+                if (ec) break;
 
-        auto refresh_session_token = [&]() {
-            ++session_counter;
-            auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              std::chrono::system_clock::now().time_since_epoch())
-                              .count();
-            session_token = opt.stream + "-" + std::to_string(session_counter) + "-" + std::to_string(now_ms);
-        };
-
-        auto connect_stream = [&](const char *reason) {
-            boost::system::error_code close_ec;
-            if (stream.socket().is_open()) {
-                stream.socket().shutdown(boost::asio::ip::tcp::socket::shutdown_both, close_ec);
-                stream.socket().close(close_ec);
-            }
-
-            for (int attempt = 0; attempt < 8; ++attempt) {
-                boost::system::error_code resolve_ec;
-                auto endpoints = resolver.resolve(http_target.host, http_target.port, resolve_ec);
-                if (resolve_ec) {
-                    std::cerr << "kspace_streamer: resolve failed (" << resolve_ec.message() << "), retrying\n";
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                    continue;
+                // Read attribute string
+                std::vector<char> attr;
+                if (attr_len > 0) {
+                    attr.resize(attr_len);
+                    net::read(sock, net::buffer(attr.data(), attr_len), ec);
+                    if (ec) break;
                 }
 
-                boost::system::error_code connect_ec;
-                stream.connect(endpoints, connect_ec);
-                if (!connect_ec) {
-                    stream.socket().set_option(boost::asio::ip::tcp::no_delay(true));
-                    stream.expires_never();
-                    read_buffer.consume(read_buffer.size());
-                    next_deadline = std::chrono::steady_clock::now();
-                    refresh_session_token();
-                    if (reason)
-                        std::cout << "kspace_streamer: connected (" << reason << ")\n";
-                    return;
+                // Read pixel data: matrix_size[0]*[1]*[2]*channels*itemsize
+                const auto* imhdr = reinterpret_cast<const ISMRMRD::ImageHeader*>(ihdr.data());
+                size_t npixels = static_cast<size_t>(imhdr->matrix_size[0]) *
+                                 imhdr->matrix_size[1] *
+                                 std::max(uint16_t(1), imhdr->matrix_size[2]) *
+                                 imhdr->channels;
+                size_t itemsize = 4; // default float
+                switch (imhdr->data_type) {
+                    case ISMRMRD::ISMRMRD_USHORT: itemsize = 2; break;
+                    case ISMRMRD::ISMRMRD_SHORT:  itemsize = 2; break;
+                    case ISMRMRD::ISMRMRD_UINT:   itemsize = 4; break;
+                    case ISMRMRD::ISMRMRD_INT:    itemsize = 4; break;
+                    case ISMRMRD::ISMRMRD_FLOAT:  itemsize = 4; break;
+                    case ISMRMRD::ISMRMRD_DOUBLE: itemsize = 8; break;
+                    case ISMRMRD::ISMRMRD_CXFLOAT:  itemsize = 8; break;
+                    case ISMRMRD::ISMRMRD_CXDOUBLE: itemsize = 16; break;
+                    default: break;
                 }
+                size_t pixel_bytes = npixels * itemsize;
+                std::vector<uint8_t> pixels(pixel_bytes);
+                net::read(sock, net::buffer(pixels.data(), pixel_bytes), ec);
+                if (ec) break;
 
-                std::cerr << "kspace_streamer: connect failed (" << connect_ec.message() << "), retrying\n";
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            }
-
-            throw std::runtime_error("kspace_streamer: unable to connect to marshal at " + opt.base_url);
-        };
-
-        connect_stream("startup");
-
-        // Required fields for valid detection (see mrd_type_detector.hpp)
-        const std::size_t header_bytes = sizeof(ISMRMRD::AcquisitionHeader);
-        const std::size_t data_samples = static_cast<std::size_t>(opt.samples) * opt.channels;
-        const std::size_t data_bytes = data_samples * sizeof(std::complex<float>);
-
-        // For multi-slice: we'll send one readout per slice (simplified from full k-space)
-        const std::size_t acquisitions_per_volume = opt.slices;
-        std::vector<std::complex<float>> kspace_data(data_samples);
-
-        std::size_t volume_index = 0;
-        const std::size_t total_volumes = opt.readouts > 0 ? opt.readouts : 0;
-        const std::size_t log_stride = opt.log_stride;
-
-        while (total_volumes == 0 || volume_index < total_volumes) {
-            // Build multi-slice k-space volume
-            std::vector<uint8_t> volume_body;
-            volume_body.reserve(acquisitions_per_volume * (header_bytes + data_bytes));
-
-            for (std::uint16_t slice = 0; slice < opt.slices; ++slice) {
-                // Create acquisition header for this slice
-                ISMRMRD::AcquisitionHeader acq_header;
-                std::memset(&acq_header, 0, sizeof(acq_header));
-
-                acq_header.version = 1;
-                acq_header.number_of_samples = opt.samples;
-                acq_header.active_channels = opt.channels;
-                acq_header.available_channels = opt.channels;
-                acq_header.trajectory_dimensions = 0;  // Cartesian
-                acq_header.sample_time_us = 10.0f;     // 10 μs dwell time
-
-                // Set indices
-                acq_header.scan_counter = static_cast<uint32_t>(volume_index * opt.slices + slice);
-                acq_header.idx.slice = slice;
-                acq_header.idx.kspace_encode_step_1 = 0;  // Simplified: single phase encode per slice
-                acq_header.idx.repetition = static_cast<uint16_t>(volume_index % 65535);
-
-                // Set flags for first/last in slice
-                acq_header.flags = 0;
-                acq_header.flags |= (1ULL << (ISMRMRD::ISMRMRD_ACQ_FIRST_IN_SLICE - 1));
-                acq_header.flags |= (1ULL << (ISMRMRD::ISMRMRD_ACQ_LAST_IN_SLICE - 1));
-
-                // Generate synthetic k-space data
-                // Vary pattern slightly by slice for visual verification
-                const double t = static_cast<double>(volume_index);
-                const double slice_phase = slice * 0.2;
-
-                for (std::size_t ch = 0; ch < opt.channels; ++ch) {
-                    const double channel_phase = ch * 0.3;
-                    for (std::size_t s = 0; s < opt.samples; ++s) {
-                        const double kx = static_cast<double>(s) / opt.samples - 0.5;
-                        const double k_radius = std::abs(kx);
-
-                        // Gaussian k-space pattern with slice variation
-                        const double magnitude = std::exp(-k_radius * k_radius * 20.0) *
-                                                (1.0 + 0.1 * std::sin(t * 0.1 + slice_phase));
-                        const double phase = channel_phase + slice_phase + kx * 2.0 * M_PI;
-
-                        const std::size_t idx = ch * opt.samples + s;
-                        kspace_data[idx] = std::complex<float>(
-                            static_cast<float>(magnitude * std::cos(phase)),
-                            static_cast<float>(magnitude * std::sin(phase))
-                        );
+                images_received.fetch_add(1);
+                size_t n = images_received.load();
+                if (n == 1 || n % 10 == 0)
+                    std::cout << "kspace_streamer: received " << n << " reconstructed image(s) back\n";
+                if (!attr.empty()) {
+                    std::string attr_text(attr.begin(), attr.end());
+                    if (attr_text.find("ReconFailure") != std::string::npos) {
+                        std::cout << "kspace_streamer: received recon failure image\n";
                     }
                 }
-
-                // Append header + k-space data to volume body
-                const uint8_t* header_ptr = reinterpret_cast<const uint8_t*>(&acq_header);
-                volume_body.insert(volume_body.end(), header_ptr, header_ptr + header_bytes);
-
-                const uint8_t* data_ptr = reinterpret_cast<const uint8_t*>(kspace_data.data());
-                volume_body.insert(volume_body.end(), data_ptr, data_ptr + data_bytes);
             }
-
-            // Send entire volume (all slices)
-            bool delivered = false;
-            std::string ack_body;
-            http::status ack_status = http::status::ok;
-
-            for (int attempt = 0; attempt < 3 && !delivered; ++attempt) {
-                http::request<http::vector_body<uint8_t>> req{http::verb::post, "/v1/mrd/frame", 11};
-                req.set(http::field::host, http_target.host);
-                req.set(http::field::content_type, "application/octet-stream");
-                req.set("X-MRD-Stream", opt.stream);
-                if (!session_token.empty())
-                    req.set("X-MRD-Session", session_token);
-                req.keep_alive(true);
-                req.body() = std::move(volume_body);
-                req.prepare_payload();
-
-                boost::system::error_code write_ec;
-                http::write(stream, req, write_ec);
-                if (write_ec) {
-                    std::cerr << "kspace_streamer: write failed (" << write_ec.message() << "), reconnecting\n";
-                    connect_stream("write error");
-                    // Rebuild volume_body since we moved it
-                    continue;
-                }
-
-                http::response<http::string_body> res;
-                boost::system::error_code read_ec;
-                http::read(stream, read_buffer, res, read_ec);
-                if (read_ec) {
-                    std::cerr << "kspace_streamer: read failed (" << read_ec.message() << "), reconnecting\n";
-                    connect_stream("read error");
-                    continue;
-                }
-
-                ack_status = res.result();
-                ack_body = res.body();
-                read_buffer.consume(read_buffer.size());
-                delivered = true;
-
-                if (!res.keep_alive()) {
-                    connect_stream("server closed");
-                }
-            }
-
-            if (!delivered) {
-                continue;  // try volume again after reconnect attempts
-            }
-
-            // Log response
-            if (ack_status == http::status::created || ack_status == http::status::ok) {
-                if (volume_index == 0 || volume_index % log_stride == 0) {
-                    std::cout << "volume " << volume_index
-                              << " (" << opt.slices << " slices)"
-                              << " -> HTTP " << static_cast<unsigned>(ack_status)
-                              << "\n";
-                }
-            } else if (ack_status == http::status::not_implemented) {
-                std::cerr << "kspace_streamer: Marshal returned 501 Not Implemented\n"
-                          << "  This means raw k-space was detected but no reconstruction service is configured.\n"
-                          << "  Start marshal with: --recon-endpoint http://localhost:9002\n"
-                          << "  Response: " << ack_body << "\n";
-            } else {
-                std::cerr << "kspace_streamer: server responded with HTTP "
-                          << static_cast<unsigned>(ack_status)
-                          << " body=" << ack_body << "\n";
-            }
-
-            ++volume_index;
-            if (total_volumes != 0 && volume_index >= total_volumes) {
+            else if (tag == mrd::MRD_MESSAGE_CLOSE) {
+                std::cout << "kspace_streamer: received CLOSE from marshal\n";
                 break;
             }
+            else if (tag == mrd::MRD_MESSAGE_TEXT ||
+                     tag == mrd::MRD_MESSAGE_CONFIG_TEXT ||
+                     tag == mrd::MRD_MESSAGE_METADATA_XML_TEXT) {
+                uint32_t len = 0;
+                net::read(sock, net::buffer(&len, 4), ec);
+                if (ec) break;
+                std::vector<char> payload(len);
+                if (len > 0) net::read(sock, net::buffer(payload.data(), payload.size()), ec);
+                if (ec) break;
+            }
+            else if (tag == mrd::MRD_MESSAGE_CONFIG_FILE) {
+                std::vector<char> payload(1024);
+                net::read(sock, net::buffer(payload.data(), payload.size()), ec);
+                if (ec) break;
+            }
+            else if (tag == mrd::MRD_MESSAGE_ISMRMRD_WAVEFORM) {
+                ISMRMRD::WaveformHeader whdr;
+                net::read(sock, net::buffer(&whdr, mrd::WAVEFORM_HEADER_BYTES), ec);
+                if (ec) break;
+                size_t data_bytes = size_t(whdr.number_of_samples) * whdr.channels * sizeof(uint32_t);
+                std::vector<uint8_t> payload(data_bytes);
+                if (data_bytes > 0)
+                    net::read(sock, net::buffer(payload.data(), payload.size()), ec);
+                if (ec) break;
+            }
+            else {
+                // Unknown tag on return path — skip by disconnecting
+                std::cout << "kspace_streamer: unknown return tag " << tag << ", stopping reader\n";
+                break;
+            }
+        }
+    } catch (...) {}
+    std::cout << "kspace_streamer: reader thread exited (total images: "
+	              << images_received.load() << ")\n";
+}
+
+struct ReaderGuard {
+    tcp::socket& sock;
+    std::atomic<bool>& running;
+    std::thread& reader;
+
+    ~ReaderGuard() {
+        running.store(false);
+        boost::system::error_code ec;
+        sock.shutdown(tcp::socket::shutdown_both, ec);
+        if (reader.joinable()) reader.join();
+    }
+};
+
+// ── Synthetic ECG generation ───────────────────────────────────
+
+float generate_ecg_sample(double t, double baseline_hz) {
+    float p_wave = 0.15f * static_cast<float>(std::sin(2 * M_PI * baseline_hz * t));
+    double qrs_offset = std::fmod(t * baseline_hz, 1.0);
+    float qrs_wave = 0.0f;
+    if (qrs_offset > 0.15 && qrs_offset < 0.25)
+        qrs_wave = 2.0f * static_cast<float>(std::sin(2 * M_PI * 10 * (qrs_offset - 0.15)));
+    float t_wave = 0.3f * static_cast<float>(std::sin(2 * M_PI * baseline_hz * t - M_PI / 3.0));
+    return p_wave + qrs_wave + t_wave;
+}
+
+// ── main ───────────────────────────────────────────────────────
+
+int main(int argc, char** argv) {
+    try {
+        Options opt = parse_args(argc, argv);
+
+        std::cout << std::unitbuf;
+        std::cerr << std::unitbuf;
+
+        std::cout << "kspace_streamer: MRD TCP scanner mock\n"
+                  << "  marshal: " << opt.host << ":" << opt.port << "\n"
+                  << "  config: " << opt.config_name << "\n"
+                  << "  samples: " << opt.samples
+                  << " channels: " << opt.channels
+                  << " lines: " << opt.lines
+                  << " slices: " << opt.slices
+                  << " ecg: " << (opt.send_ecg ? "yes" : "no") << "\n";
+
+        net::io_context ioc;
+        tcp::resolver resolver{ioc};
+        tcp::socket sock{ioc};
+
+        // Connect to marshal MRD TCP port
+        auto endpoints = resolver.resolve(opt.host, opt.port);
+        net::connect(sock, endpoints);
+        sock.set_option(tcp::no_delay(true));
+        std::cout << "kspace_streamer: connected to " << opt.host << ":" << opt.port << "\n";
+
+        std::atomic<bool> reader_running{true};
+        std::atomic<size_t> images_received{0};
+
+        // Start reader thread BEFORE sending data. It MUST run during the scan
+        // to drain IMAGE(1022) pushed back by the marshal. Without it, TCP
+        // buffers fill and the entire pipeline deadlocks.
+        // Concurrent sync read+write on the same TCP fd is safe on Linux
+        // (same pattern as python-ismrmrd-server client.py: separate process
+        // for reading, main thread for writing, same socket).
+        std::thread reader([&]() {
+            reader_thread(sock, reader_running, images_received);
+        });
+        ReaderGuard reader_guard{sock, reader_running, reader};
+
+        // Send CONFIG_FILE + METADATA_XML
+        send_config_file(sock, opt.config_name);
+        std::string xml = make_xml_header(opt.samples, opt.lines, opt.slices, opt.channels);
+        send_metadata_xml(sock, xml);
+        std::cout << "kspace_streamer: config+header sent\n";
+
+        const size_t nx = opt.samples;
+        const size_t ny = opt.lines;
+        const size_t ncoils = opt.channels;
+
+        // Scratch buffers
+        std::vector<double> phantom_img;
+        std::vector<std::complex<float>> slice_kspace(nx * ny);
+        std::vector<std::complex<float>> line_data(nx * ncoils);
+        std::mt19937 rng{std::random_device{}()};
+        std::normal_distribution<float> gauss{0.0f, 0.05f};
+
+        // ECG state
+        double ecg_time = 0.0;
+        const double ecg_rate_hz = 100.0;    // 100 Hz sampling
+        const double heart_rate_hz = 72.0 / 60.0;  // 72 BPM
+        const uint16_t ecg_samples_per_batch = 100;
+
+        size_t volume_index = 0;
+        const size_t total = opt.volumes;
+        auto next_deadline = std::chrono::steady_clock::now();
+
+        while (total == 0 || volume_index < total) {
+            double rotation = 0.05 * static_cast<double>(volume_index);
+            double brightness = 0.75 + 0.25 * std::sin(0.1 * static_cast<double>(volume_index));
+
+            size_t acq_count = 0;
+            for (uint16_t slice = 0; slice < opt.slices; ++slice) {
+                double slice_rot = rotation + 0.1 * slice;
+                double slice_wt = std::cos(0.5 * M_PI *
+                    (static_cast<double>(slice) - (opt.slices - 1) / 2.0) /
+                    std::max(1.0, (opt.slices - 1) / 2.0));
+                double slice_bright = brightness * std::max(0.25, slice_wt * slice_wt);
+
+                kspace_sim::build_shepp_logan(nx, ny, slice_rot, slice_bright, phantom_img);
+                kspace_sim::image_to_kspace(phantom_img, nx, ny, slice_kspace);
+
+                for (uint16_t line = 0; line < ny; ++line) {
+                    ISMRMRD::AcquisitionHeader ahdr;
+                    std::memset(&ahdr, 0, sizeof(ahdr));
+                    ahdr.version = 1;
+                    ahdr.number_of_samples = opt.samples;
+                    ahdr.active_channels = opt.channels;
+                    ahdr.available_channels = opt.channels;
+                    ahdr.trajectory_dimensions = 0;
+                    ahdr.sample_time_us = 10.0f;
+                    ahdr.scan_counter = static_cast<uint32_t>(
+                        (volume_index * opt.slices + slice) * ny + line);
+                    ahdr.idx.slice = slice;
+                    ahdr.idx.kspace_encode_step_1 = line;
+                    ahdr.idx.repetition = static_cast<uint16_t>(volume_index % 65535);
+
+                    ahdr.flags = 0;
+                    if (line == 0)
+                        ahdr.flags |= (1ULL << (ISMRMRD::ISMRMRD_ACQ_FIRST_IN_SLICE - 1));
+                    if (line == ny - 1)
+                        ahdr.flags |= (1ULL << (ISMRMRD::ISMRMRD_ACQ_LAST_IN_SLICE - 1));
+
+                    // Build per-channel k-space line with noise
+                    for (size_t ch = 0; ch < ncoils; ++ch) {
+                        for (size_t s = 0; s < nx; ++s) {
+                            auto& src = slice_kspace[line * nx + s];
+                            line_data[ch * nx + s] = std::complex<float>(
+                                src.real() + gauss(rng), src.imag() + gauss(rng));
+                        }
+                    }
+
+                    send_acquisition(sock, ahdr, line_data.data(),
+                                     nx * ncoils);
+                    ++acq_count;
+                }
+
+                // Send ECG waveform after each slice (if enabled)
+                if (opt.send_ecg) {
+                    std::vector<uint32_t> ecg_data(ecg_samples_per_batch);
+                    for (uint16_t i = 0; i < ecg_samples_per_batch; ++i) {
+                        float val = generate_ecg_sample(ecg_time, heart_rate_hz);
+                        // Scale to uint32 range (center at 2^31)
+                        ecg_data[i] = static_cast<uint32_t>(
+                            static_cast<int64_t>(val * 1e6) + INT32_MAX);
+                        ecg_time += 1.0 / ecg_rate_hz;
+                    }
+                    uint32_t ts = static_cast<uint32_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count() & 0xFFFFFFFF);
+                    send_waveform(sock, 0 /* waveform_id=0 → ECG */,
+                                  ecg_data.data(), ecg_samples_per_batch, 1,
+                                  static_cast<float>(1e6 / ecg_rate_hz), ts);
+                }
+            }
+
+            if (volume_index % opt.log_stride == 0)
+                std::cout << "volume " << volume_index << ": " << acq_count
+                          << " acquisitions sent\n";
+
+            ++volume_index;
 
             if (opt.interval > 0.0) {
                 next_deadline += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::duration<double>(opt.interval));
                 auto now = std::chrono::steady_clock::now();
-                if (next_deadline > now) {
+                if (next_deadline > now)
                     std::this_thread::sleep_until(next_deadline);
-                } else {
+                else
                     next_deadline = now;
-                }
             }
         }
 
-        std::cout << "kspace_streamer: Finished sending " << volume_index << " volumes ("
-                  << (volume_index * opt.slices) << " total acquisitions)\n";
+        // Send CLOSE
+        send_close(sock);
+        std::cout << "kspace_streamer: CLOSE sent, " << volume_index << " volumes\n";
 
-    } catch (const std::exception &e) {
+        // Wait for reader to finish (marshal may push final images after CLOSE)
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        reader_running.store(false);
+
+        // Shutdown write side to unblock reader
+        boost::system::error_code ec;
+        sock.shutdown(tcp::socket::shutdown_send, ec);
+        if (reader.joinable()) reader.join();
+
+        sock.close();
+        std::cout << "kspace_streamer: done. Received " << images_received.load()
+                  << " reconstructed images.\n";
+
+    } catch (const std::exception& e) {
         std::cerr << "kspace_streamer error: " << e.what() << "\n";
         return 1;
     }
-
     return 0;
 }

@@ -1,32 +1,25 @@
-#pragma once
-#undef LOG_COMPONENT
-#define LOG_COMPONENT "mrd_io"
-#include "logging.hpp"
+/*
+ * File: include/mrd_io.hpp
+ * Project: CWRU Data Marshal - MRI Marshal
+ * Purpose: Utility functions for I/O, timestamps, directory creation
+ *
+ * Split paths: live/from_* and dump/from_* under --dump-dir.
+ */
 
-#include <atomic>
+#pragma once
+
 #include <chrono>
 #include <cstdint>
 #include <ctime>
-#include <cerrno>
-#include <cstring>
 #include <filesystem>
 #include <iomanip>
-#include <nlohmann/json.hpp>
-#include <system_error>
-#include <stdexcept>
 #include <sstream>
+#include <stdexcept>
 #include <string>
-#include <iostream>
+#include <system_error>
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
+namespace mrd {
 
-#include "marshal_state.hpp"
-
-namespace mrd
-{
 inline std::string iso8601_now_ms()
 {
     using namespace std::chrono;
@@ -50,213 +43,48 @@ inline uint64_t now_ms_epoch()
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
-inline void ensure_dir(const std::filesystem::path &p)
+inline void ensure_dir(const std::filesystem::path& p)
 {
     std::error_code ec;
-    if (!std::filesystem::exists(p, ec))
-    {
+    if (!std::filesystem::exists(p, ec)) {
         std::filesystem::create_directories(p, ec);
         if (ec)
             throw std::runtime_error("create_directories failed: " + ec.message());
     }
 }
 
-struct SinkPaths
+// Generate a scan filename with timestamp, e.g. "scan_2026-04-10T12:34:56.789Z.h5"
+inline std::string scan_filename()
 {
-    std::filesystem::path sink_root;
-    std::filesystem::path index_root;
-};
-
-inline SinkPaths resolve_sink_paths(MarshalState &state)
-{
-    namespace fs = std::filesystem;
-    SinkPaths paths;
-
-    fs::path mrd_root = fs::path(state.data_dir) / "mrd";
-    ensure_dir(mrd_root);
-
-    if (state.sink_mode == SinkMode::MRD)
-    {
-        paths.sink_root = mrd_root;
-        paths.index_root = mrd_root;
-    }
-    else
-    {
-        std::lock_guard<std::mutex> lock(state.session_mtx);
-        std::string session = state.dumpbox_session.empty() ? iso8601_now_ms() : state.dumpbox_session;
-        fs::path session_dir = fs::path(state.dumpbox_root) / session;
-        paths.index_root = session_dir;
-        paths.sink_root = session_dir / "files";
-        std::error_code ec_mk;
-        std::filesystem::create_directories(paths.sink_root, ec_mk);
-        if (ec_mk)
-            throw std::runtime_error("ensure dumpbox sink failed: " + ec_mk.message());
-        state.dumpbox_session = session;
-    }
-
-    return paths;
+    return "scan_" + iso8601_now_ms() + ".h5";
 }
 
-inline void write_atomic(const std::filesystem::path &dst, const void *data, size_t n)
+inline std::filesystem::path live_scanner_dir(const std::filesystem::path& dump_dir)
 {
-    namespace fs = std::filesystem;
-    fs::path tmp = dst;
-    tmp += ".tmp";
-
-    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd == -1)
-        throw std::runtime_error("open tmp failed: " + tmp.string() + ": " + std::strerror(errno));
-
-    const char *ptr = static_cast<const char *>(data);
-    size_t remaining = n;
-    while (remaining > 0)
-    {
-        ssize_t written = ::write(fd, ptr, remaining);
-        if (written == -1)
-        {
-            int err = errno;
-            ::close(fd);
-            ::unlink(tmp.c_str());
-            throw std::runtime_error("write tmp failed: " + tmp.string() + ": " + std::strerror(err));
-        }
-        ptr += static_cast<size_t>(written);
-        remaining -= static_cast<size_t>(written);
-    }
-
-    if (::fsync(fd) == -1)
-    {
-        int err = errno;
-        ::close(fd);
-        ::unlink(tmp.c_str());
-        throw std::runtime_error("fsync tmp failed: " + tmp.string() + ": " + std::strerror(err));
-    }
-
-    if (::close(fd) == -1)
-    {
-        int err = errno;
-        ::unlink(tmp.c_str());
-        throw std::runtime_error("close tmp failed: " + tmp.string() + ": " + std::strerror(err));
-    }
-
-    std::error_code ec;
-    fs::rename(tmp, dst, ec);
-    if (ec)
-        throw std::runtime_error("rename tmp->dst failed: " + ec.message());
+    auto p = dump_dir / "live" / "from_scanner";
+    ensure_dir(p);
+    return p;
 }
 
-inline void append_line(const std::filesystem::path &dst, const std::string &line)
+inline std::filesystem::path live_recon_dir(const std::filesystem::path& dump_dir)
 {
-    std::string payload = line;
-    payload.push_back('\n');
-
-    int fd = ::open(dst.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd == -1)
-        throw std::runtime_error("open index for append failed: " + dst.string() + ": " + std::strerror(errno));
-
-    const char *ptr = payload.data();
-    size_t remaining = payload.size();
-    while (remaining > 0)
-    {
-        ssize_t written = ::write(fd, ptr, remaining);
-        if (written == -1)
-        {
-            int err = errno;
-            ::close(fd);
-            throw std::runtime_error("append index failed: " + dst.string() + ": " + std::strerror(err));
-        }
-        ptr += static_cast<size_t>(written);
-        remaining -= static_cast<size_t>(written);
-    }
-
-    if (::fsync(fd) == -1)
-    {
-        int err = errno;
-        ::close(fd);
-        throw std::runtime_error("fsync index failed: " + dst.string() + ": " + std::strerror(err));
-    }
-
-    if (::close(fd) == -1)
-        throw std::runtime_error("close index failed: " + dst.string() + ": " + std::strerror(errno));
+    auto p = dump_dir / "live" / "from_reconstruction";
+    ensure_dir(p);
+    return p;
 }
 
-inline std::atomic<uint64_t> &ingest_sequence()
+inline std::filesystem::path dump_scanner_dir(const std::filesystem::path& dump_dir)
 {
-    static std::atomic<uint64_t> seq{1};
-    return seq;
+    auto p = dump_dir / "dump" / "from_scanner";
+    ensure_dir(p);
+    return p;
 }
 
-inline nlohmann::json ingest_payload(MarshalState &state,
-                                     const void *data,
-                                     size_t size,
-                                     const std::string &source)
+inline std::filesystem::path dump_recon_dir(const std::filesystem::path& dump_dir)
 {
-    namespace fs = std::filesystem;
-
-    const std::string ts = iso8601_now_ms();
-    const uint64_t seq = ingest_sequence().fetch_add(1);
-    const uint64_t t_ms = now_ms_epoch();
-
-    std::ostringstream name;
-    name << ts << '_' << std::setw(6) << std::setfill('0') << seq << ".mrd";
-
-    SinkPaths paths = resolve_sink_paths(state);
-
-    fs::path sink_root = paths.sink_root;
-    fs::path index_root = paths.index_root;
-
-    fs::path out_path = sink_root / name.str();
-    write_atomic(out_path, data, size);
-
-    std::error_code ec2;
-    auto size_bytes = fs::file_size(out_path, ec2);
-    if (ec2)
-        size_bytes = size;
-
-    nlohmann::json entry =
-    {
-        {"path", out_path.string()},
-        {"ts", ts},
-        {"t_ms", t_ms},
-        {"size_bytes", size_bytes},
-        {"type", "mrd"},
-        {"seq", seq},
-        {"source", source}
-    };
-
-    const std::string entry_dump = entry.dump();
-    append_line(index_root / "index.jsonl", entry_dump);
-    const std::string latest_dump = entry_dump;
-    write_atomic(index_root / "latest.json", latest_dump.data(), latest_dump.size());
-
-    try
-    {
-        state.ws_emit(entry_dump);
-        state.ws_emit_topic(entry_dump, "mrd.ingest");
-    }
-    catch (const std::exception &e)
-    {
-        LOG_WARN("WS emit failed: " << e.what());
-    }
-
-    try
-    {
-        nlohmann::json evt =
-        {
-            {"type", "acq"},
-            {"path", out_path.string()},
-            {"seq", seq},
-            {"t_ms", t_ms},
-            {"size_bytes", size_bytes},
-            {"ts", ts},
-            {"source", source}
-        };
-        state.ws_emit(evt.dump());
-    }
-    catch (const std::exception &e)
-    {
-        LOG_WARN("WS legacy emit failed: " << e.what());
-    }
-
-    return entry;
+    auto p = dump_dir / "dump" / "from_reconstruction";
+    ensure_dir(p);
+    return p;
 }
+
 } // namespace mrd
