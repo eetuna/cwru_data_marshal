@@ -16,11 +16,8 @@ echo ""
 git worktree prune
 
 # Ensure required branches exist (fetch directly from upstream repo)
-#MRI_BRANCH="mri-data-marhsal"
-#MRI_BRANCH="fix/swmr-realtime-optimization"
-#MRI_BRANCH="fix/async-json-writer"
-MRI_BRANCH="mri-data-marshal"
-ROBOT_BRANCH="robot_data_marshal_with_catheter_system_components"
+MRI_BRANCH="${MRI_BRANCH:-mri-data-marshal}"
+ROBOT_BRANCH="${ROBOT_BRANCH:-robot_data_marshal_with_catheter_system_components}"
 UPSTREAM_REPO="https://github.com/cwru-mercis/cwru_data_marshal.git"
 
 echo "Checking required branches..."
@@ -46,6 +43,35 @@ done
 # Check if worktrees exist, create if needed
 MRI_WORKTREE="$PROJECT_ROOT/.worktrees/mri_data_marshal"
 ROBOT_WORKTREE="$PROJECT_ROOT/.worktrees/robot_data_marshal"
+
+# Validate existing worktrees before reuse. An orphaned directory (gitdir
+# record pruned but files left behind) or a worktree checked out to a
+# different branch would otherwise be used silently and produce stale
+# builds. Abort with a clear instruction instead.
+check_worktree() {
+    local wt="$1"
+    local want_branch="$2"
+    if [ ! -d "$wt" ]; then
+        return 0
+    fi
+    local got_branch
+    if ! got_branch="$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null)"; then
+        echo ""
+        echo "  ✗ ERROR: $wt exists but is not a valid git worktree (orphaned)."
+        echo "           Delete it and rerun: rm -rf $wt"
+        exit 1
+    fi
+    if [ "$got_branch" != "$want_branch" ]; then
+        echo ""
+        echo "  ✗ ERROR: $wt is on branch '$got_branch' but this script expects '$want_branch'."
+        echo "           Either delete it and rerun (rm -rf $wt) or check out the expected"
+        echo "           branch manually inside that worktree."
+        exit 1
+    fi
+}
+
+check_worktree "$MRI_WORKTREE" "$MRI_BRANCH"
+check_worktree "$ROBOT_WORKTREE" "$ROBOT_BRANCH"
 
 if [ ! -d "$MRI_WORKTREE" ]; then
     echo "Creating MRI worktree at $MRI_WORKTREE..."

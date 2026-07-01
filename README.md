@@ -4,7 +4,7 @@ Complete MRI-guided robotic surgery data management system with real-time stream
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Docker Demo (Recommended)
 Run the complete system demo with pre-built Docker images:
@@ -19,7 +19,7 @@ Run the complete system demo with pre-built Docker images:
 
 **What runs:**
 - 2 Marshals (MRI + Robot)
-- 3 Data Generators (Image streamer, ECG, Pose)
+- 5 Data Generators (K-space streamer, Image streamer, Mock recon, ECG, Pose)
 - 5 Robot Clients (Catheter tracking, Controller, Planning, Front-end, Surface tracking)
 - 1 Visualization Client (Optional, requires X11)
 
@@ -33,7 +33,7 @@ Package the entire system for offline deployment:
 
 ---
 
-## 📖 Documentation
+## Documentation
 
 ### Essential Guides (in `/docs/`)
 - **[API_REFERENCE.md](docs/API_REFERENCE.md)** - Complete API documentation for both marshals
@@ -45,50 +45,49 @@ Historical docs moved to `archive/docs_old/` for reference.
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  MRI Marshal (Port 8080, WebSocket 8090)                    │
-│  - Receives MRI frames via HTTP/WebSocket                   │
-│  - Stores in HDF5 (SWMR mode) for real-time access         │
-│  - Stores ECG/pose data in JSONL                            │
-│  - Broadcasts frame notifications via WebSocket             │
-└─────────────────────────────────────────────────────────────┘
-                          │
-                          │ HTTP API (metadata only)
-                          │ Clients use HDF5 for binary data
-                          ▼
-              ┌──────────────────────┐
-              │  Your MRI Client     │
-              │  (h5py, HDF5 C++)    │
-              └──────────────────────┘
+Scanner / K-Space Streamer
+    │
+    │  MRD TCP (port 9100)
+    │  CONFIG_FILE + METADATA_XML + ACQUISITION×N + WAVEFORM + CLOSE
+    v
++--------------------------------------+     MRD TCP
+|  MRI Marshal                         | ──> Reconstruction Service (port 9002)
+|  HTTP :8080 (query/control)          |
+|  MRD TCP :9100 (scanner data)        | <── IMAGE(1022) returned
+|  - Live/dump per-scan H5 archives    |
+|  - Forwards to recon via MRD TCP     |
+|  - Pushes IMAGE back to scanner      |
+|  - GET /image/latest (file path)     |
+|  - POST/GET /pose, PUT/GET /transform|
++--------------------------------------+
+          │
+          │ HTTP GET /image/latest (file path)
+          v
+    Viz Client (reads standalone file, renders with OpenCV)
 
-┌─────────────────────────────────────────────────────────────┐
-│  Robot Marshal (Port 8081)                                   │
-│  - In-memory "virtual filesystem" for robot state           │
-│  - Read/write JSON endpoints for coordination               │
-│  - 10+ data channels (positions, commands, tracking, etc.)  │
-└─────────────────────────────────────────────────────────────┘
-                          │
-                          │ HTTP API (JSON)
-                          ▼
-              ┌──────────────────────┐
-              │  Your Robot Client   │
-              │  (REST API)          │
-              └──────────────────────┘
++----------------------------+
+|  Robot Marshal (Port 8081) |
+|  - Virtual filesystem      |
+|  - Read/write JSON channels|
++----------------------------+
+          |
+          v
+    Robot Clients (catheter, controller, planning, front-end, surface)
 ```
 
 ---
 
-## 🔑 Key Features
+## Key Features
 
 ### MRI Marshal
-- **HDF5 SWMR Mode** - Concurrent read/write for real-time streaming
-- **Metadata-Only HTTP API** - Returns file paths, clients do direct HDF5 reads
-- **WebSocket Notifications** - Real-time frame arrival notifications
-- **Biological Signals** - ECG/vitals stored as time-series JSONL
-- **Pose Tracking** - Position/orientation data storage
+- **Canonical ISMRMRD HDF5 dump** - Records scanner and recon data in standard format when `--dump` is enabled
+- **Standalone File for Live View** - Atomic rename for fast image polling
+- **Reconstruction Forwarding** - Transparent proxy to external recon service
+- **Pose Tracking** - Cached JSON position/orientation
+- **Slice Transform** - Delta transform with atomic consume-on-read
 
 ### Robot Marshal
 - **Virtual Filesystem** - In-memory JSON "files" for fast state exchange
@@ -97,14 +96,14 @@ Historical docs moved to `archive/docs_old/` for reference.
 - **~50-80Hz Operation** - Low-latency HTTP-based coordination
 
 ### Demo System
-- **Synthetic Data** - Generates realistic MRI frames, ECG, and poses
+- **Two Flows** - K-space (with recon) or pre-made images (bypass recon)
 - **5 Robot Clients** - Full catheter system simulation
 - **Visualization** - Real-time OpenCV display (optional)
 - **Configurable** - Adjust frame rates, dimensions, duration via `.env.demo`
 
 ---
 
-## 🛠️ Development
+## Development
 
 ### Repository Structure
 ```
@@ -113,17 +112,17 @@ Historical docs moved to `archive/docs_old/` for reference.
 │   ├── demo-docker.sh           # Quick demo (30s)
 │   ├── demo-persistent.sh       # Persistent demo
 │   ├── export_usb.sh            # Export for USB transfer
-│   └── tools/                   # Worktree helpers
+│   └── build-client-images.sh   # Build all Docker images
 ├── docker/
-│   ├── Dockerfile.mri-marshal   # MRI marshal image
-│   ├── Dockerfile.robot-marshal # Robot marshal image
-│   ├── Dockerfile.ecg-client    # ECG generator
+│   ├── Dockerfile.mri           # MRI marshal image
+│   ├── Dockerfile.mock-recon    # Reconstruction service
+│   ├── Dockerfile.kspace-streamer
+│   ├── Dockerfile.image-streamer
 │   └── ...                      # Other client images
 ├── docs/
 │   ├── API_REFERENCE.md         # Complete API docs
 │   ├── EXTERNAL_CLIENT_GUIDE.md # Client integration
 │   └── DEMO_AND_API_EXPORT.md   # Demo guide
-├── docker-compose.yml           # Development setup
 ├── docker-compose.demo.yml      # Demo orchestration
 └── .env.demo                    # Demo configuration
 ```
@@ -133,10 +132,10 @@ This repo uses git worktrees to build from dedicated marshal branches:
 
 ```bash
 # MRI marshal worktree
-git worktree add ../mri_data_marshal_worktree mri-data-marshal
+git worktree add .worktrees/mri_data_marshal feature/mri-marshal-rewrite-v2-inner
 
 # Robot marshal worktree
-git worktree add ../robot_data_marshal_worktree robot_data_marshal_with_catheter_system_components
+git worktree add .worktrees/robot_data_marshal robot_data_marshal_with_catheter_system_components
 ```
 
 The demo scripts automatically create these if needed.
@@ -144,29 +143,39 @@ The demo scripts automatically create these if needed.
 ### Build from Source
 ```bash
 # Build all Docker images
-docker compose -f docker-compose.demo.yml build
+./scripts/build-client-images.sh
 
 # Or build individual components
-docker compose -f docker-compose.demo.yml build mri-marshal
-docker compose -f docker-compose.demo.yml build robot-marshal
+docker compose --env-file .env.demo -f docker-compose.demo.yml build mri-marshal
 ```
 
 ---
 
-## 📡 API Quick Reference
+## API Quick Reference
 
 ### MRI Marshal (Port 8080)
 ```bash
 # Health check
 curl http://localhost:8080/health
 
-# Get latest frame metadata (returns file path + index)
-curl http://localhost:8080/v1/mrd/latest
+# Get latest reconstructed image path
+curl http://localhost:8080/image/latest
 
-# Get file metadata for HDF5 access
-curl http://localhost:8080/v1/mrd/ingest
+# Get/set slice transform
+curl http://localhost:8080/transform
+curl -X PUT http://localhost:8080/transform \
+  -H "Content-Type: application/json" \
+  -d '{"through_plane_mm":1.0,"readout_mm":0,"phase_mm":0,"rotation_rad":0}'
 
-# Then use HDF5 library to read binary data directly
+# Pose
+curl http://localhost:8080/pose
+curl -X POST http://localhost:8080/pose \
+  -H "Content-Type: application/json" \
+  -d '{"position":[1,2,3],"orientation":[0,0,0.707,0.707]}'
+
+# List archived files
+curl http://localhost:8080/dump/scanner
+curl http://localhost:8080/dump/recon
 ```
 
 ### Robot Marshal (Port 8081)
@@ -187,23 +196,23 @@ See [API_REFERENCE.md](docs/API_REFERENCE.md) for complete documentation.
 
 ---
 
-## 🔒 Security Note
+## Security Note
 
 **The demo has NO authentication!** For production:
 - Add API keys or OAuth
-- Use HTTPS/WSS instead of HTTP/WS
+- Use HTTPS instead of HTTP
 - Implement rate limiting
 - Add access control lists
 
 ---
 
-## 📄 License
+## License
 
 See LICENSE file for details.
 
 ---
 
-## 🙋 Support
+## Support
 
 - **Documentation Issues:** Check `docs/API_REFERENCE.md` and `docs/EXTERNAL_CLIENT_GUIDE.md`
 - **Demo Issues:** Review `docs/DEMO_AND_API_EXPORT.md`

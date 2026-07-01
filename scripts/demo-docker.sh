@@ -16,7 +16,7 @@ echo "=========================================="
 echo "  CWRU Data Marshal - Docker Demo"
 echo "=========================================="
 echo "Duration: ${DEMO_DURATION}s"
-echo "Image: ${IMAGE_WIDTH}x${IMAGE_HEIGHT}x${IMAGE_SLICES} @ ${IMAGE_INTERVAL}ms"
+echo "Flow: k-space + recon (${KSPACE_SLICES:-5} slices @ ${KSPACE_INTERVAL:-0.04}s)"
 echo "Cleanup data: ${CLEANUP_DATA}"
 echo "=========================================="
 
@@ -78,9 +78,9 @@ trap cleanup INT TERM
 monitor_status() {
     sleep 5  # Let things start up
     while true; do
-        # MRI Marshal: latest image-streamer frame (if IMAGE_LOG_STRIDE > 0)
+        # MRI Marshal: latest kspace-streamer volume
         if [ "${IMAGE_LOG_STRIDE:-0}" -gt 0 ]; then
-            FRAME_LINE=$(docker logs cwru-image-streamer --tail 1 2>&1 | grep "frame" || echo "")
+            FRAME_LINE=$(docker logs cwru-kspace-streamer --tail 1 2>&1 | grep -E "volume|frame|image" || echo "")
             if [ -n "$FRAME_LINE" ]; then
                 echo "$FRAME_LINE"
             fi

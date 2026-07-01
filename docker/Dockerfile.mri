@@ -41,16 +41,14 @@ WORKDIR /opt/mri
 # Data volume mount point
 VOLUME ["/data/mri_data"]
 
-# Expose HTTP and WebSocket ports
-EXPOSE 8080 8090
+# Expose HTTP port
+EXPOSE 8080
 
 # Health check endpoint
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
-# Default command
+# Default command. Compose supplies --mrd-port and recon MRD TCP settings.
 CMD ["/opt/mri/build/marshal", \
      "--http", "0.0.0.0:8080", \
-     "--ws", "0.0.0.0:8090", \
-     "--data", "/data/mri_data", \
-     "--sink", "mrd"]
+     "--dump-dir", "/data/mri_data"]

@@ -99,27 +99,30 @@ docker run -d --name robot-marshal \
 
 ## MRI Marshal API Reference
 
-**Base URL:** `http://localhost:8080`
+**HTTP Base URL:** `http://localhost:8080`
+
+Scanner and reconstruction data do not use HTTP. They use the MRD TCP protocol on the marshal `--mrd-port` and the recon service port. HTTP is only for query/control clients.
 
 ### Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health check |
-| `/v1/bio/signal` | POST | Submit ECG/physiological data |
-| `/v1/bio/latest` | GET | Get latest biosignal |
-| `/v1/pose/update` | POST | Submit position/orientation data |
-| `/v1/pose/current` | GET | Get current pose |
-| `/v1/mrd/frame` | POST | Stream MRI frame (SWMR mode) |
-| `/v1/mrd/ingest` | POST | Batch ingest MRD file |
-| `/v1/mrd/latest` | GET | Get latest MRI frame metadata |
-| `/v1/mrd/since` | GET | Get frames after timestamp |
-| `/v1/config` | GET | Server configuration |
+| `/pose` | POST | Submit position/orientation data |
+| `/pose` | GET | Get current pose |
+| `/transform` | GET | Get + atomically zero the slice transform delta (consume-on-read) |
+| `/transform` | PUT | Submit a slice transform delta |
+| `/image/latest` | GET | Get the path to the latest atomic image snapshot (`latest_image.h5`) |
+| `/dump/scanner` | GET | List scanner archive files |
+| `/dump/recon` | GET | List reconstruction archive files |
+| `/debug/sinks` | GET | Per-pipeline sink counters (archival retention) |
+| `/debug/perf` | GET | Free-running perf counters (FPS / throughput debugging) |
 
-### WebSocket (Real-time Streaming)
+See `docs/API_REFERENCE.md` for full request/response shapes for each endpoint.
 
-- **URL:** `ws://localhost:8090`
-- Used for real-time data streaming (image frames, etc.)
+### WebSocket (opt-in)
+
+WebSocket streaming is **disabled by default** in the demo deployment. To enable, launch marshal with `--ws-port 8090` (or any port) and expose that port in your compose file. When enabled, WS pushes the JSON envelope `state.ws_emit(...)` populates. The default demo `docker-compose.demo.yml` does not pass `--ws-port` and does not publish the port; HTTP polling of `/image/latest` is the supported live interface.
 
 ---
 
@@ -240,15 +243,6 @@ def get_json(url):
     except (HTTPError, URLError) as e:
         return {"error": str(e)}
 
-# Send ECG data
-ecg_data = {
-    "source": "my_ecg_monitor",
-    "data": [0.1, 0.2, 0.15, 0.25, 0.18],
-    "rate_hz": 250.0
-}
-ok, resp = post_json(f"{MRI_MARSHAL}/v1/bio/signal", ecg_data)
-print(f"ECG sent: {ok}")
-
 # Send pose update
 pose_data = {
     "p": [10.0, 20.0, 30.0],
@@ -256,7 +250,7 @@ pose_data = {
     "frame": "scanner",
     "source": "my_tracker"
 }
-ok, resp = post_json(f"{MRI_MARSHAL}/v1/pose/update", pose_data)
+ok, resp = post_json(f"{MRI_MARSHAL}/pose", pose_data)
 print(f"Pose sent: {ok}")
 
 # Read robot data
@@ -288,16 +282,6 @@ ROBOT_MARSHAL = "http://localhost:8081"
 print("MRI Marshal:", requests.get(f"{MRI_MARSHAL}/health").json())
 print("Robot Marshal:", requests.get(f"{ROBOT_MARSHAL}/").text[:50])
 
-# Send ECG stream
-for i in range(10):
-    resp = requests.post(f"{MRI_MARSHAL}/v1/bio/signal", json={
-        "source": "ecg_monitor",
-        "data": [0.1 + i*0.01] * 100,  # 100 samples
-        "rate_hz": 100.0
-    })
-    print(f"ECG {i+1}: {resp.status_code}")
-    time.sleep(1.0)
-
 # Send continuous pose updates
 import math
 t = 0
@@ -305,7 +289,7 @@ while True:
     x = 50 * math.cos(t)
     y = 50 * math.sin(t)
 
-    resp = requests.post(f"{MRI_MARSHAL}/v1/pose/update", json={
+    resp = requests.post(f"{MRI_MARSHAL}/pose", json={
         "p": [x, y, 100.0],
         "R": [1, 0, 0, 0, 1, 0, 0, 0, 1],
         "frame": "scanner",
@@ -327,23 +311,27 @@ import requests
 MRI = "http://localhost:8080"
 
 # Get latest biosignal
-bio = requests.get(f"{MRI}/v1/bio/latest").json()
+bio = requests.get(f"{MRI}/health").json()
 print(f"Latest ECG: {len(bio.get('data', []))} samples from {bio.get('source')}")
 
 # Get current pose
-pose = requests.get(f"{MRI}/v1/pose/current").json()
+pose = requests.get(f"{MRI}/pose").json()
 print(f"Current pose: {pose.get('pose', {}).get('p')}")
 
-# Get latest MRI frame
-frame = requests.get(f"{MRI}/v1/mrd/latest").json()
-print(f"Latest frame: {frame.get('path')} at {frame.get('ts')}")
+# Get latest MRI snapshot pointer
+resp = requests.get(f"{MRI}/image/latest")
+if resp.status_code == 200:
+    frame = resp.json()
+    print(f"Latest frame: {frame.get('path')}")
+elif resp.status_code == 204:
+    print("Latest frame: none yet")
 
 # Poll for new frames
 import time
 last_ts = ""
 while True:
     params = {"ts": last_ts} if last_ts else {"last": 1}
-    frames = requests.get(f"{MRI}/v1/mrd/since", params=params).json()
+    frames = requests.get(f"{MRI}/dump/scanner", params=params).json()
     for f in frames:
         print(f"New frame: {f['path']}")
         last_ts = f['ts']
@@ -382,16 +370,8 @@ int main() {
         std::cout << "MRI Marshal: " << res->body << "\n";
     }
 
-    // Send ECG data
-    json ecg = {
-        {"source", "cpp_ecg_client"},
-        {"data", {0.1, 0.2, 0.15, 0.25, 0.18}},
-        {"rate_hz", 250.0}
-    };
-    res = mri.Post("/v1/bio/signal", ecg.dump(), "application/json");
-    if (res && res->status == 200) {
-        std::cout << "ECG sent successfully\n";
-    }
+    // Note: ECG/waveform data is sent via MRD TCP (kspace_streamer --ecg), not HTTP.
+    // See ARCHITECTURE.md for the MRD TCP wire protocol.
 
     // Send pose update
     json pose = {
@@ -400,7 +380,7 @@ int main() {
         {"frame", "scanner"},
         {"source", "cpp_tracker"}
     };
-    res = mri.Post("/v1/pose/update", pose.dump(), "application/json");
+    res = mri.Post("/pose", pose.dump(), "application/json");
     if (res && res->status == 200) {
         std::cout << "Pose sent: " << res->body << "\n";
     }
@@ -423,11 +403,13 @@ int main() {
         std::cout << "Robot write successful\n";
     }
 
-    // Get latest MRI frame
-    res = mri.Get("/v1/mrd/latest");
+    // Get latest MRI snapshot pointer
+    res = mri.Get("/image/latest");
     if (res && res->status == 200) {
         json frame = json::parse(res->body);
         std::cout << "Latest frame: " << frame["path"] << "\n";
+    } else if (res && res->status == 204) {
+        std::cout << "Latest frame: none yet\n";
     }
 
     return 0;
@@ -467,7 +449,7 @@ int main() {
             {"source", "cpp_trajectory"}
         };
 
-        auto res = cli.Post("/v1/pose/update", pose.dump(), "application/json");
+        auto res = cli.Post("/pose", pose.dump(), "application/json");
         if (res && res->status == 200) {
             std::cout << "t=" << t << " pos=[" << x << ", " << y << ", " << z << "]\n";
         }
@@ -489,24 +471,16 @@ int main() {
 # Health check
 curl http://localhost:8080/health
 
-# Send ECG data
-curl -X POST http://localhost:8080/v1/bio/signal \
-  -H "Content-Type: application/json" \
-  -d '{"source": "test", "data": [0.1, 0.2, 0.3], "rate_hz": 100}'
-
 # Send pose
-curl -X POST http://localhost:8080/v1/pose/update \
+curl -X POST http://localhost:8080/pose \
   -H "Content-Type: application/json" \
   -d '{"p": [10, 20, 30], "R": [1,0,0,0,1,0,0,0,1], "frame": "scanner"}'
 
-# Get latest biosignal
-curl http://localhost:8080/v1/bio/latest
-
 # Get current pose
-curl http://localhost:8080/v1/pose/current
+curl http://localhost:8080/pose
 
-# Get latest MRI frame
-curl http://localhost:8080/v1/mrd/latest
+# Get latest MRI snapshot pointer
+curl http://localhost:8080/image/latest
 ```
 
 ### Robot Marshal
@@ -531,7 +505,7 @@ curl http://localhost:8081/read/forward_kinematics
 
 ## HDF5 Data Files
 
-The MRI Marshal stores image data in HDF5 format with SWMR (Single-Writer Multiple-Reader) support.
+The MRI Marshal stores image data in HDF5 format with canonical ISMRMRD HDF5 format.
 
 ### File Location
 
@@ -551,8 +525,8 @@ The MRI Marshal stores image data in HDF5 format with SWMR (Single-Writer Multip
 import h5py
 import numpy as np
 
-# Open in SWMR mode for concurrent reading
-with h5py.File("./data/mri_data/acquisition_001.h5", "r", swmr=True) as f:
+# Open in HDF5 mode for concurrent reading
+with h5py.File("./data/mri_data/acquisition_001.h5", "r", hdf5=True) as f:
     # List datasets
     print("Datasets:", list(f.keys()))
 
@@ -567,10 +541,10 @@ with h5py.File("./data/mri_data/acquisition_001.h5", "r", swmr=True) as f:
             print(f"  {key}: {f['metadata'].attrs[key]}")
 ```
 
-### SWMR Considerations
+### HDF5 Considerations
 
 - Set `HDF5_USE_FILE_LOCKING=FALSE` environment variable
-- Open files with `swmr=True` for reading while marshal is writing
+- Open files with `hdf5=True` for reading while marshal is writing
 - Use `dataset.refresh()` to see latest data in long-running readers
 
 ---
@@ -680,7 +654,7 @@ Full working client implementations are available:
 
 | Client | Language | Location |
 |--------|----------|----------|
-| ECG Mock | Python | [clients/mocks/ecg_client.py](../clients/mocks/ecg_client.py) |
+| ECG/Waveform | C++ | kspace_streamer with `--ecg` flag (MRD TCP, waveform_id=0) |
 | Pose Mock | Python | [clients/mocks/pose_client.py](../clients/mocks/pose_client.py) |
 | Image Streamer | C++ | `mri_data_marshal_worktree/clients/` |
 | Viz Client | C++ | `mri_data_marshal_worktree/clients/` |

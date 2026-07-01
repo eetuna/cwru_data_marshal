@@ -1,19 +1,12 @@
 FROM python:3.11-slim
 
-# Install requests library
-RUN pip install --no-cache-dir requests
-
-# Copy mock clients
+# Copy pose client
 COPY clients/mocks/pose_client.py /app/pose_client.py
 
 WORKDIR /app
 
-# Default connection to MRI marshal
-ENV MRI_MARSHAL_HTTP=http://mri-marshal:8080
-
 # Disable Python output buffering so logs appear immediately
 ENV PYTHONUNBUFFERED=1
 
-# Default: run pose_client continuously
-# --count 0 means infinite, --interval 0.5 second between updates
-CMD ["python3", "-u", "pose_client.py", "--endpoint", "http://mri-marshal:8080", "--count", "0", "--interval", "0.5", "--trajectory", "circular"]
+# Default: run pose_client posting to /pose
+CMD ["python3", "-u", "pose_client.py", "--http", "http://mri-marshal:8080", "--count", "0", "--interval", "0.5"]

@@ -1,19 +1,30 @@
+# cwru/mock-recon:latest
+#
+# Mock reconstruction service for the v2 marshal.
+# MRD TCP server on port 9002 (python-ismrmrd-server wire protocol).
+# Accepts CONFIG, METADATA_XML, ACQUISITION, WAVEFORM, IMAGE, CLOSE.
+# Sends MRD return messages, including IMAGE(1022), back on same TCP connection.
+#
+# Listens on port 9002.
+
 FROM python:3.11-slim
 
-# Install curl for healthcheck and flask for the service
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# curl for healthcheck
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir flask requests
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy mock reconstruction service
-COPY tests/mock_recon_service.py /app/mock_recon_service.py
+# Python deps
+RUN pip install --no-cache-dir \
+        ismrmrd \
+        numpy
 
-WORKDIR /app
-
-# Disable Python output buffering so logs appear immediately
-ENV PYTHONUNBUFFERED=1
+# Copy mock recon server
+COPY docker/mock-recon/mock_recon.py /opt/mock-recon/mock_recon.py
 
 EXPOSE 9002
 
-# Default: run mock reconstruction service on port 9002
-CMD ["python3", "-u", "mock_recon_service.py", "9002"]
+CMD ["python3", "/opt/mock-recon/mock_recon.py"]
