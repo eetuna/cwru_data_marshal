@@ -52,14 +52,14 @@ def build_header(matrix, coils, fov=300.0):
 
 
 def moving_phantom(matrix, frame):
-    """Base Shepp-Logan + a bright disk orbiting the center -> visibly changes per frame."""
+    """Base Shepp-Logan + a big bright disk orbiting the center -> obviously changes per frame."""
     phan = simulation.phantom(matrix).astype(np.float32)
-    t = frame * 0.3
-    cx = matrix // 2 + int(matrix * 0.30 * np.cos(t))
-    cy = matrix // 2 + int(matrix * 0.30 * np.sin(t))
+    t = frame * 0.6                                   # faster orbit
+    cx = matrix // 2 + int(matrix * 0.32 * np.cos(t))
+    cy = matrix // 2 + int(matrix * 0.32 * np.sin(t))
     yy, xx = np.ogrid[:matrix, :matrix]
-    disk = ((xx - cx) ** 2 + (yy - cy) ** 2) < (matrix * 0.07) ** 2
-    phan[disk] += 1.0
+    disk = ((xx - cx) ** 2 + (yy - cy) ** 2) < (matrix * 0.14) ** 2   # big
+    phan[disk] += 3.0                                                 # bright
     return phan
 
 
