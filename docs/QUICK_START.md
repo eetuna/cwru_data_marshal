@@ -27,7 +27,14 @@ docker compose ps                                                          # wai
 | Robot marshal | 8081 | `ROBOT_PORT` |
 | WebGL write-back | 3001 | `WRITE_PORT` |
 
-Example: `HTTP_PORT=18080 docker compose up -d`
+All knobs are just env vars in front of the command and stack together, e.g.:
+```bash
+# remap two ports, test recon, live
+HTTP_PORT=18080 MRD_PORT=19100 docker compose --profile test-recon up -d
+
+# remap UI port, real recon, dump mode
+UI_PORT=13000 MARSHAL_DUMP=--dump RECON_HOST=10.0.0.5 RECON_PORT=9002 docker compose up -d
+```
 
 ## Recon: bundled vs real
 Marshal always talks to a recon at `RECON_HOST:RECON_PORT` (default `recon:9002`). Two ways to supply it — **pick one, not both**:
