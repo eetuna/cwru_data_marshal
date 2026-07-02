@@ -56,11 +56,17 @@ def build_header(matrix, coils, slices, fov=300.0):
     return h.toXML('utf-8')
 
 
-def moving_phantom(matrix, frame, slice_idx=0, base=None):
-    """Shepp-Logan + a bright disk orbiting the center. The orbit phase advances
-    per frame and is offset per slice, so every slice and every frame differ."""
+# Orbit angular speed (rad/sec). Motion is driven by WALL-CLOCK phase, not frame
+# index, so the dot orbits at this fixed visible speed regardless of --fps
+# (higher fps just = more points on the same circle = smoother, not faster).
+ORBIT_RAD_PER_SEC = 1.4          # ~4.5 s per revolution
+
+
+def moving_phantom(matrix, phase, slice_idx=0, base=None):
+    """Shepp-Logan + a bright disk orbiting the center at `phase` radians,
+    offset per slice so slices differ."""
     phan = (base if base is not None else simulation.phantom(matrix)).astype(np.float32).copy()
-    t = frame * 0.6 + slice_idx * 0.8
+    t = phase + slice_idx * 0.8
     cx = matrix // 2 + int(matrix * 0.32 * np.cos(t))
     cy = matrix // 2 + int(matrix * 0.32 * np.sin(t))
     yy, xx = np.ogrid[:matrix, :matrix]
@@ -115,15 +121,18 @@ def main():
     counter = 0
     frame = 0
     last_log = 0.0
+    t_start = time.time()
     print(f"streaming mode={args.mode} fps={args.fps} matrix={matrix} slices={slices} "
           f"-> {args.address}:{args.port}", flush=True)
     try:
         while args.frames == 0 or frame < args.frames:
             t0 = time.time()
+            # wall-clock phase => constant on-screen orbit speed at any fps
+            phase = (t0 - t_start) * ORBIT_RAD_PER_SEC
 
             if args.mode == "kspace":
                 for s in range(slices):
-                    img = moving_phantom(matrix, frame, s, base)
+                    img = moving_phantom(matrix, phase, s, base)
                     coil_images = np.tile(img, (coils, 1, 1)) * csm
                     K = transform.transform_image_to_kspace(coil_images, (1, 2))
                     for line in range(matrix):
@@ -146,7 +155,7 @@ def main():
                         conn.send_acquisition(acq)
                         counter += 1
             else:  # image: one IMAGE message carrying the whole slice stack
-                vol = np.stack([moving_phantom(matrix, frame, s, base)
+                vol = np.stack([moving_phantom(matrix, phase, s, base)
                                 for s in range(slices)])         # (nz, ny, nx)
                 im = ismrmrd.Image.from_array(vol, transpose=False)
                 im.image_index = frame
