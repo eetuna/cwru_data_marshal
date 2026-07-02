@@ -12,7 +12,13 @@ Or step by step (WSL, repo root). Images must be built once (`./scripts/build-cl
 # start (live + bundled test recon)
 docker compose --profile test-recon up -d
 docker compose ps                          # wait healthy
+```
 
+**Open the browser now → http://localhost:3000** (on WSL use the Windows browser). Open it
+*before* pushing data — it's blank until the first push, then renders and updates live, so
+you don't miss a stream. (For a single push the last image is retained anyway; blank in dump.)
+
+```bash
 # phantom (k-space)
 docker run --rm -v "$PWD/session-data:/data" fire-python:latest \
   python3 generate_cartesian_shepp_logan_dataset.py -o /data/phantom.h5
@@ -32,11 +38,6 @@ docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python
   /data/live/from_reconstruction/latest_image.h5
 curl -s localhost:8080/image/latest        # 200 -> .../from_scanner/latest_image.h5
 ```
-
-## View in WebGL (live mode)
-Open **http://localhost:3000** in a browser (on WSL, use the Windows browser). The
-reconstructed slice renders and updates on each live push. Hard-refresh (Ctrl-Shift-R)
-if it doesn't appear. In dump mode the UI stays blank (expected — `/image/latest` = 404).
 
 ## Switch to dump
 ```bash
