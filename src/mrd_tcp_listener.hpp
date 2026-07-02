@@ -17,6 +17,7 @@
 #define LOG_COMPONENT "mrd_tcp"
 #include "logging.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -357,13 +358,53 @@ private:
         std::vector<std::pair<uint16_t, std::vector<uint8_t>>> recon_preamble;
         bool normal_close_seen = false;
 
+        // Cap on WAVEFORM bytes held in the preamble. A k-space scan
+        // flushes the preamble on its first ACQUISITION, so waveforms
+        // buffered before that are negligible; the cap only matters for
+        // long image-only scans with ECG, where recon is never engaged
+        // and buffered waveforms would otherwise grow for the whole
+        // scan. CONFIG/XML/TEXT are never dropped — they are tiny and
+        // required for a correct recon session.
+        static constexpr size_t kMaxPreambleWaveformBytes = 32ULL * 1024 * 1024;
+        size_t preamble_waveform_bytes = 0;
+        bool preamble_cap_logged = false;
+
         auto send_or_buffer_recon = [&](uint16_t tag, const std::vector<uint8_t>& body) {
             if (!forwarder_) return;
             if (session_active_.load() && forwarder_->is_connected()) {
                 forwarder_->post_frame(tag, body);
-            } else {
-                recon_preamble.emplace_back(tag, body);
+                return;
             }
+            if (tag == MRD_MESSAGE_ISMRMRD_WAVEFORM) {
+                preamble_waveform_bytes += body.size();
+                while (preamble_waveform_bytes > kMaxPreambleWaveformBytes) {
+                    auto it = std::find_if(recon_preamble.begin(), recon_preamble.end(),
+                        [](const auto& e) {
+                            return e.first == MRD_MESSAGE_ISMRMRD_WAVEFORM;
+                        });
+                    if (it == recon_preamble.end()) break;
+                    preamble_waveform_bytes -= it->second.size();
+                    recon_preamble.erase(it);
+                    if (!preamble_cap_logged) {
+                        preamble_cap_logged = true;
+                        LOG_WARN("Recon preamble waveform buffer exceeded "
+                                 << kMaxPreambleWaveformBytes
+                                 << " bytes; dropping oldest buffered waveforms "
+                                 << "(recon not engaged this scan)");
+                    }
+                }
+            }
+            recon_preamble.emplace_back(tag, body);
+        };
+
+        // The preamble is strictly per-scan: it is flushed (and cleared)
+        // when the first ACQUISITION opens the recon session, and cleared
+        // at every scan boundary (CLOSE). Without the clears, scan B on a
+        // persistent scanner connection replayed scan A's CONFIG/METADATA
+        // into recon ahead of its own — recon then ran the stale config.
+        auto clear_recon_preamble = [&]() {
+            recon_preamble.clear();
+            preamble_waveform_bytes = 0;
         };
 
         // Per contract (line 119): "Recon connection state must be
@@ -385,6 +426,9 @@ private:
                 for (const auto& [tag, body] : recon_preamble) {
                     forwarder_->post_frame(tag, body);
                 }
+                // Flushed onto the recon socket; drop the buffered copies
+                // so they cannot be replayed into a later scan's session.
+                clear_recon_preamble();
             }
             return session_active_.load() && forwarder_->is_connected();
         };
@@ -564,6 +608,10 @@ private:
                     // Recon may have been restarted by the operator
                     // between scans.
                     recon_attempted = false;
+                    // Scan boundary: anything still buffered (image-only
+                    // scan, or recon down all scan) belongs to THIS scan
+                    // and must not leak into the next one's session.
+                    clear_recon_preamble();
                     // HIGH #10: surface dump overflow to the operator via log
                     // before close_scan() tears the recorder down. Previously
                     // this was only visible as the dump_complete="false" HDF5
