@@ -106,6 +106,9 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  // Never cache API reads — /api/read/.../0 returns a new frame each poll but at a
+  // stable URL, so browser caching would freeze the viewer on the first frame.
+  res.header('Cache-Control', 'no-store, no-cache, must-revalidate');
 
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
