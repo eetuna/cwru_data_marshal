@@ -51,8 +51,10 @@ public:
     using FailureCallback = std::function<void()>;
 
     ReconForwarder(const std::string& host, uint16_t port,
-                   MessageCallback on_message, FailureCallback on_failure)
+                   MessageCallback on_message, FailureCallback on_failure,
+                   uint32_t connect_timeout_ms = 5000)
         : recon_host_(host), recon_port_(port),
+          connect_timeout_ms_(connect_timeout_ms),
           on_message_(std::move(on_message)), on_failure_(std::move(on_failure)) {}
 
     ~ReconForwarder() { end_session(); }
@@ -60,6 +62,13 @@ public:
     // --- Session lifecycle (called from marshal's MRD TCP listener thread) ---
 
     // Connect to recon, start reader thread. Call ONCE per scan, before any send().
+    //
+    // Resolve + connect are BOUNDED by connect_timeout_ms_. A blackholed
+    // recon host (firewall drop, dead VM) must not hold the scanner
+    // session thread hostage for the kernel's SYN-retry period (~130 s
+    // on default Linux); DNS resolution gets the same bound. The private
+    // ioc_ is used only here — the reader/writer paths operate on the raw
+    // native fd — so driving it with run_for on the calling thread is safe.
     bool begin_session() {
         end_session();  // clean up any previous session
         drop_logged_.store(false);
@@ -67,13 +76,62 @@ public:
         close_received_.store(false);
 
         try {
+            auto sock = std::make_unique<tcp::socket>(ioc_);
             tcp::resolver resolver(ioc_);
-            auto endpoints = resolver.resolve(recon_host_, std::to_string(recon_port_));
+            boost::system::error_code result_ec = net::error::would_block;
+            bool completed = false;
+
+            resolver.async_resolve(recon_host_, std::to_string(recon_port_),
+                [&](const boost::system::error_code& ec,
+                    tcp::resolver::results_type results) {
+                    if (ec) { result_ec = ec; completed = true; return; }
+                    net::async_connect(*sock, results,
+                        [&](const boost::system::error_code& ec2, const tcp::endpoint&) {
+                            result_ec = ec2;
+                            completed = true;
+                        });
+                });
+
+            ioc_.restart();
+            ioc_.run_for(std::chrono::milliseconds(connect_timeout_ms_));
+            if (!completed) {
+                // Deadline expired with the resolve/connect still pending.
+                // Cancel and drain the aborted handlers (they capture the
+                // locals above by reference, so they MUST run before this
+                // scope exits), then record the timeout. The assignment
+                // comes after the drain so a completion that raced the
+                // deadline cannot resurrect a socket we just closed.
+                resolver.cancel();
+                boost::system::error_code ignore;
+                sock->close(ignore);
+                ioc_.run();
+                result_ec = net::error::timed_out;
+            }
+
+            if (result_ec) {
+                LOG_WARN("Failed to connect to recon at " << recon_host_ << ":"
+                         << recon_port_ << " within " << connect_timeout_ms_
+                         << " ms: " << result_ec.message());
+                connected_.store(false);
+                if (on_failure_) { try { on_failure_(); } catch (...) {} }
+                return false;
+            }
+
+            boost::system::error_code opt_ec;
+            sock->set_option(tcp::no_delay(true), opt_ec);
+            // async_connect leaves the native fd in non-blocking mode
+            // (synchronous net::connect did not). The reader/writer
+            // paths issue raw blocking recv/send on the native fd and
+            // treat EAGAIN as a hard error, so restore blocking mode
+            // now that no async operation remains on this socket.
+            sock->native_non_blocking(false, opt_ec);
+            if (opt_ec) {
+                LOG_WARN("Failed to restore blocking mode on recon socket: "
+                         << opt_ec.message());
+            }
             {
                 std::lock_guard<std::mutex> lk(socket_mtx_);
-                socket_ = std::make_unique<tcp::socket>(ioc_);
-                net::connect(*socket_, endpoints);
-                socket_->set_option(tcp::no_delay(true));
+                socket_ = std::move(sock);
             }
             connected_.store(true);
             LOG_INFO("Connected to recon at " << recon_host_ << ":" << recon_port_);
@@ -182,6 +240,7 @@ public:
 private:
     std::string recon_host_;
     uint16_t recon_port_;
+    uint32_t connect_timeout_ms_{5000};
     MessageCallback on_message_;
     FailureCallback on_failure_;
 

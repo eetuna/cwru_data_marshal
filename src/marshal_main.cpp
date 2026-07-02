@@ -295,6 +295,7 @@ int main(int argc, char** argv)
     uint16_t mrd_port = 0;
     std::size_t max_body_size = 128ULL * 1024ULL * 1024ULL;
     uint32_t recon_close_timeout_ms = 30000;
+    uint32_t recon_connect_timeout_ms = 5000;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -331,6 +332,12 @@ int main(int argc, char** argv)
         else if (a == "--recon-close-timeout-ms" && i + 1 < argc) {
             if (!checked_parse_uint32(argv[++i], recon_close_timeout_ms)) {
                 LOG_ERROR("--recon-close-timeout-ms: invalid value '" << argv[i] << "'");
+                return 1;
+            }
+        }
+        else if (a == "--recon-connect-timeout-ms" && i + 1 < argc) {
+            if (!checked_parse_uint32(argv[++i], recon_connect_timeout_ms)) {
+                LOG_ERROR("--recon-connect-timeout-ms: invalid value '" << argv[i] << "'");
                 return 1;
             }
         }
@@ -446,7 +453,8 @@ int main(int argc, char** argv)
         };
 
         forwarder = std::make_unique<mrd::ReconForwarder>(
-            recon_host, recon_port, on_message, on_failure);
+            recon_host, recon_port, on_message, on_failure,
+            recon_connect_timeout_ms);
     }
 
     // Log config
@@ -457,7 +465,8 @@ int main(int argc, char** argv)
             << " dump=" << (dump_enabled ? "on" : "off")
             << " max_body=" << max_body_size;
         if (!recon_host.empty()) cfg << " recon=" << recon_host << ":" << recon_port
-                                     << " recon_close_timeout_ms=" << recon_close_timeout_ms;
+                                     << " recon_close_timeout_ms=" << recon_close_timeout_ms
+                                     << " recon_connect_timeout_ms=" << recon_connect_timeout_ms;
         if (ws_port > 0) cfg << " ws-port=" << ws_port;
         if (mrd_port > 0) cfg << " mrd-port=" << mrd_port;
         LOG_INFO(cfg.str());
