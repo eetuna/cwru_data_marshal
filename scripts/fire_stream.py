@@ -106,6 +106,7 @@ def main():
     period = 1.0 / args.fps if args.fps > 0 else 0.0
     counter = 0
     frame = 0
+    last_log = 0.0
     print(f"streaming mode={args.mode} fps={args.fps} matrix={matrix} -> {args.address}:{args.port}", flush=True)
     try:
         while args.frames == 0 or frame < args.frames:
@@ -141,7 +142,11 @@ def main():
                 conn.send_image(im)
 
             frame += 1
-            dt = time.time() - t0
+            now = time.time()
+            if now - last_log >= 1.0:
+                print(f"  streamed {frame} frames ({args.mode})", flush=True)
+                last_log = now
+            dt = now - t0
             if period > dt:
                 time.sleep(period - dt)
     except KeyboardInterrupt:
