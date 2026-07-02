@@ -11,7 +11,12 @@ Older marshals wrote a single /images/data 5D dataset; that layout is
 still supported as a fallback.
 
 Usage:
-  python3 read_hdf5.py <file_path> <frame_index> <mode>
+  One-shot:  python3 read_hdf5.py <file_path> <frame_index> <mode>
+  Server:    python3 read_hdf5.py --serve
+             (persistent worker: one JSON request per stdin line
+              {"path": ..., "frame": N, "mode": "2d"|"3d"} -> one JSON
+              response per stdout line. Avoids a Python interpreter
+              start per poll, which caps the viewer at a few fps.)
   mode: "2d" (middle slice) or "3d" (full volume)
 """
 import sys, os, json
@@ -42,18 +47,10 @@ def find_image_dataset(f):
     return f[found[-1]]
 
 
-def main():
-    if len(sys.argv) != 4:
-        print(json.dumps({"error": "Usage: read_hdf5.py <path> <frame_index> <2d|3d>"}))
-        sys.exit(1)
-
-    fpath = sys.argv[1]
-    frame_index = int(sys.argv[2])
-    mode = sys.argv[3]
-
+def read_frame(fpath, frame_index, mode):
+    """Read one frame from the file; returns a JSON-serializable dict."""
     if not os.path.exists(fpath):
-        print(json.dumps({"error": f"File not found: {fpath}"}))
-        sys.exit(1)
+        return {"error": f"File not found: {fpath}"}
 
     # Marshal publishes atomically-renamed complete files. Try SWMR (works for
     # libismrmrd's libver=latest files); fall back to a plain read otherwise.
@@ -76,24 +73,49 @@ def main():
             data = dset[()].reshape((1,) + shape)
             n_frames, n_ch, nz, ny, nx = data.shape
         else:
-            print(json.dumps({"error": f"unexpected image dataset shape {shape}"}))
-            return
+            return {"error": f"unexpected image dataset shape {shape}"}
 
         fi = min(frame_index, n_frames - 1)
 
         if mode == "2d":
             mid_z = nz // 2
             values = data[fi, 0, mid_z, :, :].flatten().tolist()
-            result = {"width": nx, "height": ny, "values": values}
+            return {"width": int(nx), "height": int(ny), "values": values}
         elif mode == "3d":
             values = data[fi, 0, :, :, :].flatten().tolist()
-            result = {"width": nx, "height": ny, "depth": nz, "values": values}
+            return {"width": int(nx), "height": int(ny), "depth": int(nz), "values": values}
         else:
-            result = {"error": f"Unknown mode: {mode}"}
-
-        print(json.dumps(result))
+            return {"error": f"Unknown mode: {mode}"}
     finally:
         f.close()
+
+
+def serve():
+    """Persistent worker: JSON-lines request/response over stdin/stdout."""
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+            result = read_frame(req["path"], int(req.get("frame", 0)), req.get("mode", "2d"))
+        except Exception as e:
+            result = {"error": str(e)}
+        sys.stdout.write(json.dumps(result) + "\n")
+        sys.stdout.flush()
+
+
+def main():
+    if "--serve" in sys.argv:
+        serve()
+        return
+
+    if len(sys.argv) != 4:
+        print(json.dumps({"error": "Usage: read_hdf5.py <path> <frame_index> <2d|3d>  (or --serve)"}))
+        sys.exit(1)
+
+    result = read_frame(sys.argv[1], int(sys.argv[2]), sys.argv[3])
+    print(json.dumps(result))
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
-const { execFile } = require('child_process');
+const { spawn } = require('child_process');
 
 const app = express();
 const PORT = 3000;
@@ -73,27 +73,54 @@ async function fetchMriLatest() {
 }
 
 /**
- * Read frame data from HDF5 by spawning the Python reader.
+ * Read frame data from HDF5 via a persistent Python worker (read_hdf5.py --serve).
+ * A per-poll `python3` spawn costs ~300-400 ms (interpreter start), capping the
+ * viewer at ~2-3 fps; the warm worker answers in ~10 ms. One JSON request per
+ * stdin line -> one JSON response per stdout line, served in order.
  * mode: "2d" (middle slice) or "3d" (full volume)
  * Returns parsed JSON: { width, height, [depth], values: number[] }
  */
+let hdf5Proc = null;
+let hdf5Pending = [];   // FIFO of {resolve, reject}; worker replies in order
+let hdf5Buf = '';
+
+function ensureHdf5Worker() {
+  if (hdf5Proc) return;
+  hdf5Proc = spawn('python3', [HDF5_READER, '--serve'],
+    { env: { ...process.env, HDF5_USE_FILE_LOCKING: 'FALSE' } });
+  hdf5Buf = '';
+  hdf5Proc.stdout.on('data', (chunk) => {
+    hdf5Buf += chunk.toString();
+    let nl;
+    while ((nl = hdf5Buf.indexOf('\n')) >= 0) {
+      const line = hdf5Buf.slice(0, nl);
+      hdf5Buf = hdf5Buf.slice(nl + 1);
+      const pending = hdf5Pending.shift();
+      if (!pending) continue;
+      try {
+        const result = JSON.parse(line);
+        if (result.error) pending.reject(new Error(result.error));
+        else pending.resolve(result);
+      } catch (e) {
+        pending.reject(new Error(`Failed to parse h5py output: ${e.message}`));
+      }
+    }
+  });
+  hdf5Proc.stderr.on('data', (d) => console.error('[read_hdf5]', d.toString().trim()));
+  hdf5Proc.on('exit', (code) => {
+    console.error(`[read_hdf5] worker exited (code ${code}); will respawn on next read`);
+    hdf5Proc = null;
+    const stranded = hdf5Pending;
+    hdf5Pending = [];
+    stranded.forEach((p) => p.reject(new Error('h5py worker exited')));
+  });
+}
+
 function readHdf5Frame(filePath, frameIndex, mode) {
   return new Promise((resolve, reject) => {
-    execFile('python3', [HDF5_READER, filePath, String(frameIndex), mode],
-      { maxBuffer: 50 * 1024 * 1024, env: { ...process.env, HDF5_USE_FILE_LOCKING: 'FALSE' } },
-      (error, stdout, stderr) => {
-        if (error) {
-          return reject(new Error(`h5py reader failed: ${error.message} ${stderr}`));
-        }
-        try {
-          const result = JSON.parse(stdout);
-          if (result.error) return reject(new Error(result.error));
-          resolve(result);
-        } catch (e) {
-          reject(new Error(`Failed to parse h5py output: ${e.message}`));
-        }
-      }
-    );
+    ensureHdf5Worker();
+    hdf5Pending.push({ resolve, reject });
+    hdf5Proc.stdin.write(JSON.stringify({ path: filePath, frame: frameIndex, mode }) + '\n');
   });
 }
 
