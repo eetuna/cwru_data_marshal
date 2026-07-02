@@ -80,13 +80,25 @@ def read_frame(fpath, frame_index, mode):
         # viewer must read the newest or it freezes on the scan's first frame.
         fi = (n_frames - 1) if frame_index <= 0 else min(frame_index, n_frames - 1)
 
+        # The marshal's multislice snapshot holds ONE volume as n_frames entries
+        # of z=1 (shape [nslices, ch, 1, y, x]); a true 3D image is one entry
+        # with z>1. Treat the entries axis as the slice axis when z == 1.
+        entries_are_slices = (nz == 1 and n_frames > 1)
+
         if mode == "2d":
-            mid_z = nz // 2
-            values = data[fi, 0, mid_z, :, :].flatten().tolist()
+            if entries_are_slices:
+                values = data[n_frames // 2, 0, 0, :, :].flatten().tolist()   # middle slice
+            else:
+                values = data[fi, 0, nz // 2, :, :].flatten().tolist()
             return {"width": int(nx), "height": int(ny), "values": values}
         elif mode == "3d":
-            values = data[fi, 0, :, :, :].flatten().tolist()
-            return {"width": int(nx), "height": int(ny), "depth": int(nz), "values": values}
+            if entries_are_slices:
+                values = data[:, 0, 0, :, :].flatten().tolist()               # whole volume
+                depth = n_frames
+            else:
+                values = data[fi, 0, :, :, :].flatten().tolist()
+                depth = nz
+            return {"width": int(nx), "height": int(ny), "depth": int(depth), "values": values}
         else:
             return {"error": f"Unknown mode: {mode}"}
     finally:
