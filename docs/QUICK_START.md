@@ -17,7 +17,17 @@ MARSHAL_DUMP=--dump docker compose --profile test-recon up -d              # tes
 
 docker compose ps                                                          # wait healthy
 ```
-Ports (override with the env var in parens): UI `:3000` (`UI_PORT`) · API `:8080` (`HTTP_PORT`) · scanner MRD TCP `:9100` (`MRD_PORT`) · robot `:8081` (`ROBOT_PORT`) · webgl write-back `:3001` (`WRITE_PORT`). e.g. `HTTP_PORT=18080 docker compose up -d`.
+### Ports
+
+| What | Default | Change with |
+|---|---|---|
+| WebGL UI | 3000 | `UI_PORT` |
+| HTTP API | 8080 | `HTTP_PORT` |
+| Scanner MRD TCP | 9100 | `MRD_PORT` |
+| Robot marshal | 8081 | `ROBOT_PORT` |
+| WebGL write-back | 3001 | `WRITE_PORT` |
+
+Example: `HTTP_PORT=18080 docker compose up -d`
 
 ## Recon: bundled vs real
 Marshal always talks to a recon at `RECON_HOST:RECON_PORT` (default `recon:9002`). Two ways to supply it — **pick one, not both**:
