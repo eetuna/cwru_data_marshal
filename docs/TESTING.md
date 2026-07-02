@@ -62,10 +62,33 @@ curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/image/latest   # 404
 
 ## Streaming (fire only, watch it update at localhost:3000)
 
-Must be **live** mode, browser open. Uses only `client.py` + the phantom generator —
-no mock streamers. `Ctrl-C` stops.
+Must be **live** mode, browser open. Fire protocol only (no mock streamers). `Ctrl-C` stops.
 
-### Stream k-space → recon (contrast flips each frame so you see it change)
+### Realistic single-connection streaming — `scripts/fire_stream.py` (recommended)
+One persistent MRD connection, paced, a *moving* phantom (image changes every frame) —
+closest to a real scan. Uses python-ismrmrd-server's `connection.py`.
+
+```bash
+# k-space -> recon -> webgl  (5 fps, forever; Ctrl-C to stop)
+docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
+  python3 /scripts/fire_stream.py --address mri-marshal --port 9100 --mode kspace --fps 5 --frames 0 --matrix 128
+
+# direct image -> webgl (bypass recon)
+docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
+  python3 /scripts/fire_stream.py --address mri-marshal --port 9100 --mode image --fps 5 --frames 0 --matrix 128
+```
+Flags: `--mode kspace|image` · `--fps` rate · `--frames 0` = forever · `--matrix` size.
+The orbiting bright dot makes each frame visibly different. `--mode kspace` lands in
+`from_reconstruction`, `--mode image` in `from_scanner`.
+
+**Dump streaming:** flip marshal to dump, run the same command; UI blank, archives grow:
+```bash
+MARSHAL_DUMP=--dump docker compose --profile test-recon up -d --force-recreate mri-marshal
+# ...run fire_stream.py (either mode)...
+watch -n1 'ls session-data/dump/from_scanner/ | wc -l'     # climbs each frame
+```
+
+### Quick loop alternative (client.py, contrast flips each frame)
 ```bash
 docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest \
   sh -c 'i=0; while true; do
