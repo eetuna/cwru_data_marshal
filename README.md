@@ -44,6 +44,7 @@ robot clients <──HTTP :8081──> robot-marshal ──> webgl-client
 ## Documentation
 
 - **[QUICK_START.md](docs/QUICK_START.md)** — run it, feed data, live vs dump.
+- **[TESTING.md](docs/TESTING.md)** — verify live/dump × k-space/image (or `./scripts/test-modes.sh`).
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — how it works: wire protocol, routing, storage, fault tolerance.
 - **[API_REFERENCE.md](docs/API_REFERENCE.md)** — HTTP endpoints + MRD TCP messages.
 - **[RECONSTRUCTION_INTERFACE.md](docs/RECONSTRUCTION_INTERFACE.md)** — the recon contract (swap in your own MRD-TCP recon).
