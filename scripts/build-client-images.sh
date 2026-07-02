@@ -177,7 +177,7 @@ if [ "$ALL_GOOD" = true ]; then
     echo "============================================"
     echo ""
     echo "Next steps:"
-    echo "  1. Test with: ./scripts/demo-docker.sh"
+    echo "  1. Run with:    docker compose up -d   (MARSHAL_DUMP=--dump for dump mode)"
     echo "  2. Export with: ./scripts/export_usb.sh /path/to/usb"
     echo ""
     exit 0

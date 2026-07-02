@@ -1,71 +1,147 @@
-version: '3.3'
-
+# CWRU Data Marshal — single stack for the python-ismrmrd-server workflow.
+#
+#   docker compose up -d                       # live mode
+#   MARSHAL_DUMP=--dump docker compose up -d    # dump/archival mode
+#   docker compose ps                          # health
+#   docker compose down                        # teardown
+#
+# The ONLY knob is live vs dump (MARSHAL_DUMP). Marshal routes automatically:
+# k-space -> recon; scanner-sent images -> straight to webgl.
+#
+# Scanner is NOT a service — drive it against mri-marshal:9100 (real scanner,
+# or python-ismrmrd-server client.py):
+#   docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" \
+#     fire-python:latest python3 client.py -c invertcontrast -o /data/out.h5 \
+#     --address mri-marshal --port 9100 /data/phantom.h5
 services:
-  server:
-    build:
-      context: .
-      dockerfile: Dockerfile.server
-    volumes:
-      - /home/rza3/cwru_front_end/log_files/:/log_files/
-      - /home/rza3/cwru_front_end/files/:/files/
-    container_name: cpp_server
-    ports:
-      - "8080:8080"
-    networks:
-      cppnet:
-        ipv4_address: 172.28.1.10
-  client-a:
-    build:
-      context: .
-      dockerfile: Dockerfile.client-a
-    container_name: cpp_client-a
-    depends_on:
-      - server
-    networks:
-      cppnet:
-        ipv4_address: 172.28.1.11
-
-  client-b:
-    build:
-      context: .
-      dockerfile: Dockerfile.client-b
-    container_name: cpp_client-b
-    depends_on:
-      - server   
-    networks:
-      cppnet:
-        ipv4_address: 172.28.1.12
-
-  client-c:
-    build:
-      context: .
-      dockerfile: Dockerfile.client-c
-    container_name: cpp_client-c
-    depends_on:
-      - server
-    networks:
-      cppnet:
-        ipv4_address: 172.28.1.13
-
-  webgl-frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile.client-webgl
-    container_name: webgl_frontend
-    depends_on:
-      - server
-    ports:
-      - "3000:3000"
-      - "3001:3001"
+  mri-marshal:
+    image: cwru/mri-marshal:latest
+    container_name: cwru-mri-marshal
+    # sh -c so MARSHAL_DUMP ("" or "--dump") is appended at container runtime.
+    command: ["sh", "-c", "exec /opt/mri/build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data --recon-host recon --recon-port 9002 $$MARSHAL_DUMP"]
     environment:
-      - NODE_ENV=production
-    networks:
-      cppnet:
-        ipv4_address: 172.28.1.14
+      - MARSHAL_DUMP=${MARSHAL_DUMP:-}
+    volumes:
+      - ${SESSION_DATA_DIR:-./session-data}:/session-data
+    ports:
+      - "8080:8080"   # HTTP API (/image/latest, /health)
+      - "9100:9100"   # MRD TCP (scanner)
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    networks: [cwru-net]
+
+  recon:
+    image: fire-python:latest
+    container_name: cwru-recon
+    # python-ismrmrd-server reconstruction server (MRD TCP :9002).
+    command: ["python3", "/opt/code/python-ismrmrd-server/main.py", "-v", "-H=0.0.0.0", "-p=9002", "--defaultConfig=invertcontrast"]
+    networks: [cwru-net]
+
+  robot-marshal:
+    image: cwru/robot-marshal:latest
+    container_name: cwru-robot-marshal
+    command:
+      - sh
+      - -c
+      - |
+        SESSION=/session-data/run_$$(date +%Y%m%d_%H%M%S)/robot
+        mkdir -p $$SESSION
+        if ! cp /files/*.json $$SESSION/ 2>/dev/null; then
+          echo "[Robot Marshal] WARNING: no seed JSON files found in /files/"
+        fi
+        rm -rf /files
+        ln -s $$SESSION /files
+        echo "[Robot Marshal] Starting on http://0.0.0.0:8081"
+        exec ./server --http 0.0.0.0:8081
+    volumes:
+      - ${SESSION_DATA_DIR:-./session-data}:/session-data
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-s", "http://localhost:8081/"]
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    networks: [cwru-net]
+
+  # Robot data producers (fill robot-marshal so webgl has a scene).
+  catheter-tracking:
+    image: cwru/robot-clients:latest
+    container_name: cwru-catheter-tracking
+    command: ["./catheter-tracking"]
+    environment: [ROBOT_MARSHAL_HOST=robot-marshal, ROBOT_MARSHAL_PORT=8081]
+    depends_on: { robot-marshal: { condition: service_healthy } }
+    networks: [cwru-net]
+
+  force-sensor:
+    image: cwru/robot-clients:latest
+    container_name: cwru-force-sensor
+    command: ["./force-sensor"]
+    environment: [ROBOT_MARSHAL_HOST=robot-marshal, ROBOT_MARSHAL_PORT=8081]
+    depends_on: { robot-marshal: { condition: service_healthy } }
+    restart: unless-stopped
+    networks: [cwru-net]
+
+  controller:
+    image: cwru/robot-clients:latest
+    container_name: cwru-controller
+    command: ["./controller"]
+    environment: [ROBOT_MARSHAL_HOST=robot-marshal, ROBOT_MARSHAL_PORT=8081]
+    depends_on: { robot-marshal: { condition: service_healthy } }
+    networks: [cwru-net]
+
+  planning:
+    image: cwru/robot-clients:latest
+    container_name: cwru-planning
+    command: ["./planning"]
+    environment: [ROBOT_MARSHAL_HOST=robot-marshal, ROBOT_MARSHAL_PORT=8081]
+    depends_on: { robot-marshal: { condition: service_healthy } }
+    networks: [cwru-net]
+
+  front-end:
+    image: cwru/robot-clients:latest
+    container_name: cwru-front-end
+    command: ["./front-end"]
+    environment: [ROBOT_MARSHAL_HOST=robot-marshal, ROBOT_MARSHAL_PORT=8081]
+    depends_on: { robot-marshal: { condition: service_healthy } }
+    networks: [cwru-net]
+
+  surface-tracking:
+    image: cwru/robot-clients:latest
+    container_name: cwru-surface-tracking
+    command: ["./surface-tracking"]
+    environment: [ROBOT_MARSHAL_HOST=robot-marshal, ROBOT_MARSHAL_PORT=8081]
+    depends_on: { robot-marshal: { condition: service_healthy } }
+    networks: [cwru-net]
+
+  webgl-client:
+    image: cwru/webgl-client:latest
+    container_name: cwru-webgl-client
+    environment:
+      - ROBOT_MARSHAL_HOST=robot-marshal
+      - ROBOT_MARSHAL_PORT=8081
+      - MRI_MARSHAL_HOST=mri-marshal
+      - MRI_MARSHAL_PORT=8080
+      - HDF5_USE_FILE_LOCKING=FALSE
+    volumes:
+      - ${SESSION_DATA_DIR:-./session-data}:/session-data:ro
+    ports:
+      - "3000:3000"   # WebGL UI
+      - "3001:3001"   # write-back server
+    depends_on:
+      robot-marshal: { condition: service_healthy }
+      mri-marshal: { condition: service_healthy }
+    restart: unless-stopped
+    networks: [cwru-net]
 
 networks:
-  cppnet:
+  cwru-net:
+    name: cwru-demo-net
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.28.0.0/16
+    attachable: true
