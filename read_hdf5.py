@@ -80,21 +80,34 @@ def read_frame(fpath, frame_index, mode):
         # viewer must read the newest or it freezes on the scan's first frame.
         fi = (n_frames - 1) if frame_index <= 0 else min(frame_index, n_frames - 1)
 
-        # The marshal's multislice snapshot holds ONE volume as n_frames entries
-        # of z=1 (shape [nslices, ch, 1, y, x]); a true 3D image is one entry
-        # with z>1. Treat the entries axis as the slice axis when z == 1.
-        entries_are_slices = (nz == 1 and n_frames > 1)
+        # Canonical ISMRMRD stores a 2D multislice volume as N appended images
+        # ([N, ch, 1, y, x]) whose per-entry headers carry the slice index; a
+        # true 3D image is one entry with z > 1. Read the sibling header
+        # dataset and order entries by their slice field (the standard,
+        # recon-agnostic way to reassemble the volume).
+        slice_order = None
+        if nz == 1 and n_frames > 1:
+            try:
+                hdr = dset.parent["header"][()]
+                slices = [int(h["slice"]) for h in hdr]
+                # order entries by slice index (stable for repeats)
+                slice_order = sorted(range(n_frames), key=lambda i: slices[i])
+            except Exception:
+                slice_order = list(range(n_frames))   # headers unreadable: file order
 
         if mode == "2d":
-            if entries_are_slices:
-                values = data[n_frames // 2, 0, 0, :, :].flatten().tolist()   # middle slice
+            if slice_order is not None:
+                mid = slice_order[len(slice_order) // 2]
+                values = data[mid, 0, 0, :, :].flatten().tolist()   # middle slice
             else:
                 values = data[fi, 0, nz // 2, :, :].flatten().tolist()
             return {"width": int(nx), "height": int(ny), "values": values}
         elif mode == "3d":
-            if entries_are_slices:
-                values = data[:, 0, 0, :, :].flatten().tolist()               # whole volume
-                depth = n_frames
+            if slice_order is not None:
+                values = []
+                for i in slice_order:
+                    values.extend(data[i, 0, 0, :, :].flatten().tolist())
+                depth = len(slice_order)
             else:
                 values = data[fi, 0, :, :, :].flatten().tolist()
                 depth = nz
