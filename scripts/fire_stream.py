@@ -21,7 +21,7 @@ archives instead of publishing). Run inside the fire-python image, e.g.:
     python3 /scripts/fire_stream.py --address mri-marshal --port 9100 \
     --mode kspace --fps 10 --frames 0 --matrix 128 --slices 5
 """
-import argparse, socket, sys, time, threading
+import argparse, io, socket, sys, time, threading
 import numpy as np
 
 # fire modules live here in the fire-python image
@@ -29,6 +29,11 @@ sys.path.insert(0, "/opt/code/python-ismrmrd-server")
 import ismrmrd, ismrmrd.xsd                      # noqa: E402
 from ismrmrdtools import simulation, transform   # noqa: E402
 from connection import Connection                # noqa: E402
+import constants                                 # noqa: E402
+
+# Precomputed 2-byte message tags (same wire bytes as connection.py sends).
+ACQ_TAG = constants.MrdMessageIdentifier.pack(constants.MRD_MESSAGE_ISMRMRD_ACQUISITION)
+IMG_TAG = constants.MrdMessageIdentifier.pack(constants.MRD_MESSAGE_ISMRMRD_IMAGE)
 
 
 def build_header(matrix, coils, slices, fov=300.0):
@@ -130,6 +135,11 @@ def main():
             # wall-clock phase => constant on-screen orbit speed at any fps
             phase = (t0 - t_start) * ORBIT_RAD_PER_SEC
 
+            # Serialize the whole frame into one buffer and sendall() ONCE
+            # (Option A): identical wire bytes to connection.py's per-item sends,
+            # but one syscall instead of ~4 per k-space line — the sender was
+            # spending most of its time in socket.send() overhead.
+            buf = io.BytesIO()
             if args.mode == "kspace":
                 for s in range(slices):
                     img = moving_phantom(matrix, phase, s, base)
@@ -152,7 +162,8 @@ def main():
                             if s == slices - 1:
                                 acq.setFlag(ismrmrd.ACQ_LAST_IN_REPETITION)
                         acq.data[:] = K[:, line, :]
-                        conn.send_acquisition(acq)
+                        buf.write(ACQ_TAG)
+                        acq.serialize_into(buf.write)
                         counter += 1
             else:  # image: one IMAGE message carrying the whole slice stack
                 vol = np.stack([moving_phantom(matrix, phase, s, base)
@@ -166,7 +177,9 @@ def main():
                 if frame == 0:
                     print(f"  image payload shape={im.data.shape} "
                           f"(matrix_size={tuple(im.matrix_size)}, channels={im.channels})", flush=True)
-                conn.send_image(im)
+                buf.write(IMG_TAG)
+                im.serialize_into(buf.write)
+            sock.sendall(buf.getvalue())
 
             frame += 1
             now = time.time()
