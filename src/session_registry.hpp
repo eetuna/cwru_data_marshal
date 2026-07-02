@@ -39,14 +39,28 @@ public:
     SessionRegistry& operator=(const SessionRegistry&) = delete;
 
     // Register a new session. Returns an opaque id for unregister. If shutdown
-    // is already in progress, the caller should treat this as "do not start" —
-    // the returned id is 0 and the session should terminate itself.
+    // is already in progress, the session missed shutdown_and_join's snapshot:
+    // the registry cancels and joins it HERE and returns 0. Callers must not
+    // touch the (moved-from) session afterwards. Destroying a joinable
+    // std::thread would std::terminate, so the join is not optional; it is
+    // safe because the caller is the accept handler, never the session thread
+    // itself, and cancel() unblocks the session's I/O so it exits promptly.
     uint64_t register_session(TrackedSession session) {
-        std::lock_guard<std::mutex> lk(mtx_);
-        if (shutting_down_) return 0;
-        uint64_t id = ++next_id_;
-        sessions_.emplace_back(id, std::move(session));
-        return id;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (!shutting_down_) {
+                uint64_t id = ++next_id_;
+                sessions_.emplace_back(id, std::move(session));
+                return id;
+            }
+        }
+        try {
+            if (session.cancel) session.cancel();
+        } catch (...) {
+            // Cancel callbacks must not throw, but be defensive.
+        }
+        if (session.thread.joinable()) session.thread.join();
+        return 0;
     }
 
     // Unregister after session exits normally. Must be called from the session

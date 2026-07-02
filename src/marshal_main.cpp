@@ -524,13 +524,9 @@ int main(int argc, char** argv)
                         http_session(sock_ptr, state);
                         http_sessions.unregister_session(*session_id);
                     });
+                    // On a shutdown race (returns 0), register_session cancels
+                    // and joins the session itself.
                     *session_id = http_sessions.register_session(std::move(ts));
-                    if (*session_id == 0) {
-                        // Registry already shutting down — cancel immediately.
-                        boost::system::error_code ignore;
-                        sock_ptr->shutdown(tcp::socket::shutdown_both, ignore);
-                        sock_ptr->close(ignore);
-                    }
                 }
             }
             if (!http_sessions.shutting_down()) do_accept();
@@ -556,7 +552,20 @@ int main(int argc, char** argv)
         ioc.stop();
     });
 
-    ioc.run();
+    // Resilient run loop: an exception escaping any completion handler
+    // would otherwise propagate out of run() and kill the marshal.
+    // Log it and resume; run() returns normally only when out of work
+    // (i.e. after the signal handler stopped the context).
+    for (;;) {
+        try {
+            ioc.run();
+            break;
+        } catch (const std::exception& e) {
+            LOG_ERROR("io_context handler threw: " << e.what() << " — resuming");
+        } catch (...) {
+            LOG_ERROR("io_context handler threw unknown exception — resuming");
+        }
+    }
 
     // In case ioc.run() returned without the signal handler firing (e.g.
     // acceptor error), still drain HTTP sessions before state destructs.

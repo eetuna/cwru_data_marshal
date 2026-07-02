@@ -31,6 +31,7 @@
 #include <memory>
 #include <mutex>
 #include <regex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -255,6 +256,19 @@ private:
     }
     std::atomic<bool> dump_dropped_logged_{false};
 
+    // remote_endpoint() THROWS if the peer already disconnected (race
+    // between accept and the peer dropping). An exception here escapes
+    // the accept handler, propagates out of io_context::run(), and
+    // would kill the whole marshal. Use the error_code overload.
+    static std::string peer_string(const tcp::socket& s) {
+        boost::system::error_code ec;
+        auto ep = s.remote_endpoint(ec);
+        if (ec) return "<unknown>";
+        std::ostringstream oss;
+        oss << ep;
+        return oss.str();
+    }
+
     // Scanner-socket options, applied on accept.
     //
     // Keepalive probes detect a scanner that vanished without RST
@@ -328,14 +342,14 @@ private:
                     sock.close(ignore);
                 } else if (reject_concurrent) {
                     LOG_WARN("Rejecting concurrent scanner connection from "
-                             << sock.remote_endpoint()
+                             << peer_string(sock)
                              << " — another session is active");
                     boost::system::error_code ignore;
                     sock.shutdown(tcp::socket::shutdown_both, ignore);
                     sock.close(ignore);
                 } else {
                     configure_scanner_socket(*accepted_socket);
-                    LOG_INFO("Scanner connected from " << accepted_socket->remote_endpoint());
+                    LOG_INFO("Scanner connected from " << peer_string(*accepted_socket));
                     if (!sessions_.shutting_down()) {
                         auto socket_ptr = accepted_socket;
                         std::shared_ptr<uint64_t> session_id = std::make_shared<uint64_t>(0);
@@ -350,10 +364,10 @@ private:
                             handle_session(socket_ptr);
                             sessions_.unregister_session(*session_id);
                         });
+                        // On a shutdown race (returns 0), register_session
+                        // cancels and joins the session itself; ts is
+                        // moved-from either way and must not be touched.
                         *session_id = sessions_.register_session(std::move(ts));
-                        if (*session_id == 0) {
-                            ts.cancel();  // shutting down, just close
-                        }
                     }
                 }
             }
@@ -834,6 +848,22 @@ private:
     done:
         if (!normal_close_seen) {
             const bool recon_was_active = session_active_.load();
+
+            // Scanner died abnormally with a recon session engaged: end the
+            // recon session NOW rather than leaving it dangling until the
+            // next scan's begin_session() (the python server would sit
+            // blocked in recv with its savedata file open). Send CLOSE so
+            // recon finalizes its own side; the wait is short and fixed —
+            // the scanner is gone, so recon's tail images have nowhere to
+            // go and there is no one waiting on a longer flush.
+            if (recon_was_active && forwarder_) {
+                if (forwarder_->is_connected()) {
+                    forwarder_->post_close();
+                    forwarder_->wait_for_close(std::chrono::milliseconds(2000));
+                }
+                forwarder_->end_session();
+            }
+
             LOG_INFO("Finalizing scanner lane after scanner socket ended");
             if (state_.dump_enabled) {
                 if (state_.dump_recorder) {
@@ -843,16 +873,19 @@ private:
                 flush_live_lane(state_, LiveLane::Scanner);
             }
             mark_lane_finalized_after_eof(state_, LiveLane::Scanner);
-            if (!recon_was_active) {
-                if (state_.dump_enabled) {
-                    if (state_.dump_recorder) {
-                        state_.dump_recorder->close_lane(DumpLane::Recon);
-                    }
-                } else {
-                    flush_live_lane(state_, LiveLane::Recon);
+            // Recon lane finalize is unconditional: with the recon session
+            // ended above, no more recon frames can arrive. If a recon
+            // failure already finalized the lane via on_failure, doing it
+            // again is benign (the close barrier is idempotent and the
+            // converted spool is gone).
+            if (state_.dump_enabled) {
+                if (state_.dump_recorder) {
+                    state_.dump_recorder->close_lane(DumpLane::Recon);
                 }
-                mark_lane_finalized_after_eof(state_, LiveLane::Recon);
+            } else {
+                flush_live_lane(state_, LiveLane::Recon);
             }
+            mark_lane_finalized_after_eof(state_, LiveLane::Recon);
         }
         LOG_INFO("MRD session ended");
         session_active_.store(false);
