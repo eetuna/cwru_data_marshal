@@ -70,7 +70,8 @@ Full test matrix and troubleshooting: [TESTING.md](TESTING.md).
 
 ## Stop
 ```bash
-docker compose down
+docker compose --profile test-recon down   # include the profile, or the recon
+                                            # container stays up and holds the network
 ```
 
 ## Notes
