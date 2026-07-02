@@ -34,19 +34,14 @@ ctest --test-dir build --output-on-failure
 
 ## 📖 Documentation Map
 
-### Guides
-- **[Quick Start](../../docs/QUICK_START.md):** Fastest path to build and run the MRI marshal.
-- **[Developer Guide](../../docs/DEVELOPER_GUIDE.md):** Development workflow, project layout, and implementation notes.
-- **[Manual Terminal Setup](../../docs/MANUAL_TERMINAL_SETUP.md):** Step-by-step manual startup and wiring.
-- **[External Client Guide](../../docs/EXTERNAL_CLIENT_GUIDE.md):** How external clients connect and interact.
+Canonical docs live in the umbrella repo's `docs/`:
 
-### Architecture
-- **[Architecture](../../docs/ARCHITECTURE.md):** Current MRI marshal design, storage layout, and transport flow.
-- **[MRI Marshal Protocol Contract](../../docs/MRI_MARSHAL_PROTOCOL_CONTRACT.md):** Protocol expectations for scanner, marshal, and downstream consumers.
-- **[Reconstruction Interface](../../docs/RECONSTRUCTION_INTERFACE.md):** MRI reconstruction integration and handoff contract.
-
-### Performance
-- **[API Reference](../../docs/API_REFERENCE.md):** Current HTTP and MRD TCP contract.
+- **[Quick Start](../../docs/QUICK_START.md)** — build and run.
+- **[Architecture](../../docs/ARCHITECTURE.md)** — design, storage layout, transport, routing.
+- **[API Reference](../../docs/API_REFERENCE.md)** — HTTP + MRD TCP contract.
+- **[Reconstruction Interface](../../docs/RECONSTRUCTION_INTERFACE.md)** — recon MRD TCP contract.
+- **[External Client Guide](../../docs/EXTERNAL_CLIENT_GUIDE.md)** — connecting your own clients.
+- **[Slice Reposition & Position Plan](../../docs/SLICE_REPOSITION_AND_POSITION_PLAN.md)** — planned slice-translation + geometry work.
 
 ---
 
