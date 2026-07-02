@@ -4,7 +4,7 @@
  * Purpose: Main server binary — new API (v2)
  *
  * Flags: --http host:port, --ws-port N, --recon-host HOST, --recon-port N,
- *        --dump-dir PATH, --dump
+ *        --dump-dir PATH, --dump, --recon-close-timeout-ms N
  */
 
 #undef LOG_COMPONENT
@@ -202,6 +202,17 @@ bool checked_parse_uint16(const std::string& s, uint16_t& out) {
     } catch (...) { return false; }
 }
 
+bool checked_parse_uint32(const std::string& s, uint32_t& out) {
+    try {
+        size_t pos = 0;
+        unsigned long long v = std::stoull(s, &pos);
+        if (pos != s.size()) return false;
+        if (v > std::numeric_limits<uint32_t>::max()) return false;
+        out = static_cast<uint32_t>(v);
+        return true;
+    } catch (...) { return false; }
+}
+
 bool checked_parse_size(const std::string& s, std::size_t& out) {
     try {
         size_t pos = 0;
@@ -283,6 +294,7 @@ int main(int argc, char** argv)
     uint16_t ws_port = 0;
     uint16_t mrd_port = 0;
     std::size_t max_body_size = 128ULL * 1024ULL * 1024ULL;
+    uint32_t recon_close_timeout_ms = 30000;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -316,6 +328,12 @@ int main(int argc, char** argv)
                 return 1;
             }
         }
+        else if (a == "--recon-close-timeout-ms" && i + 1 < argc) {
+            if (!checked_parse_uint32(argv[++i], recon_close_timeout_ms)) {
+                LOG_ERROR("--recon-close-timeout-ms: invalid value '" << argv[i] << "'");
+                return 1;
+            }
+        }
     }
 
     std::string http_host;
@@ -336,6 +354,7 @@ int main(int argc, char** argv)
         state.dump_recorder = std::make_unique<mrd::DumpRecorder>(state.dump_dir);
     state.recon_url = recon_host.empty() ? "" : recon_host + ":" + std::to_string(recon_port);
     state.max_body_bytes = max_body_size;
+    state.recon_close_timeout_ms = recon_close_timeout_ms;
     // Live infra (latest snapshot + per-lane history recorders) is mutually
     // exclusive with dump mode. In dump mode the operator wants a pure
     // archive; running the live snapshot/history pipelines alongside dump
@@ -437,7 +456,8 @@ int main(int argc, char** argv)
             << " dump-dir=" << dump_dir
             << " dump=" << (dump_enabled ? "on" : "off")
             << " max_body=" << max_body_size;
-        if (!recon_host.empty()) cfg << " recon=" << recon_host << ":" << recon_port;
+        if (!recon_host.empty()) cfg << " recon=" << recon_host << ":" << recon_port
+                                     << " recon_close_timeout_ms=" << recon_close_timeout_ms;
         if (ws_port > 0) cfg << " ws-port=" << ws_port;
         if (mrd_port > 0) cfg << " mrd-port=" << mrd_port;
         LOG_INFO(cfg.str());

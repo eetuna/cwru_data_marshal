@@ -87,6 +87,13 @@ struct MarshalState {
     // Max request body (128 MiB default)
     std::size_t max_body_bytes{128ULL * 1024ULL * 1024ULL};
 
+    // --recon-close-timeout-ms: how long to wait, after the scanner's
+    // CLOSE has been forwarded to recon, for recon to flush its tail
+    // images and send its own CLOSE back. Sized for slow recons
+    // (e.g. GRAPPA on a remote VM); on expiry the marshal emits its
+    // own CLOSE to the scanner so the scanner never hangs.
+    uint32_t recon_close_timeout_ms{30000};
+
     // Server uptime
     std::chrono::steady_clock::time_point start{std::chrono::steady_clock::now()};
 

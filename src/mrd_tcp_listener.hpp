@@ -167,8 +167,17 @@ public:
             return;
         }
 
-        if (!write_exact_socket(*sock, &tag, sizeof(tag)) ||
-            (len > 0 && !write_exact_socket(*sock, data, len))) {
+        const bool sent =
+            write_exact_socket(*sock, &tag, sizeof(tag)) &&
+            (len == 0 || write_exact_socket(*sock, data, len));
+        if (sent) {
+            // Track CLOSE delivery so the scanner CLOSE handler can
+            // guarantee exactly one CLOSE per scan (relayed from recon
+            // or emitted by the marshal itself, never both, never none).
+            if (tag == MRD_MESSAGE_CLOSE) {
+                close_sent_to_scanner_.store(true);
+            }
+        } else {
             // During shutdown the close is expected; log at DEBUG so
             // we don't paint the shutdown path with "failed to push"
             // warnings that look like a runtime error.
@@ -212,6 +221,11 @@ private:
     std::mutex scanner_send_mtx_;
     std::shared_ptr<tcp::socket> scanner_socket_;
     std::atomic<bool> session_active_{false};
+    // True once a CLOSE (relayed from recon or marshal-emitted) has been
+    // written to the scanner for the CURRENT scan. Reset at each scan
+    // boundary. Read after end_session() has joined the recon reader,
+    // so no relay can race the check in the CLOSE handler.
+    std::atomic<bool> close_sent_to_scanner_{false};
     bool stopping_{false};           // protected by scanner_mtx_
     SessionRegistry sessions_;
 
@@ -339,6 +353,7 @@ private:
 
     void handle_session(std::shared_ptr<tcp::socket> sock) {
         LOG_INFO("MRD session started");
+        close_sent_to_scanner_.store(false);
         std::vector<std::pair<uint16_t, std::vector<uint8_t>>> recon_preamble;
         bool normal_close_seen = false;
 
@@ -519,14 +534,31 @@ private:
                     const bool recon_engaged = forwarder_ && session_active_.load();
                     if (recon_engaged) {
                         forwarder_->post_close();
-                        forwarder_->wait_for_close(std::chrono::milliseconds(2000));
+                        forwarder_->wait_for_close(
+                            std::chrono::milliseconds(state_.recon_close_timeout_ms));
                         forwarder_->end_session();
-                    } else {
+                        // end_session() joined the recon reader, so any relayed
+                        // recon CLOSE has already been pushed (and flagged). If
+                        // none reached the scanner — recon died mid-scan, or its
+                        // tail flush exceeded the timeout — emit the marshal's
+                        // own CLOSE so the scanner's receive side never hangs
+                        // waiting for a completion marker.
+                        if (!close_sent_to_scanner_.load()) {
+                            LOG_WARN("Recon session ended without CLOSE "
+                                     "(failure or flush timeout of "
+                                     << state_.recon_close_timeout_ms
+                                     << " ms); emitting marshal CLOSE to scanner");
+                            push_message_to_scanner(MRD_MESSAGE_CLOSE, nullptr, 0);
+                        }
+                    } else if (!close_sent_to_scanner_.load()) {
                         // 2-byte CLOSE marker only: ends THIS scan, not the TCP
                         // connection (which may carry a subsequent scan) and not
                         // the listening port.
                         push_message_to_scanner(MRD_MESSAGE_CLOSE, nullptr, 0);
                     }
+                    // Scan boundary: the next scan on this connection gets a
+                    // fresh CLOSE-delivery slate.
+                    close_sent_to_scanner_.store(false);
                     // Allow the NEXT scan on this same scanner TCP
                     // connection to attempt a recon reconnect once.
                     // Recon may have been restarted by the operator
