@@ -18,6 +18,7 @@
 #include "logging.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -36,6 +37,8 @@
 #include <vector>
 
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 
 #include <boost/asio.hpp>
 
@@ -129,8 +132,8 @@ public:
     //
     // Shutdown safety: stop() closes the scanner socket before
     // joining session threads. A blocked ::send on a closed fd
-    // returns EPIPE immediately; write_exact_fd reports failure, we
-    // log, and the recon reader unwinds normally.
+    // returns EPIPE immediately; the write reports failure, we log,
+    // and the recon reader unwinds normally.
     //
     // The previous writer_thread_ (HIGH #4 2026-04) was meant to
     // avoid a shutdown deadlock caused by blocking ::send on a stuck
@@ -150,10 +153,9 @@ public:
         // Grab the socket shared_ptr under scanner_mtx_, then release
         // that mutex so stop() can still close the socket concurrently
         // if it needs to. shared_ptr lifetime keeps the tcp::socket
-        // object alive; we then call write_exact_socket against the
-        // socket object (not a cached native fd), so a concurrent
-        // close from stop() produces a clean EBADF/EPIPE on the send
-        // rather than a fd-reuse hazard.
+        // object alive; we then write against the socket object (not a
+        // cached native fd), so a concurrent close from stop() produces
+        // a clean EBADF/EPIPE on the send rather than a fd-reuse hazard.
         std::shared_ptr<tcp::socket> sock;
         bool shutting = false;
         {
@@ -168,9 +170,16 @@ public:
             return;
         }
 
-        const bool sent =
-            write_exact_socket(*sock, &tag, sizeof(tag)) &&
-            (len == 0 || write_exact_socket(*sock, data, len));
+        // Single gather write: tag + body leave in one syscall. Same
+        // bytes on the wire as the previous two sequential writes; with
+        // NODELAY set, this also avoids a tag-only segment for small
+        // frames.
+        const std::array<net::const_buffer, 2> frame{
+            net::buffer(&tag, sizeof(tag)),
+            net::buffer(data, len)};
+        boost::system::error_code write_ec;
+        net::write(*sock, frame, write_ec);
+        const bool sent = !write_ec;
         if (sent) {
             // Track CLOSE delivery so the scanner CLOSE handler can
             // guarantee exactly one CLOSE per scan (relayed from recon
@@ -246,34 +255,49 @@ private:
     }
     std::atomic<bool> dump_dropped_logged_{false};
 
-    static bool write_exact_fd(int fd, const void* buf, size_t n) {
-        const auto* p = static_cast<const uint8_t*>(buf);
-        size_t done = 0;
-        while (done < n) {
-            ssize_t rc = ::send(fd, p + done, n - done, MSG_NOSIGNAL);
-            if (rc < 0) {
-                if (errno == EINTR) continue;
-                return false;
-            }
-            if (rc == 0) return false;
-            done += static_cast<size_t>(rc);
-        }
-        return true;
-    }
+    // Scanner-socket options, applied on accept.
+    //
+    // Keepalive probes detect a scanner that vanished without RST
+    // (cable pull, power loss, console crash): the blocked read_exact
+    // in handle_session fails after ~idle + intvl*cnt (~60 s) and the
+    // session unwinds, freeing the single-scanner slot for a
+    // reconnect. Without this, a half-open scanner socket blocked the
+    // session forever and every new scanner connection was rejected
+    // as "concurrent" until the marshal was restarted.
+    //
+    // NODELAY matches the recon-side socket (recon_forwarder.hpp) and
+    // keeps small return frames (TEXT, CLOSE) from being Nagle-delayed.
+    //
+    // Keepalive only covers the IDLE case: while unACKed data sits in
+    // the send queue (mid-scan pushback in flight when the scanner
+    // vanishes), Linux suppresses keepalive probes and the ~15 min
+    // retransmission timer governs instead — measured: a vanished
+    // scanner with in-flight pushback stayed wedged past 9 min on
+    // keepalive alone. TCP_USER_TIMEOUT bounds BOTH cases: the
+    // connection is declared dead once transmitted data stays
+    // unacknowledged for this long.
+    static constexpr int      kScannerKeepIdleSec   = 30;
+    static constexpr int      kScannerKeepIntvlSec  = 10;
+    static constexpr int      kScannerKeepCnt       = 3;
+    static constexpr unsigned kScannerUserTimeoutMs = 60000;
 
-    // Blocking write on the tcp::socket object. Safe across concurrent
-    // close() from stop(): if the socket closes mid-send, boost::asio
-    // returns an error_code and we bail. Caller serializes via
-    // scanner_send_mtx_ so multiple writers don't interleave bytes.
-    static bool write_exact_socket(tcp::socket& sock, const void* buf, size_t n) {
-        if (n == 0) return true;
+    static void configure_scanner_socket(tcp::socket& s) {
         boost::system::error_code ec;
-        boost::asio::write(sock, boost::asio::buffer(buf, n), ec);
-        return !ec;
+        s.set_option(tcp::no_delay(true), ec);
+        s.set_option(net::socket_base::keep_alive(true), ec);
+        const int fd = s.native_handle();
+        int v = kScannerKeepIdleSec;
+        ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &v, sizeof(v));
+        v = kScannerKeepIntvlSec;
+        ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &v, sizeof(v));
+        v = kScannerKeepCnt;
+        ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &v, sizeof(v));
+        unsigned ut = kScannerUserTimeoutMs;
+        ::setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &ut, sizeof(ut));
     }
 
     // writer_loop removed 2026-04-19 round-7: push_message_to_scanner
-    // now calls write_exact_fd inline. See push_message_to_scanner's
+    // now writes inline (single gather write of tag+body). See its
     // header comment for rationale.
 
     void do_accept() {
@@ -310,6 +334,7 @@ private:
                     sock.shutdown(tcp::socket::shutdown_both, ignore);
                     sock.close(ignore);
                 } else {
+                    configure_scanner_socket(*accepted_socket);
                     LOG_INFO("Scanner connected from " << accepted_socket->remote_endpoint());
                     if (!sessions_.shutting_down()) {
                         auto socket_ptr = accepted_socket;
