@@ -1,1 +1,0 @@
-{"dims":{"channels":1,"x":128,"y":128,"z":5},"element_type":"float32","flushed":true,"frame_index":19,"path":"./test_mrd_data/mrd/demo_stream-128x128x5-g0000.mrd","seq":20,"size_bytes":327680,"stream":"demo_stream","t_ms":1767665797080,"ts":"2026-01-06T02:16:37.080Z","type":"mrd"}
