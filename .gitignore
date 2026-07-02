@@ -66,3 +66,7 @@ robot_marshal_tmp_src/
 #Drawio diagrams
 #*.drawio   
 *.drawio:Zone.Identifier
+
+# Archive (old docs/scripts, not needed in repo)
+archive/
+docs/archive/
