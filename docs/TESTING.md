@@ -60,6 +60,41 @@ docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python
 curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/image/latest   # 404
 ```
 
+## Streaming (fire only, watch it update at localhost:3000)
+
+Must be **live** mode, browser open. Uses only `client.py` + the phantom generator —
+no mock streamers. `Ctrl-C` stops.
+
+### Stream k-space → recon (contrast flips each frame so you see it change)
+```bash
+docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest \
+  sh -c 'i=0; while true; do
+    [ $((i%2)) -eq 0 ] && c=invertcontrast || c=simplefft
+    python3 client.py -c $c -o /data/out.h5 --address mri-marshal --port 9100 /data/phantom.h5
+    i=$((i+1)); sleep 0.5
+  done'
+```
+Browser (`from_reconstruction`) flips inverted ↔ normal every ~0.5s.
+
+### Stream direct images → webgl (bypass recon)
+Prep a few images with different noise once, then stream them direct in rotation:
+```bash
+# prep (recon k-space to image files, varying noise)
+docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest sh -c '
+  for n in 0.05 0.3 0.6; do
+    python3 generate_cartesian_shepp_logan_dataset.py -o /data/p.h5 -n $n >/dev/null 2>&1
+    python3 client.py -c simplefft -o /data/img_$n.h5 --address mri-marshal --port 9100 /data/p.h5
+  done'
+
+# stream them DIRECT, in a loop (from_scanner, no recon; grain changes each frame)
+docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest sh -c '
+  while true; do for n in 0.05 0.3 0.6; do
+    python3 client.py -o /data/out.h5 --address mri-marshal --port 9100 /data/img_$n.h5
+    sleep 0.5
+  done; done'
+```
+Browser (`from_scanner`) cycles through the three noise levels — visibly changing, recon untouched.
+
 ## Back to live / teardown
 ```bash
 docker compose --profile test-recon up -d --force-recreate mri-marshal   # live again (webgl at :3000)
