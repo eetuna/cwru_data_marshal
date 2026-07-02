@@ -17,10 +17,13 @@ services:
   mri-marshal:
     image: cwru/mri-marshal:latest
     container_name: cwru-mri-marshal
-    # sh -c so MARSHAL_DUMP ("" or "--dump") is appended at container runtime.
-    command: ["sh", "-c", "exec /opt/mri/build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data --recon-host recon --recon-port 9002 $$MARSHAL_DUMP"]
+    # sh -c so MARSHAL_DUMP / RECON_HOST / RECON_PORT are resolved at runtime.
+    # Point at a real recon:  RECON_HOST=<ip> RECON_PORT=<port> docker compose up -d --scale recon=0
+    command: ["sh", "-c", "exec /opt/mri/build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data --recon-host $$RECON_HOST --recon-port $$RECON_PORT $$MARSHAL_DUMP"]
     environment:
       - MARSHAL_DUMP=${MARSHAL_DUMP:-}
+      - RECON_HOST=${RECON_HOST:-recon}
+      - RECON_PORT=${RECON_PORT:-9002}
     volumes:
       - ${SESSION_DATA_DIR:-./session-data}:/session-data
     ports:

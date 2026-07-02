@@ -54,6 +54,24 @@ docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python
 
 Output lands in `session-data/` (live mode writes `live/from_reconstruction/latest_image.h5` and `from_scanner`).
 
+## Real scanner and recon
+
+`fire-python` is only for testing (it plays both the scanner and the recon). For a real setup you drop it and use the actual hardware.
+
+**Scanner:** point the MRI scanner at the marshal host's `IP:9100` and let it send its normal MRD stream (`CONFIG` → `METADATA` → `ACQUISITION` → `CLOSE`). No `client.py`, no phantom.
+
+**Recon:** point marshal at your real recon and skip the test one:
+
+```bash
+RECON_HOST=<recon-ip> RECON_PORT=<port> docker compose up -d --scale recon=0
+```
+
+`--scale recon=0` keeps the test `recon` container from starting; `RECON_HOST`/`RECON_PORT` send k-space to your recon (python-ismrmrd-server, Gadgetron, or any MRD-TCP recon server).
+
+You do **not** pick k-space vs images per scan — marshal routes each automatically: k-space scans go to recon, already-reconstructed image scans go straight to the UI. Leave `RECON_HOST` set and both work. (Omit recon only for a site that will never reconstruct at all.)
+
+**Must line up:** scanner, marshal (built against ISMRMRD v1.13.7), and recon must share the same ISMRMRD header layout (`AcquisitionHeader` 340B / `ImageHeader` 198B / `WaveformHeader` 40B); the scanner must reach `:9100` and marshal must reach the recon port.
+
 ## Dump mode
 
 Set `MARSHAL_DUMP=--dump` to archive to disk instead of publishing live. `GET /image/latest` returns 404 and the UI stays blank — expected.
