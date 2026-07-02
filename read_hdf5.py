@@ -75,7 +75,10 @@ def read_frame(fpath, frame_index, mode):
         else:
             return {"error": f"unexpected image dataset shape {shape}"}
 
-        fi = min(frame_index, n_frames - 1)
+        # frame_index <= 0 means "newest". The marshal appends images to the
+        # snapshot during a scan, so entry [0] is the OLDEST frame; the live
+        # viewer must read the newest or it freezes on the scan's first frame.
+        fi = (n_frames - 1) if frame_index <= 0 else min(frame_index, n_frames - 1)
 
         if mode == "2d":
             mid_z = nz // 2
