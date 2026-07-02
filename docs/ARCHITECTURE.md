@@ -133,20 +133,23 @@ recon.
 
 ## Docker Compose Topology
 
-There is a single `docker-compose.yml`. The **only** knob is live vs dump via the
-`MARSHAL_DUMP` env var (`""` = live, `--dump` = dump/archival); everything else is
-fixed. The scanner is **not** a compose service — it is external and drives
-`mri-marshal:9100` over raw MRD TCP (a real scanner, or python-ismrmrd-server's
-`client.py`).
+There is a single `docker-compose.yml`. Env knobs: `MARSHAL_DUMP` (`""` = live,
+`--dump` = dump/archival), `RECON_HOST`/`RECON_PORT` (recon target, default
+`recon:9002`), `SESSION_DATA_DIR` (data path), and the exposed ports
+(`HTTP_PORT`/`MRD_PORT`/`ROBOT_PORT`/`UI_PORT`/`WRITE_PORT`). The bundled test recon is
+off by default and enabled with `--profile test-recon`. The scanner is **not** a
+compose service — it is external and drives `mri-marshal:9100` over raw MRD TCP (a real
+scanner, or python-ismrmrd-server's `client.py`).
 
 ```
 docker-compose.yml services (network cwru-demo-net):
 
   mri-marshal     marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data
-                          --recon-host recon --recon-port 9002 $MARSHAL_DUMP
-                  ports 8080 (HTTP API) + 9100 (MRD TCP, scanner-facing)
+                          --recon-host $RECON_HOST --recon-port $RECON_PORT $MARSHAL_DUMP
+                  ports 8080 (HTTP API) + 9100 (MRD TCP, scanner-facing);
+                  volume $SESSION_DATA_DIR -> /session-data
   recon           fire-python: python-ismrmrd-server main.py, MRD TCP :9002,
-                  --defaultConfig=invertcontrast
+                  --defaultConfig=invertcontrast  (profile: test-recon, off by default)
   robot-marshal   HTTP server on port 8081 (independent of the MRI path)
   catheter-tracking, force-sensor, controller, planning, front-end,
   surface-tracking   robot data producers → robot-marshal:8081

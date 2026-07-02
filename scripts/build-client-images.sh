@@ -83,14 +83,9 @@ if [ ! -d "$ROBOT_WORKTREE" ]; then
     git worktree add "$ROBOT_WORKTREE" "$ROBOT_BRANCH"
 fi
 
-echo "[1/3] Building MRI Marshal and Clients..."
+echo "[1/3] Building MRI marshal + recon..."
 echo "  - cwru/mri-marshal"
-echo "  - cwru/ecg-client"
-echo "  - cwru/pose-client"
-echo "  - cwru/image-streamer"
-echo "  - cwru/viz-client"
-echo "  - cwru/kspace-streamer"
-echo "  - cwru/mock-recon"
+echo "  - fire-python (python-ismrmrd-server recon)"
 echo ""
 
 cd "$MRI_WORKTREE"
@@ -99,29 +94,11 @@ cd "$MRI_WORKTREE"
 echo "Building cwru/mri-marshal..."
 docker build -f "$PROJECT_ROOT/docker/Dockerfile.mri" -t cwru/mri-marshal:latest .
 
-# Build ECG Client
-echo "Building cwru/ecg-client..."
-docker build -f "$PROJECT_ROOT/docker/Dockerfile.ecg-client" -t cwru/ecg-client:latest .
-
-# Build Pose Client
-echo "Building cwru/pose-client..."
-docker build -f "$PROJECT_ROOT/docker/Dockerfile.pose-client" -t cwru/pose-client:latest .
-
-# Build Image Streamer (C++ - takes longer)
-echo "Building cwru/image-streamer (C++ compilation)..."
-docker build -f "$PROJECT_ROOT/docker/Dockerfile.image-streamer" -t cwru/image-streamer:latest .
-
-# Build Viz Client (C++ with OpenCV - takes longest)
-echo "Building cwru/viz-client (C++ with OpenCV)..."
-docker build -f "$PROJECT_ROOT/docker/Dockerfile.viz-client" -t cwru/viz-client:latest .
-
-# Build K-Space Streamer (C++)
-echo "Building cwru/kspace-streamer (C++ compilation)..."
-docker build -f "$PROJECT_ROOT/docker/Dockerfile.kspace-streamer" -t cwru/kspace-streamer:latest .
-
-# Build Mock Reconstruction Service (Python)
-echo "Building cwru/mock-recon..."
-docker build -f "$PROJECT_ROOT/docker/Dockerfile.mock-recon" -t cwru/mock-recon:latest .
+# Build recon = python-ismrmrd-server. Build context is the server root (its
+# Dockerfile COPYs the whole source tree); -f points at docker/Dockerfile inside it.
+echo "Building fire-python (python-ismrmrd-server recon)..."
+docker build -f "$MRI_WORKTREE/third_party/python-ismrmrd-server/docker/Dockerfile" \
+  -t fire-python:latest "$MRI_WORKTREE/third_party/python-ismrmrd-server"
 
 echo ""
 echo "[2/3] Building Robot Marshal and Clients..."

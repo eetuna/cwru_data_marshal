@@ -1,11 +1,12 @@
 # CWRU Data Marshal — single stack for the python-ismrmrd-server workflow.
 #
-#   docker compose up -d                       # live mode
-#   MARSHAL_DUMP=--dump docker compose up -d    # dump/archival mode
-#   docker compose ps                          # health
-#   docker compose down                        # teardown
+#   RECON_HOST=<ip> RECON_PORT=<port> docker compose up -d   # real recon (production)
+#   docker compose --profile test-recon up -d                # bundled test recon
+#   MARSHAL_DUMP=--dump ... docker compose up ...            # dump/archival mode
+#   docker compose ps / down                                 # health / teardown
 #
-# The ONLY knob is live vs dump (MARSHAL_DUMP). Marshal routes automatically:
+# Knobs (env): MARSHAL_DUMP (live|--dump), RECON_HOST/RECON_PORT (recon target,
+# default recon:9002), SESSION_DATA_DIR (data path). Marshal routes automatically:
 # k-space -> recon; scanner-sent images -> straight to webgl.
 #
 # Scanner is NOT a service — drive it against mri-marshal:9100 (real scanner,
@@ -18,7 +19,6 @@ services:
     image: cwru/mri-marshal:latest
     container_name: cwru-mri-marshal
     # sh -c so MARSHAL_DUMP / RECON_HOST / RECON_PORT are resolved at runtime.
-    # Point at a real recon:  RECON_HOST=<ip> RECON_PORT=<port> docker compose up -d --scale recon=0
     command: ["sh", "-c", "exec /opt/mri/build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data --recon-host $$RECON_HOST --recon-port $$RECON_PORT $$MARSHAL_DUMP"]
     environment:
       - MARSHAL_DUMP=${MARSHAL_DUMP:-}
@@ -27,8 +27,8 @@ services:
     volumes:
       - ${SESSION_DATA_DIR:-./session-data}:/session-data
     ports:
-      - "8080:8080"   # HTTP API (/image/latest, /health)
-      - "9100:9100"   # MRD TCP (scanner)
+      - "${HTTP_PORT:-8080}:8080"   # HTTP API (/image/latest, /health)
+      - "${MRD_PORT:-9100}:9100"    # MRD TCP (scanner)
     stop_grace_period: 60s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
@@ -41,7 +41,10 @@ services:
   recon:
     image: fire-python:latest
     container_name: cwru-recon
-    # python-ismrmrd-server reconstruction server (MRD TCP :9002).
+    # Bundled TEST recon (python-ismrmrd-server, MRD TCP :9002). OFF by default —
+    # production points RECON_HOST at a real recon. Turn this on for testing with:
+    #   docker compose --profile test-recon up -d      (RECON_HOST defaults to `recon`)
+    profiles: ["test-recon"]
     command: ["python3", "/opt/code/python-ismrmrd-server/main.py", "-v", "-H=0.0.0.0", "-p=9002", "--defaultConfig=invertcontrast"]
     networks: [cwru-net]
 
@@ -64,7 +67,7 @@ services:
     volumes:
       - ${SESSION_DATA_DIR:-./session-data}:/session-data
     ports:
-      - "8081:8081"
+      - "${ROBOT_PORT:-8081}:8081"
     healthcheck:
       test: ["CMD", "curl", "-s", "http://localhost:8081/"]
       interval: 5s
@@ -135,8 +138,8 @@ services:
     volumes:
       - ${SESSION_DATA_DIR:-./session-data}:/session-data:ro
     ports:
-      - "3000:3000"   # WebGL UI
-      - "3001:3001"   # write-back server
+      - "${UI_PORT:-3000}:3000"     # WebGL UI
+      - "${WRITE_PORT:-3001}:3001"  # write-back server
     depends_on:
       robot-marshal: { condition: service_healthy }
       mri-marshal: { condition: service_healthy }

@@ -1,45 +1,41 @@
 # Quick Start
 
-One compose file. One knob (`MARSHAL_DUMP`). Marshal auto-routes k-space→recon, images→UI.
-
-## Build once
+## Build (once)
 ```bash
 ./scripts/build-client-images.sh
-docker build -f .worktrees/mri_data_marshal/third_party/python-ismrmrd-server/docker/Dockerfile \
-  -t fire-python:latest .worktrees/mri_data_marshal/third_party/python-ismrmrd-server/docker
 ```
 
-## Run
+## Start
 ```bash
-docker compose up -d          # live
-docker compose ps             # wait until healthy
-```
-UI: http://localhost:3000 · API: `:8080` (`/health`, `/image/latest`) · scanner MRD TCP: `:9100`
+# LIVE
+RECON_HOST=<ip> RECON_PORT=<port> docker compose up -d                      # real recon
+docker compose --profile test-recon up -d                                  # test recon
 
-## Feed test data (no real scanner)
+# DUMP (archival)
+MARSHAL_DUMP=--dump RECON_HOST=<ip> RECON_PORT=<port> docker compose up -d  # real recon
+MARSHAL_DUMP=--dump docker compose --profile test-recon up -d              # test recon
+
+docker compose ps                                                          # wait healthy
+```
+UI `:3000` · API `:8080` · scanner MRD TCP `:9100`
+
+## Send data
 ```bash
+# real scanner: point it at <marshal-host>:9100
+# test data instead:
 docker run --rm -v "$PWD/session-data:/data" fire-python:latest \
   python3 generate_cartesian_shepp_logan_dataset.py -o /data/phantom.h5
-
 docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest \
   python3 client.py -c invertcontrast -o /data/out.h5 --address mri-marshal --port 9100 /data/phantom.h5
 ```
 
-## Dump mode (archive instead of live view)
+## Stop
 ```bash
-MARSHAL_DUMP=--dump docker compose up -d                          # whole stack
-MARSHAL_DUMP=--dump docker compose up -d --force-recreate mri-marshal   # switch marshal only
-```
-`/image/latest` → 404, UI blank (expected). Archives to `session-data/dump/...`.
-
-## Real scanner + recon (production)
-```bash
-RECON_HOST=<recon-ip> RECON_PORT=<port> docker compose up -d --scale recon=0
-```
-Point the scanner at `<marshal-host>:9100`. Drop `fire-python`. ISMRMRD header sizes (340/198/40) must match across scanner, marshal, recon.
-
-## Teardown
-```bash
-docker compose logs -f mri-marshal
 docker compose down
 ```
+
+## Notes
+- Knobs: `MARSHAL_DUMP` (live | `--dump`), `RECON_HOST`/`RECON_PORT`, `SESSION_DATA_DIR`, exposed ports `HTTP_PORT`/`MRD_PORT`/`ROBOT_PORT`/`UI_PORT`/`WRITE_PORT`.
+- Auto-routing: k-space → recon, images → UI.
+- Dump: `/image/latest` = 404, UI blank (archives to `session-data/dump/`).
+- ISMRMRD headers 340/198/40 must match scanner/marshal/recon.

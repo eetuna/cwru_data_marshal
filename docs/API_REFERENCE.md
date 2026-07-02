@@ -217,7 +217,7 @@ List available data channels (HTML).
 
 #### GET /read/{filename}
 
-Read latest data from a channel.
+Read latest data from a channel. `{filename}` is an exact map lookup keyed by the verbatim entries in the robot marshal's `files.json` — the full name including the `file_` prefix and `.json` extension (e.g. `/read/file_tip_position_orientation.json`).
 
 **Response:**
 ```json
@@ -245,18 +245,14 @@ Write data to a channel.
 
 ### Available Data Channels
 
-| Channel | Description |
-|---------|-------------|
-| `localization_data` | Sensor positions |
-| `catheter_base_configuration` | System config |
-| `forward_kinematics` | FK calculations |
-| `desired_planned_motion` | Motion plan |
-| `tip_position_orientation` | Catheter tip pose |
-| `biological_signals` | ECG/vitals |
-| `surface_model_parameters` | Anatomy model |
-| `user_input` | Doctor commands |
-| `streaming_2D_images` | Live imaging |
-| `3D_images` | 3D volumes |
+The channels are exactly the entries in the robot marshal's `files.json`. Each is addressed by its verbatim name (`file_` prefix, `.json` extension).
+
+| Group | Channels |
+|-------|----------|
+| Imaging | `file_3D_images.json`, `file_streaming_2D_images.json` |
+| Catheter / robot | `file_tip_position_orientation.json`, `file_forward_kinematics.json`, `file_catheter_base_configuration.json`, `file_desired_planned_motion.json`, `file_localization_data.json` |
+| Sensing / physio | `file_force_sensing.json`, `file_biological_signals.json`, `file_surface_model_parameters.json` |
+| UI / markers | `file_user_input.json`, `file_rendered_2D_image.json`, `file_slice_translation.json`, `file_will_render_2D_image.json`, `file_will_update_texture_from_server.json`, `file_updated_texture_from_server.json`, `file_will_update_force_sensing_from_server.json`, `file_updated_force_sensing_from_server.json` |
 
 ---
 
@@ -285,8 +281,8 @@ curl http://localhost:8080/dump/recon
 
 # Robot Marshal
 curl http://localhost:8081/
-curl http://localhost:8081/read/tip_position_orientation
-curl -X POST http://localhost:8081/write/user_input \
+curl http://localhost:8081/read/file_tip_position_orientation.json
+curl -X POST http://localhost:8081/write/file_user_input.json \
   -H "Content-Type: application/json" \
   -d '{"values":[10,20,30],"sent_at":1706126625123456789}'
 ```
@@ -312,7 +308,7 @@ pose = requests.get('http://localhost:8080/pose').json()
 print(f"Position: {pose['position']}")
 
 # Robot marshal
-tip = requests.get('http://localhost:8081/read/tip_position_orientation').json()
+tip = requests.get('http://localhost:8081/read/file_tip_position_orientation.json').json()
 print(f"Tip: {tip['entries'][0]['values'][:3]}")
 ```
 

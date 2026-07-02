@@ -9,17 +9,19 @@ with a WebGL viewer on top.
 ## Run it
 
 ```bash
-docker compose up -d                        # live mode
-MARSHAL_DUMP=--dump docker compose up -d     # dump/archival mode
-docker compose ps                           # wait until healthy
+RECON_HOST=<ip> RECON_PORT=<port> docker compose up -d   # real recon (production)
+docker compose --profile test-recon up -d                # bundled test recon
+docker compose ps                                        # wait until healthy
 ```
 
-Then open the viewer at **http://localhost:3000**. Drive data in with a real
-scanner or `python-ismrmrd-server` `client.py` against `mri-marshal:9100`
-(see [QUICK_START](docs/QUICK_START.md)).
+Add `MARSHAL_DUMP=--dump` in front for dump/archival mode. Then open the viewer at
+**http://localhost:3000**. Drive data in with a real scanner or `python-ismrmrd-server`
+`client.py` against `mri-marshal:9100` (see [QUICK_START](docs/QUICK_START.md)).
 
-The only knob is `MARSHAL_DUMP` (live vs dump). The marshal routes automatically:
-k-space goes to recon; scanner-sent images go straight to the viewer.
+Knobs (env on `docker compose up`): `MARSHAL_DUMP` (live/dump), `RECON_HOST`/`RECON_PORT`
+(recon target), `SESSION_DATA_DIR` (data path), `HTTP_PORT`/`MRD_PORT`/`ROBOT_PORT`/`UI_PORT`/`WRITE_PORT`
+(exposed ports). The marshal routes automatically: k-space → recon; scanner-sent images →
+straight to the viewer (no per-scan choice).
 
 ## What runs
 

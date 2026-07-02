@@ -30,21 +30,36 @@ The USB package (produced by `scripts/export_usb.sh`) contains:
 docker load -i cwru-images.tar
 docker images | grep -E "cwru|fire-python"
 
-# 2. Start the stack
+# 2. Start the stack (point at your production recon)
 mkdir -p session-data
-docker compose up -d                        # live mode (default)
-# MARSHAL_DUMP=--dump docker compose up -d   # dump/archival mode
-docker compose ps                           # wait until healthy
+RECON_HOST=<recon-ip> RECON_PORT=<port> docker compose up -d   # live mode (default)
+docker compose ps                                              # wait until healthy
 
 # 3. Verify
 curl http://localhost:8080/health           # MRI Marshal  -> {"status":"ok"}
 curl http://localhost:8081/                  # Robot Marshal (HTML)
 ```
 
-`MARSHAL_DUMP` is the **only** configuration knob: unset = live mode (mid-scan
-`/image/latest` snapshot pipeline active); `--dump` = archival-only mode (canonical
-ISMRMRD H5 written at scan close, no live snapshot). The two modes are mutually
-exclusive.
+**Recon target.** The marshal forwards k-space to the recon service at
+`RECON_HOST:RECON_PORT` (default `recon:9002`). Point it at a production recon
+with `RECON_HOST=<ip> RECON_PORT=<port>`. To run the bundled test recon instead,
+enable the `test-recon` profile (the `recon` service is off by default):
+
+```bash
+docker compose --profile test-recon up -d
+```
+
+Prefix either start command with `MARSHAL_DUMP=--dump` for dump/archival mode.
+
+**Configuration knobs:**
+
+- `MARSHAL_DUMP` — unset = live mode (mid-scan `/image/latest` snapshot pipeline
+  active); `--dump` = archival-only mode (canonical ISMRMRD H5 written at scan
+  close, no live snapshot). The two modes are mutually exclusive.
+- `RECON_HOST` / `RECON_PORT` — recon target (default `recon:9002`).
+- `SESSION_DATA_DIR` — host path for the session-data volume.
+- `HTTP_PORT` / `MRD_PORT` / `ROBOT_PORT` / `UI_PORT` / `WRITE_PORT` — exposed
+  host ports.
 
 ---
 
@@ -54,7 +69,7 @@ exclusive.
 |---------|-----------|-----------|---------|
 | MRI Marshal | `mri-marshal` | 8080 | HTTP query/control API |
 | MRI Marshal | `mri-marshal` | 9100 | **MRD TCP** (scanner connects here) |
-| Recon (`python-ismrmrd-server`) | `recon` | 9002 (internal) | MRD TCP recon service |
+| Recon (`python-ismrmrd-server`) | `recon` | 9002 (internal) | bundled test recon (`test-recon` profile); production uses `RECON_HOST`/`RECON_PORT` |
 | Robot Marshal | `robot-marshal` | 8081 | HTTP `/read` + `/write` API |
 | Robot data clients | 6 containers | — | fill robot-marshal so webgl has a scene |
 | WebGL client (viewer) | `webgl-client` | 3000 / 3001 | browser UI (`http://localhost:3000`) |
@@ -171,25 +186,28 @@ The Robot Marshal is a small virtual-file HTTP service (base
 - `GET /read/<channel>` — latest data: `{"entries":[{"sent_at":<ns>,"values":[...]}]}`.
 - `POST /write/<channel>` — body `{"values":[...],"sent_at":<ns>}`.
 
-Channels are seeded from `files.json` (e.g. `localization_data`,
-`forward_kinematics`, `tip_position_orientation`, `biological_signals`,
-`user_input`, `streaming_2D_images`, `3D_images`; full list in
-[API_REFERENCE.md](API_REFERENCE.md)).
+Channel names are the **verbatim entries** in the robot marshal's `files.json`
+(seeded into the image) — full names with the `file_` prefix and `.json`
+extension, e.g. `file_tip_position_orientation.json`, `file_user_input.json`,
+`file_localization_data.json`, `file_forward_kinematics.json`,
+`file_biological_signals.json`, `file_streaming_2D_images.json`,
+`file_3D_images.json`. `GET /` lists them all; the full set is in
+[API_REFERENCE.md](API_REFERENCE.md).
 
 ```python
 import requests
 ROBOT = "http://localhost:8081"
 
-tip = requests.get(f"{ROBOT}/read/tip_position_orientation").json()
+tip = requests.get(f"{ROBOT}/read/file_tip_position_orientation.json").json()
 print("tip values:", tip["entries"][0]["values"])
 
-requests.post(f"{ROBOT}/write/user_input",
+requests.post(f"{ROBOT}/write/file_user_input.json",
               json={"values": [10, 20, 30], "sent_at": 1706126625123456789})
 ```
 
 ```bash
-curl http://localhost:8081/read/tip_position_orientation
-curl -X POST http://localhost:8081/write/user_input \
+curl http://localhost:8081/read/file_tip_position_orientation.json
+curl -X POST http://localhost:8081/write/file_user_input.json \
   -H "Content-Type: application/json" \
   -d '{"values":[10,20,30],"sent_at":1706126625123456789}'
 ```
@@ -279,5 +297,3 @@ export HDF5_USE_FILE_LOCKING=FALSE
 ```
 
 Teardown: `docker compose down`.
-</content>
-</invoke>

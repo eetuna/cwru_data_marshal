@@ -1,5 +1,8 @@
 # Plan: make the marshal reroute slice-translation AND know slice geometry
 
+> **Status: PLANNED — not implemented.** This is intended work, not shipped behavior.
+> Endpoints and structs named below (e.g. `GET /read/slice_geometry`, `SliceGeometry`) do not exist yet.
+
 ## Context / problem
 
 The WebGL UI can POST a `±1` slice-translation command, and (after the just-merged
