@@ -37,7 +37,10 @@ async function appendHdf5ReadMetric(entry) {
 // HDF5 reader using Python h5py (mirrors viz_client_main.cpp logic)
 //
 // viz_client flow:
-//   1. GET /v1/mrd/latest  -> { path, frame_index, dims }
+//   1. GET /image/latest  -> { path, error }  (marshal v2 API; live mode only.
+//      Returns 204 No Content when no image yet, 404 in dump mode. The old
+//      /v1/mrd/latest route with frame_index/dims was removed in the v2 rewrite,
+//      so frame_index defaults to 0 for the single-frame latest companion.)
 //   2. Open HDF5 file at path in SWMR read mode
 //   3. Read /images/data dataset  shape [frames, channels, z, y, x] float32
 //   4. Extract middle slice (2D) or full volume (3D) for the given frame
@@ -49,12 +52,21 @@ async function appendHdf5ReadMetric(entry) {
  * Fetch latest frame metadata from MRI Marshal.
  */
 async function fetchMriLatest() {
-  const response = await axios.get(`${MRI_MARSHAL_SERVER}/v1/mrd/latest`, { timeout: 2000 });
+  const response = await axios.get(`${MRI_MARSHAL_SERVER}/image/latest`, {
+    timeout: 2000,
+    // Don't throw on 404 (dump mode); treat it as "no data" like an empty 204.
+    validateStatus: (s) => (s >= 200 && s < 300) || s === 404,
+  });
   const data = response.data;
+  // 204 No Content (no image yet) or 404 (dump mode) -> empty/non-object body.
+  if (!data || typeof data !== 'object') {
+    return { path: null, frame_index: 0, dims: {}, timestamp: Date.now() };
+  }
   const meta = data.data || data;
   return {
     path: meta.path,
-    frame_index: meta.frame_index,
+    // v2 /image/latest exposes a single latest image and no frame_index/dims.
+    frame_index: meta.frame_index ?? 0,
     dims: meta.dims || {},
     timestamp: meta.ts || meta.timestamp || Date.now(),
   };
