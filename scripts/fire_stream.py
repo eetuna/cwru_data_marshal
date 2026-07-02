@@ -10,14 +10,16 @@ reading return messages back on the same socket (exactly like a real scanner):
   --mode kspace : send ACQUISITION lines per frame -> marshal -> recon -> image back
   --mode image  : send a reconstructed IMAGE per frame -> published directly (bypass recon)
 
+Multislice: --slices N streams an N-slice volume per frame. In kspace mode each
+slice is sent with idx.slice + LAST_IN_SLICE flags (recon reconstructs per
+slice); in image mode one IMAGE message carries the whole 3D stack.
+
 Works in live or dump mode (dump is a marshal setting — same stream; the marshal
 archives instead of publishing). Run inside the fire-python image, e.g.:
 
-  docker run --rm --network cwru-demo-net fire-python:latest \
+  docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
     python3 /scripts/fire_stream.py --address mri-marshal --port 9100 \
-    --mode kspace --fps 5 --frames 0 --matrix 128
-
-Mount this file in:  -v "$PWD/scripts:/scripts"
+    --mode kspace --fps 10 --frames 0 --matrix 128 --slices 5
 """
 import argparse, socket, sys, time, threading
 import numpy as np
@@ -29,7 +31,7 @@ from ismrmrdtools import simulation, transform   # noqa: E402
 from connection import Connection                # noqa: E402
 
 
-def build_header(matrix, coils, fov=300.0):
+def build_header(matrix, coils, slices, fov=300.0):
     h = ismrmrd.xsd.ismrmrdHeader()
     exp = ismrmrd.xsd.experimentalConditionsType(); exp.H1resonanceFrequency_Hz = 128000000
     h.experimentalConditions = exp
@@ -46,20 +48,24 @@ def build_header(matrix, coils, fov=300.0):
     limits = ismrmrd.xsd.encodingLimitsType()
     l1 = ismrmrd.xsd.limitType(); l1.minimum = 0; l1.maximum = matrix - 1; l1.center = matrix // 2
     limits.kspace_encoding_step_1 = l1
+    # Slice limits: the marshal parses <slice><maximum> to size multislice volumes.
+    ls = ismrmrd.xsd.limitType(); ls.minimum = 0; ls.maximum = slices - 1; ls.center = slices // 2
+    limits.slice = ls
     enc.encodingLimits = limits
     h.encoding.append(enc)
     return h.toXML('utf-8')
 
 
-def moving_phantom(matrix, frame):
-    """Base Shepp-Logan + a big bright disk orbiting the center -> obviously changes per frame."""
-    phan = simulation.phantom(matrix).astype(np.float32)
-    t = frame * 0.6                                   # faster orbit
+def moving_phantom(matrix, frame, slice_idx=0, base=None):
+    """Shepp-Logan + a bright disk orbiting the center. The orbit phase advances
+    per frame and is offset per slice, so every slice and every frame differ."""
+    phan = (base if base is not None else simulation.phantom(matrix)).astype(np.float32).copy()
+    t = frame * 0.6 + slice_idx * 0.8
     cx = matrix // 2 + int(matrix * 0.32 * np.cos(t))
     cy = matrix // 2 + int(matrix * 0.32 * np.sin(t))
     yy, xx = np.ogrid[:matrix, :matrix]
-    disk = ((xx - cx) ** 2 + (yy - cy) ** 2) < (matrix * 0.14) ** 2   # big
-    phan[disk] += 3.0                                                 # bright
+    disk = ((xx - cx) ** 2 + (yy - cy) ** 2) < (matrix * 0.14) ** 2
+    phan[disk] += 3.0
     return phan
 
 
@@ -81,12 +87,14 @@ def main():
     p.add_argument("--fps", type=float, default=5.0)
     p.add_argument("--frames", type=int, default=0, help="0 = until Ctrl-C")
     p.add_argument("--matrix", type=int, default=128)
+    p.add_argument("--slices", type=int, default=1)
     p.add_argument("--coils", type=int, default=8)
     args = p.parse_args()
 
-    matrix, coils = args.matrix, args.coils
+    matrix, coils, slices = args.matrix, args.coils, args.slices
+    base = simulation.phantom(matrix)
     csm = simulation.generate_birdcage_sensitivities(matrix, coils)
-    xml = build_header(matrix, coils)
+    xml = build_header(matrix, coils, slices)
 
     sock = socket.create_connection((args.address, args.port))
     reader = threading.Thread(target=reader_loop, args=(sock,), daemon=True)
@@ -107,44 +115,54 @@ def main():
     counter = 0
     frame = 0
     last_log = 0.0
-    print(f"streaming mode={args.mode} fps={args.fps} matrix={matrix} -> {args.address}:{args.port}", flush=True)
+    print(f"streaming mode={args.mode} fps={args.fps} matrix={matrix} slices={slices} "
+          f"-> {args.address}:{args.port}", flush=True)
     try:
         while args.frames == 0 or frame < args.frames:
             t0 = time.time()
-            img = moving_phantom(matrix, frame)
 
             if args.mode == "kspace":
-                coil_images = np.tile(img, (coils, 1, 1)) * csm
-                K = transform.transform_image_to_kspace(coil_images, (1, 2))
-                for line in range(matrix):
-                    acq.scan_counter = counter
-                    acq.idx.repetition = frame
-                    acq.idx.kspace_encode_step_1 = line
-                    acq.clearAllFlags()
-                    if line == 0:
-                        acq.setFlag(ismrmrd.ACQ_FIRST_IN_ENCODE_STEP1)
-                        acq.setFlag(ismrmrd.ACQ_FIRST_IN_SLICE)
-                        acq.setFlag(ismrmrd.ACQ_FIRST_IN_REPETITION)
-                    elif line == matrix - 1:
-                        acq.setFlag(ismrmrd.ACQ_LAST_IN_ENCODE_STEP1)
-                        acq.setFlag(ismrmrd.ACQ_LAST_IN_SLICE)
-                        acq.setFlag(ismrmrd.ACQ_LAST_IN_REPETITION)
-                    acq.data[:] = K[:, line, :]
-                    conn.send_acquisition(acq)
-                    counter += 1
-            else:  # image
-                im = ismrmrd.Image.from_array(img, transpose=False)
+                for s in range(slices):
+                    img = moving_phantom(matrix, frame, s, base)
+                    coil_images = np.tile(img, (coils, 1, 1)) * csm
+                    K = transform.transform_image_to_kspace(coil_images, (1, 2))
+                    for line in range(matrix):
+                        acq.scan_counter = counter
+                        acq.idx.repetition = frame
+                        acq.idx.slice = s
+                        acq.idx.kspace_encode_step_1 = line
+                        acq.clearAllFlags()
+                        if line == 0:
+                            acq.setFlag(ismrmrd.ACQ_FIRST_IN_ENCODE_STEP1)
+                            acq.setFlag(ismrmrd.ACQ_FIRST_IN_SLICE)
+                            if s == 0:
+                                acq.setFlag(ismrmrd.ACQ_FIRST_IN_REPETITION)
+                        elif line == matrix - 1:
+                            acq.setFlag(ismrmrd.ACQ_LAST_IN_ENCODE_STEP1)
+                            acq.setFlag(ismrmrd.ACQ_LAST_IN_SLICE)
+                            if s == slices - 1:
+                                acq.setFlag(ismrmrd.ACQ_LAST_IN_REPETITION)
+                        acq.data[:] = K[:, line, :]
+                        conn.send_acquisition(acq)
+                        counter += 1
+            else:  # image: one IMAGE message carrying the whole slice stack
+                vol = np.stack([moving_phantom(matrix, frame, s, base)
+                                for s in range(slices)])         # (nz, ny, nx)
+                im = ismrmrd.Image.from_array(vol, transpose=False)
                 im.image_index = frame
-                im.field_of_view = (300.0, 300.0, 6.0)
+                im.field_of_view = (300.0, 300.0, 6.0 * slices)
                 im.read_dir = (1.0, 0.0, 0.0)
                 im.phase_dir = (0.0, 1.0, 0.0)
                 im.slice_dir = (0.0, 0.0, 1.0)
+                if frame == 0:
+                    print(f"  image payload shape={im.data.shape} "
+                          f"(matrix_size={tuple(im.matrix_size)}, channels={im.channels})", flush=True)
                 conn.send_image(im)
 
             frame += 1
             now = time.time()
             if now - last_log >= 1.0:
-                print(f"  streamed {frame} frames ({args.mode})", flush=True)
+                print(f"  streamed {frame} frames ({args.mode}, {slices} slice(s))", flush=True)
                 last_log = now
             dt = now - t0
             if period > dt:
