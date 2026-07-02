@@ -509,10 +509,23 @@ private:
 
                 case MRD_MESSAGE_CLOSE: {
                     LOG_INFO("CLOSE");
-                    if (forwarder_ && session_active_.load()) {
+                    // Who sends the scan-completion CLOSE back to the scanner
+                    // depends on whether recon was engaged this scan. With a
+                    // recon session active (k-space scan), recon's own CLOSE is
+                    // relayed to the scanner by the recon reader. Without recon
+                    // (image/metadata-only scan), marshal must emit the CLOSE
+                    // itself, otherwise the scanner's receive side blocks waiting
+                    // for a completion marker that never arrives.
+                    const bool recon_engaged = forwarder_ && session_active_.load();
+                    if (recon_engaged) {
                         forwarder_->post_close();
                         forwarder_->wait_for_close(std::chrono::milliseconds(2000));
                         forwarder_->end_session();
+                    } else {
+                        // 2-byte CLOSE marker only: ends THIS scan, not the TCP
+                        // connection (which may carry a subsequent scan) and not
+                        // the listening port.
+                        push_message_to_scanner(MRD_MESSAGE_CLOSE, nullptr, 0);
                     }
                     // Allow the NEXT scan on this same scanner TCP
                     // connection to attempt a recon reconnect once.
@@ -560,9 +573,12 @@ private:
                             state_.dump_recorder->append_scanner_text(
                                 std::vector<uint8_t>(body)));
                     }
-                    if (ensure_recon_session()) {
-                        forwarder_->post_frame(MRD_MESSAGE_TEXT, body);
-                    }
+                    // Buffer for recon; do NOT open a recon session on TEXT.
+                    // Only k-space (ACQUISITION) engages recon. If this scan is
+                    // k-space, the buffered TEXT flushes ahead of the
+                    // acquisitions; if it is an image/metadata-only scan, recon
+                    // is never contacted.
+                    send_or_buffer_recon(MRD_MESSAGE_TEXT, body);
                     break;
                 }
 
@@ -694,9 +710,10 @@ private:
                     // For a future ECG-with-image consumer (e.g. cardiac
                     // MPC), bundle waveforms into latest_image.h5 via an
                     // in-memory ring buffer; do not reinstate this spool.
-                    if (ensure_recon_session()) {
-                        forwarder_->post_frame(MRD_MESSAGE_ISMRMRD_WAVEFORM, body);
-                    }
+                    // Buffer for recon; do NOT open a recon session on waveforms
+                    // alone. Waveforms accompanying k-space flush once the first
+                    // ACQUISITION opens the session (see send_or_buffer_recon).
+                    send_or_buffer_recon(MRD_MESSAGE_ISMRMRD_WAVEFORM, body);
                     break;
                 }
 
