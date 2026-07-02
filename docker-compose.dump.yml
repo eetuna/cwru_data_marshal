@@ -1,0 +1,25 @@
+# Overlay that flips mri-marshal into DUMP mode (adds --dump). Layer on top of
+# docker-compose.demo.yml + docker-compose.ismrmrd.yml.
+#
+#   docker compose --env-file .env.demo \
+#     -f docker-compose.demo.yml -f docker-compose.ismrmrd.yml -f docker-compose.dump.yml \
+#     up -d --force-recreate mri-marshal
+#
+# In dump mode /image/latest returns 404 (no live snapshot) — webgl stays blank
+# by design. The scan is archived to a canonical scan_<ts>.h5 under the dump
+# subtree of --dump-dir on CLOSE.
+services:
+  mri-marshal:
+    command:
+      - /opt/mri/build/marshal
+      - --http
+      - "0.0.0.0:8080"
+      - --mrd-port
+      - "9100"
+      - --dump-dir
+      - /session-data
+      - --dump
+      - --recon-host
+      - mock-recon
+      - --recon-port
+      - "9002"
