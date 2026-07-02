@@ -26,11 +26,11 @@ The CWRU Data Marshal is a persistent intermediary between the MRI scanner and t
                               ┌──────────────────┬──────────┴──────────┬───────────┐
                               │                  │                    │           │
                          GET /image/latest   GET/PUT /transform  POST/GET /pose  GET /health
-                              │                  │                    │
-                         ┌────┴────┐        ┌────┴─────┐         ┌───┴────┐
-                         │Viz Clnt │        │Front-End │         │Pose Clnt│
-                         │(file rd)│        │(delta API)│        │(HTTP)  │
-                         └─────────┘        └──────────┘         └────────┘
+                              │                  │                    │           /dump/* /debug/*
+                         ┌────┴─────────────────┴────────────────────┴────┐
+                         │ webgl-client (:3000 UI, :3001 write-back)       │
+                         │ + external consumers (HTTP GET/PUT/POST)        │
+                         └────────────────────────────────────────────────┘
 ```
 
 **Scanner → Marshal:** MRD TCP on `--mrd-port` (default 9100). The scanner opens a persistent TCP connection and sends MRD messages using python-ismrmrd-server's 2-byte message ID framing.
@@ -39,9 +39,16 @@ The CWRU Data Marshal is a persistent intermediary between the MRI scanner and t
 
 **Marshal → Scanner (return path):** Recon return messages are pushed back to the scanner on the SAME TCP socket the scanner connected on. This satisfies the requirement: "Marshall needs to push, and it must come over the existing connection that was established for the scan."
 
-**Query/Control clients → Marshal:** HTTP on `--http` (default 0.0.0.0:8080). The viz client, pose client, tracker, and any external consumer use HTTP GET/POST for querying images, transforms, poses, and health.
+**Query/Control clients → Marshal:** HTTP on `--http` (default 0.0.0.0:8080). The
+webgl-client and any external consumer use it: `GET /image/latest`,
+`GET/PUT /transform`, `POST/GET /pose`, `GET /health`, `GET /dump/scanner`,
+`GET /dump/recon`, and `/debug/*` diagnostics.
 
-**Viz client:** Polls `GET /image/latest` over HTTP, receives a stable path pointing at a closed companion HDF5 file, and opens it with default ISMRMRD / h5py settings. Marshal atomically renames a new companion snapshot on each incoming live IMAGE, so readers always see a closed file.
+**Image client (webgl-client):** Polls `GET /image/latest` over HTTP, receives
+`{path, error}` pointing at a closed companion HDF5 file, and opens it with default
+ISMRMRD / h5py settings. Marshal atomically renames a new companion snapshot on each
+incoming live IMAGE, so readers always see a closed file. `GET /image/latest` returns
+`204 No Content` before the first IMAGE, and `404 Not Found` in dump mode.
 
 ## MRD TCP Wire Protocol
 
@@ -100,20 +107,59 @@ Scanner connects to marshal MRD TCP port
   ← CLOSE(4)                            recon done
 ```
 
+## Routing and Behavioral Guarantees
+
+These guarantees define how marshal routes messages and how it protects the
+scanner/recon path. They are contractual — clients and recon depend on them.
+
+**Recon is engaged only for k-space.** Marshal opens a recon session lazily: the
+recon connection is established when the **first ACQUISITION(1008) arrives**.
+CONFIG_FILE/CONFIG_TEXT, METADATA_XML_TEXT, TEXT, and WAVEFORM are buffered until
+then (and replayed into the session once it opens). A scanner-sent IMAGE(1022) is
+**not** sent to recon — it is published directly to the live lane / `latest_image.h5`
+snapshot. This means an image/metadata-only scan never touches recon.
+
+**Scan-completion CLOSE.** On end of scan:
+- **k-space scan** (recon session was opened): recon's CLOSE(4) is relayed back to
+  the scanner, so the scanner learns the scan is done from recon.
+- **image/metadata-only scan** (no recon session): marshal emits **its own** CLOSE(4)
+  to the scanner so it is never left waiting on a recon that was never engaged.
+
+**Archival never blocks the protocol path.** HDF5 writes and the spool→H5 conversion
+run off the scanner/recon forwarding path and must never stall it. TCP flow control on
+the MRD sockets is the **only** backpressure that applies to the protocol path;
+archival I/O pressure is absorbed independently and cannot throttle the scanner or
+recon.
+
 ## Docker Compose Topology
 
-```
-docker-compose.demo.yml services:
+There is a single `docker-compose.yml`. The **only** knob is live vs dump via the
+`MARSHAL_DUMP` env var (`""` = live, `--dump` = dump/archival); everything else is
+fixed. The scanner is **not** a compose service — it is external and drives
+`mri-marshal:9100` over raw MRD TCP (a real scanner, or python-ismrmrd-server's
+`client.py`).
 
-  mri-marshal        --http 0.0.0.0:8080 --mrd-port 9100 --recon-host mock-recon --recon-port 9002
-  mock-recon          MRD TCP server on port 9002
-  kspace-streamer     MRD TCP client → mri-marshal:9100 (acquisitions + ECG waveforms with --ecg)
-  image-streamer      MRD TCP client → mri-marshal:9100 (pre-reconstructed images)
-  viz-client          HTTP client → mri-marshal:8080 (GET /image/latest + file read)
-  pose-client         HTTP client → mri-marshal:8080 (POST /pose)
-  robot-marshal       HTTP server on port 8081 (independent)
-  robot-clients       catheter-tracking, controller, planning, front-end, surface-tracking → robot-marshal:8081
 ```
+docker-compose.yml services (network cwru-demo-net):
+
+  mri-marshal     marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data
+                          --recon-host recon --recon-port 9002 $MARSHAL_DUMP
+                  ports 8080 (HTTP API) + 9100 (MRD TCP, scanner-facing)
+  recon           fire-python: python-ismrmrd-server main.py, MRD TCP :9002,
+                  --defaultConfig=invertcontrast
+  robot-marshal   HTTP server on port 8081 (independent of the MRI path)
+  catheter-tracking, force-sensor, controller, planning, front-end,
+  surface-tracking   robot data producers → robot-marshal:8081
+  webgl-client    UI on port 3000 + write-back server on 3001;
+                  reads mri-marshal:8080 (/image/latest) and robot-marshal:8081
+
+  # External (not a service): scanner → mri-marshal:9100 over raw MRD TCP, e.g.
+  #   client.py -c invertcontrast --address mri-marshal --port 9100 phantom.h5
+```
+
+`MARSHAL_DUMP` is passed straight through to the marshal command; live mode
+forwards k-space to `recon` and serves live snapshots, dump mode archives the full
+scanner stream and serves no live snapshot (see Storage Layout).
 
 ## Storage Layout
 
@@ -159,7 +205,7 @@ The marshal stays running regardless of recon failure:
 - Recon return reading runs on a background thread.
 - If recon is unreachable, scanner-side archival continues and recon connection state is reset for a later reconnect.
 - A scanner-visible MRD `IMAGE(1022)` failure image is pushed on the active scanner TCP connection.
-- `latest_error.png` is written so the viz client visually shows "reconstruction failed"
+- `latest_error.png` is written so the webgl-client visually shows "reconstruction failed"
 - T4 test: kill recon mid-scan, assert marshal still accepts MRD TCP connections and GET /health returns 200
 
 If `--recon-host`/`--recon-port` are not set, the marshal has no reconstruction target. With `--dump`, scanner data is archived but never forwarded.

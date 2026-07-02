@@ -18,6 +18,10 @@ data_*/
 
 # Archive (old docs/scripts, not needed in repo)
 archive/
+docs/archive/
+
+# videos
+videos/
 
 # Backup files
 *.bak

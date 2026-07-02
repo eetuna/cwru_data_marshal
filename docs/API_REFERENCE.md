@@ -3,14 +3,14 @@
 Complete reference for connecting external clients to the CWRU Data Marshal system.
 
 The marshal has two transport interfaces:
-- **MRD TCP** (port `--mrd-port`, default 9100) — primary interface for scanner and recon. Uses python-ismrmrd-server's 2-byte message ID framing. See [ARCHITECTURE.md](ARCHITECTURE.md) for the wire protocol.
+- **MRD TCP** (port `--mrd-port`, default `0`/disabled; `docker-compose.yml` sets `9100`) — primary interface for scanner and recon. Uses python-ismrmrd-server's 2-byte little-endian message ID framing (`CONFIG_FILE=1`, `CONFIG_TEXT=2`, `METADATA_XML_TEXT=3`, `CLOSE=4`, `TEXT=5`, `ACQUISITION=1008`, `IMAGE=1022`, `WAVEFORM=1026`). See [ARCHITECTURE.md](ARCHITECTURE.md) for the full wire protocol.
 - **HTTP** (port `--http`, default 8080) — query/control interface for viz, pose, transform, health, and dump endpoints.
 
 ---
 
 ## MRD TCP Interface (Scanner and Recon)
 
-Scanner-side clients (kspace_streamer, image_streamer) connect via raw TCP to the marshal's `--mrd-port` and send MRD messages. The marshal forwards to recon via a second MRD TCP connection. When `--dump` is enabled, it also archives standard ISMRMRD objects to canonical H5 files. Reconstructed images are pushed back to the scanner on the same socket.
+Scanner-side clients connect via raw TCP to the marshal's `--mrd-port` and send MRD messages. The marshal forwards to recon ([python-ismrmrd-server](https://github.com/kspaceKelvin/python-ismrmrd-server) on MRD TCP, default port `9002`) via a second MRD TCP connection. When `--dump` is enabled, it also archives standard ISMRMRD objects to canonical H5 files. Reconstructed images are pushed back to the scanner on the same socket.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full wire protocol reference (message IDs, framing, body formats, session flow).
 
@@ -28,7 +28,7 @@ HTTP is not a scanner or recon data transport. Scanner data and recon return dat
 
 #### GET /health
 
-Health check. Returns `{"status": "ok"}`.
+Health check. Returns `{"status": "ok", "uptime_s": 95}`.
 
 #### GET /image/latest
 
@@ -55,7 +55,7 @@ If a scanner MRD TCP connection is active when recon fails, the scanner also rec
 
 Before the current scan has published any live IMAGE, `GET /image/latest` returns `204 No Content`.
 
-**Dump mode (`--dump`):** returns `404 Not Found` with body `{"error":"dump mode; no live snapshot"}`. Dump mode is archival-only; there is no mid-scan snapshot pipeline. Viz clients should not poll this endpoint in dump mode.
+**Dump mode (`--dump`):** returns `404 Not Found` with body `{"error":"dump mode; no live snapshot"}`. Dump mode is archival-only — poll `/image/latest` only in live mode.
 
 The per-scan history file (`<mode>/from_*/scan_<ts>.h5`) is an archival output produced on CLOSE. It is not a mid-scan reader interface in either mode. Clients that need the per-scan archive open it after the scan ends.
 
@@ -69,7 +69,6 @@ Per-pipeline counters for retention verification. Returns mode-specific JSON:
   "mode": "live",
   "live": {
     "from_scanner": {"acq": 0, "img": 0, "wf": 1076, "open": false,
-                     "spool_records": 1076, "spool_bytes": ...,
                      "dropped": 0, "queued_jobs": 0,
                      "high_watermark_hit": false},
     "from_reconstruction": { ... }
@@ -90,7 +89,7 @@ Per-pipeline counters for retention verification. Returns mode-specific JSON:
 }
 ```
 
-Use this (not viz_client FPS) to measure archival retention. `dropped_records` / `dropped` must remain zero under any non-disk-failure operating condition per the protocol contract.
+Use this to measure archival retention. `dropped_records` / `dropped` must remain zero under any non-disk-failure operating condition.
 
 #### GET /debug/perf
 
@@ -125,7 +124,7 @@ Field meanings:
 - `recv.*` — counts of MRD wire messages observed entering marshal per lane.
 - `publish_attempts.*` — counts of `publish_latest_snapshot` calls per lane.
 - `latest_writer.enqueued` — jobs accepted by `LatestImageWriter::enqueue`.
-- `latest_writer.coalesced` — **contract tripwire**, must remain `0`. Same-dest coalescing was removed in the 2026-04-22 fix; non-zero means the coalesce path was reintroduced.
+- `latest_writer.coalesced` — **contract tripwire**, must remain `0`. Non-zero means a same-destination coalesce path was introduced (a regression).
 - `latest_writer.dropped_oldest` — overload-backstop drops at the 64-job queue cap. Should be 0 under normal load; non-zero indicates sustained writer stall (look at `max_write_us`).
 - `latest_writer.completed` — jobs that finished writing successfully. **Should equal `enqueued - dropped_oldest`** in steady state.
 - `latest_writer.failed` — exceptions during `write_latest_image_h5_file`.
@@ -133,7 +132,7 @@ Field meanings:
 - `latest_writer.{last,max}_write_us` — write durations (microseconds).
 - `latest_writer.{last,max}_drain_lag_us` — time from `enqueue` to the worker popping the job (microseconds). High values indicate writer is the bottleneck.
 
-Use this endpoint instead of (or alongside) viz client FPS to localize regressions. `viz_client` FPS = `latest_writer.completed/sec` in steady state.
+Use `latest_writer.completed/sec` as the steady-state publish rate to localize regressions.
 
 #### GET /transform
 
@@ -148,6 +147,18 @@ Write a new slice transform delta:
 ```json
 {"through_plane_mm": 1.0, "readout_mm": 0.0, "phase_mm": 0.0, "rotation_rad": 0.0}
 ```
+
+#### POST /write/file_slice_translation
+
+Slice-nudge command channel used by the WebGL client to step the MRI imaging slice by ±1. Body:
+```json
+{"client_id": "webgl", "sent_at": 1706126625123456789, "values": [1]}
+```
+`values` must be a single-element array whose value is exactly `+1` or `-1`; anything else returns `400`. The latest command is cached in memory (a `ts` field with `iso8601_now_ms()` is stamped on it). On success returns `{"file": "file_slice_translation", "direction": 1}`. (`/write/file_slice_translation.json` is accepted as an alias.)
+
+#### GET /read/file_slice_translation
+
+Returns the last cached slice-nudge command JSON (non-consuming — the value is not cleared). Returns `204 No Content` when no command has been posted yet. (`/read/file_slice_translation.json` is accepted as an alias.)
 
 #### POST /pose
 
@@ -181,7 +192,7 @@ List archived reconstruction HDF5 files under `dump/from_reconstruction/` (same 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--http host:port` | `0.0.0.0:8080` | HTTP listen address (query/control endpoints) |
-| `--mrd-port N` | `0` (disabled) | MRD TCP listen port (scanner connections). Listener only starts when a non-zero value is passed (compose demo passes `9100`). |
+| `--mrd-port N` | `0` (disabled) | MRD TCP listen port (scanner connections). Listener only starts when a non-zero value is passed (`docker-compose.yml` passes `9100`). |
 | `--dump-dir path` | `./data` | Session-data root. Holds `live/from_scanner/`, `live/from_reconstruction/`, and — when `--dump` is on — `dump/from_scanner/`, `dump/from_reconstruction/`. |
 | `--dump` | off | Enable retrospective canonical ISMRMRD H5 dump writing |
 | `--recon-host host` | (none) | Recon service hostname for MRD TCP forwarding |
@@ -265,6 +276,10 @@ curl http://localhost:8080/transform
 curl -X PUT http://localhost:8080/transform \
   -H "Content-Type: application/json" \
   -d '{"through_plane_mm":1.0,"readout_mm":0,"phase_mm":0,"rotation_rad":0}'
+curl -X POST http://localhost:8080/write/file_slice_translation \
+  -H "Content-Type: application/json" \
+  -d '{"client_id":"webgl","sent_at":1706126625123456789,"values":[1]}'
+curl http://localhost:8080/read/file_slice_translation
 curl http://localhost:8080/dump/scanner
 curl http://localhost:8080/dump/recon
 
@@ -305,32 +320,6 @@ print(f"Tip: {tip['entries'][0]['values'][:3]}")
 
 ## Data Flow
 
-```
-Scanner/K-Space Streamer
-    │
-    │ MRD TCP (port 9100)
-    │ CONFIG_FILE + METADATA_XML + ACQUISITION×N + WAVEFORM + CLOSE
-    v
-MRI Marshal (writes MRD wire records to <mode>/from_scanner/scan_<ts>.h5.spool; convert→HDF5 at CLOSE)
-    │
-    │ MRD TCP (to recon-host:recon-port)
-    │ same messages forwarded, except scanner-origin IMAGE (archived but not sent to recon)
-    v
-Reconstruction Service (MRD TCP server)
-    │
-    │ MRD TCP return messages on same connection
-    v
-MRI Marshal (writes to <mode>/from_reconstruction/scan_<ts>.h5.spool; in live mode also publishes
-             live/from_reconstruction/latest_image.h5 via atomic-rename per incoming IMAGE)
-    │                              │
-    │ MRD TCP return messages      │ HTTP GET /image/latest → {"path","error"} in live mode
-    │ pushed back to scanner       │                       → 404 in dump mode
-    v                              v
-Scanner                        Viz Client (opens latest_image.h5, reads "image_0", renders with OpenCV)
-```
+At a glance: scanner data and recon returns travel over **MRD TCP**; all query/control (image pointer, pose, transform, slice nudge, health, dump listing, debug) is **HTTP**. `<mode>` is `live` (default) or `dump` (`--dump`); the two are mutually exclusive and only the selected mode's subtree is populated. The only mid-scan readable interface is `latest_image.h5` (live mode only); `scan_<ts>.h5` is an archival output finalized on CLOSE.
 
-Scanner data transport is MRD TCP. Query/control is HTTP. `<mode>` is `live` (default) or `dump` (with `--dump`); the two modes are mutually exclusive and only the selected mode's subtree is populated.
-
-Each scan produces a `.spool` (raw MRD wire frames, written during scan) and, on CLOSE, a `.h5` (canonical ISMRMRD). The per-scan `scan_<ts>.h5` is an archival output finalized at close — not a mid-scan reader interface (HDF5 file locking would block that anyway). The only mid-scan readable interface is `latest_image.h5` (live mode only), which `LatestImageWriter` publishes via atomic rename.
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system diagram and wire protocol reference.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system diagram, session flow, and wire-protocol reference.

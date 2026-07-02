@@ -1,94 +1,78 @@
 # Quick Start
 
-For disk-output-only checks, use [Dump Quick Start](DUMP_QUICK_START.md).
+The MRI data marshal: a Docker Compose stack that ingests scanner data over MRD TCP, reconstructs k-space, and publishes images to a WebGL UI (plus a robot-marshal side for the robot clients). One compose file, one knob.
 
-One-time alias (add to `~/.bashrc` so every new shell has it):
+## Prerequisites
 
-```bash
-echo "alias cdd='docker compose --env-file .env.demo -f docker-compose.demo.yml'" >> ~/.bashrc && source ~/.bashrc
-```
-
-All commands below must be run from the repo root (`cd` into it first) because `cdd` resolves `.env.demo` and `docker-compose.demo.yml` relative to the current directory.
-
-## Flow A -- reconstruction path (k-space to recon to image)
-
-One terminal per service. Each blocks that terminal and streams its logs until `Ctrl-C`.
+Build the images once:
 
 ```bash
-# Terminal 1
-cdd up mri-marshal
+./scripts/build-client-images.sh   # cwru/* images
 
-# Terminal 2
-cdd up robot-marshal
-
-# Terminal 3
-cdd up mock-recon
-
-# Terminal 4
-cdd --profile viz up viz-client
-
-# Terminal 5
-cdd up pose-client
-
-# Terminal 6
-cdd --profile robot-clients up robot-clients
-
-# Terminal 7
-cdd up kspace-streamer
+# fire-python (recon + synthetic-data tools)
+docker build \
+  -f .worktrees/mri_data_marshal/third_party/python-ismrmrd-server/docker/Dockerfile \
+  -t fire-python:latest \
+  .worktrees/mri_data_marshal/third_party/python-ismrmrd-server/docker
 ```
 
-kspace-streamer sends acquisitions + ECG waveforms (via `--ecg` flag) over MRD TCP.
-
-## Flow B -- bypass reconstruction (pre-made images)
+## Run (live)
 
 ```bash
-# Terminal 1
-cdd up mri-marshal
-
-# Terminal 2
-cdd up robot-marshal
-
-# Terminal 3
-cdd --profile viz up viz-client
-
-# Terminal 4
-cdd up pose-client
-
-# Terminal 5
-cdd --profile robot-clients up robot-clients
-
-# Terminal 6
-cdd up image-streamer
+docker compose up -d
 ```
 
-## Stop everything
+Services: `mri-marshal`, `recon`, `robot-marshal`, six robot clients (catheter-tracking, force-sensor, controller, planning, front-end, surface-tracking), and `webgl-client`.
+
+## Verify
 
 ```bash
-cdd --profile viz --profile robot-clients down
+curl localhost:8080/health
+curl localhost:8080/image/latest   # {path,error} in live mode
 ```
 
-## Service reference
+Open the UI at http://localhost:3000 (write-back on 3001).
 
-| Service | Profile | Role |
-|---|---|---|
-| `mri-marshal` | -- | MRI data hub (`--http host:port`). |
-| `robot-marshal` | -- | Robot data hub (HTTP 8081). |
-| `mock-recon` | -- | Reconstruction service. **Flow A only.** |
-| `image-streamer` | -- | Pre-made image producer. **Flow B only.** |
-| `kspace-streamer` | -- | Raw k-space + ECG waveforms via MRD TCP (`--ecg`). **Flow A only.** |
-| `pose-client` | -- | Synthetic pose/tracking data via HTTP POST /pose. Both flows. |
-| `viz-client` | `viz` | OpenCV image viewer. Polls `GET /image/latest`. |
-| `robot-clients` | `robot-clients` | Bundle of catheter-tracking, controller, planning, front-end, surface-tracking. |
+Ports: marshal HTTP `8080` (`/image/latest`, `/health`), marshal MRD TCP `9100` (scanner), recon `9002`, robot-marshal `8081`.
 
-Individual robot clients (run separately instead of as the `robot-clients` bundle): `catheter-tracking`, `controller`, `planning`, `front-end`, `surface-tracking`. All no-profile, each takes the same `cdd up <name>` form.
+## Feed data
 
-## Rules
+The scanner is external: a real scanner or a `python-ismrmrd-server` client connecting to `mri-marshal:9100` over raw MRD TCP. Marshal auto-routes by message type — k-space (ACQUISITION) goes to recon and the image comes back; a scanner-sent IMAGE is published straight to the UI. Nothing to configure per scan.
 
-- Always use `cdd` (or pass both `--env-file .env.demo -f docker-compose.demo.yml`) from the repo root. Without that, Docker Compose may resolve the wrong env file, compose file, or relative `SESSION_DATA_DIR` bind mount.
-- Flow A and Flow B are mutually exclusive. Do not run `image-streamer` together with `mock-recon`/`kspace-streamer`.
-- `mock-recon` must be up before `kspace-streamer`, otherwise marshal has nowhere to forward acquisitions.
-- `viz-client` and `robot-clients` live behind compose profiles (`viz`, `robot-clients`). They only start when the matching `--profile` flag is on the command.
-- Commands shown block their terminal and stream logs. To run detached in the background, add `-d`: `cdd up -d <service>`, then follow logs with `cdd logs -f <service>`. Stop everything (works for both `-d` and blocking runs) with:
-  ```bash
-  cdd --profile viz --profile robot-clients down
-  ```
+To feed synthetic data with no real scanner:
+
+```bash
+# generate a phantom
+docker run --rm -v "$PWD/session-data:/data" fire-python:latest \
+  python3 generate_cartesian_shepp_logan_dataset.py -o /data/phantom.h5
+
+# stream it into the marshal
+docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest \
+  python3 client.py -c invertcontrast -o /data/out.h5 \
+  --address mri-marshal --port 9100 /data/phantom.h5
+```
+
+Output lands in `session-data/` (live mode writes `live/from_reconstruction/latest_image.h5` and `from_scanner`).
+
+## Dump mode
+
+Set `MARSHAL_DUMP=--dump` to archive to disk instead of publishing live. `GET /image/latest` returns 404 and the UI stays blank — expected.
+
+```bash
+# whole stack in dump mode
+MARSHAL_DUMP=--dump docker compose up -d
+
+# or switch just the marshal, without bouncing the stack
+MARSHAL_DUMP=--dump docker compose up -d --force-recreate mri-marshal
+
+# back to live (omit the var)
+docker compose up -d --force-recreate mri-marshal
+```
+
+## Manage / teardown
+
+```bash
+docker compose ps
+docker compose logs -f mri-marshal
+docker compose down
+```

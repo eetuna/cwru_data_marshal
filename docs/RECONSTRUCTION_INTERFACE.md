@@ -4,25 +4,48 @@ This document describes the MRD TCP interface between the MRI Marshal and recons
 
 ## Transport
 
-Marshal connects to recon via **raw TCP** using python-ismrmrd-server's 2-byte message ID framing. This is the same protocol the scanner uses — the recon service is agnostic to whether it's talking to a scanner or the marshal.
+Marshal is the **client** on the recon leg. It opens an MRD TCP connection to the
+recon server, forwards k-space, and reads reconstructed images back on the *same*
+connection. The wire protocol is **raw TCP** with python-ismrmrd-server's 2-byte
+message-ID framing — the same protocol the scanner uses, so the recon server is
+agnostic to whether a scanner or the marshal is driving it.
 
-Configure via: `--recon-host <host> --recon-port <port>` (default: not set, so scanner data is accepted but not forwarded to recon; add `--dump` if you also want H5 recording).
+Configure via: `--recon-host <host> --recon-port <port>`. In the default stack
+(`docker-compose.yml`) marshal is launched with `--recon-host recon --recon-port
+9002`, pointing at the `recon` service. If `--recon-host` is left unset, scanner
+data is accepted but not forwarded to recon. Add `--dump` for H5 archival mirrors.
 
 ## Data Flow
 
 ```
 MRI Marshal                         Recon Service
     │                                     │
-    │── CONFIG_FILE(1) ──────────────────>│  select handler (e.g. "simplefft")
+    │── CONFIG_FILE(1) ──────────────────>│  select handler (e.g. "invertcontrast")
     │── METADATA_XML(3) ─────────────────>│  ISMRMRD XML header
     │── ACQUISITION(1008) × N ───────────>│  k-space lines
     │── WAVEFORM(1026) × M (optional) ──>│  ECG / physio data
     │── CLOSE(4) ────────────────────────>│  end of scan
     │                                     │
-    │<── IMAGE/TEXT/etc. ─────────────────│  recon return messages
+    │<── IMAGE(1022)/TEXT(5)/etc. ────────│  recon return messages
     │<── CLOSE(4) ────────────────────────│  recon done
     │                                     │
 ```
+
+**Routing.** Marshal opens the recon session lazily: it connects and forwards the
+buffered CONFIG/METADATA only when **k-space (ACQUISITION) arrives**. So the recon
+leg engages only for k-space scans. Reconstructed images come back as IMAGE(1022)
+on the same connection and are published to downstream clients.
+
+A scanner-sent IMAGE(1022) is already reconstructed, so marshal does **not** forward
+it to recon — it is published directly. Only ACQUISITION drives the recon service.
+
+**Image geometry.** Every IMAGE(1022) carries its spatial pose in the ISMRMRD
+`ImageHeader`: `position[3]` (slice center in scanner coordinates, mm) and the
+direction cosines `read_dir[3]`, `phase_dir[3]`, `slice_dir[3]` (with
+`field_of_view[3]` and `patient_table_position[3]`). Together these fix where the
+slice sits and how it is oriented. Downstream consumers use them to place the image
+in 3D and to drive slice repositioning, alongside `GET/PUT /transform` and
+`/write/file_slice_translation`.
 
 ## Recon service contract
 
@@ -45,59 +68,29 @@ The recon service is a TCP server that:
 
 This is identical to python-ismrmrd-server's `Connection` class in `connection.py`.
 
-## Implementing a real reconstruction service
+## Using / swapping the reconstruction service
 
-Replace `mock_recon.py` with your own TCP server. The simplest approach: use python-ismrmrd-server directly.
+The default stack runs **python-ismrmrd-server** as the recon server — the `recon`
+service in `docker-compose.yml` uses the `fire-python` image and runs:
 
-```python
-# Use python-ismrmrd-server as-is:
-python main.py -p 9002
-
-# Or write a custom handler module:
-# 1. Create your_handler.py with a process(connection, config, metadata) function
-# 2. Run: python main.py -p 9002
-# 3. Send CONFIG_TEXT("your_handler") to select it
+```
+python3 /opt/code/python-ismrmrd-server/main.py -v -H=0.0.0.0 -p=9002 --defaultConfig=invertcontrast
 ```
 
-Or write a standalone TCP server:
+To swap in a different reconstruction, point marshal's `--recon-host` /
+`--recon-port` at **any MRD-TCP recon server** that speaks the 2-byte-tag wire
+protocol described above — python-ismrmrd-server, Gadgetron, or your own server.
+Nothing in the marshal is coupled to a specific recon implementation.
 
-```python
-import socket, struct, ismrmrd, numpy as np
+Options, in increasing order of effort:
 
-def handle_client(conn):
-    # Read CONFIG
-    tag = struct.unpack('<H', conn.recv(2))[0]
-    # ... read config payload ...
-
-    # Read METADATA_XML
-    tag = struct.unpack('<H', conn.recv(2))[0]
-    # ... read XML payload ...
-
-    # Read acquisitions
-    acquisitions = []
-    while True:
-        tag = struct.unpack('<H', conn.recv(2))[0]
-        if tag == 4:  # CLOSE
-            break
-        elif tag == 1008:  # ACQUISITION
-            acq = ismrmrd.Acquisition.deserialize_from(conn.recv)
-            acquisitions.append(acq)
-        elif tag == 1026:  # WAVEFORM
-            wf = ismrmrd.Waveform.deserialize_from(conn.recv)
-            # Use for cardiac gating if needed
-
-    # Reconstruct
-    image_data = your_reconstruction(acquisitions)
-
-    # Send images back
-    image = ismrmrd.Image.from_array(image_data)
-    conn.send(struct.pack('<H', 1022))  # IMAGE tag
-    image.serialize_into(conn.send)
-
-    conn.send(struct.pack('<H', 4))  # CLOSE
-    conn.shutdown(socket.SHUT_RDWR)
-    conn.close()
-```
+1. **Keep python-ismrmrd-server, change the config.** Change `--defaultConfig` (or
+   have the scanner send a `CONFIG_TEXT` naming another handler) to select a
+   different `process(connection, config, metadata)` handler module.
+2. **Point at Gadgetron or another MRD-TCP server.** Set `--recon-host` /
+   `--recon-port` to its address. As long as it reads ACQUISITION/CONFIG/METADATA
+   and writes IMAGE(1022)/CLOSE back on the same connection, marshal is happy.
+3. **Write your own MRD-TCP server** honoring the contract below.
 
 ## Fault tolerance
 
@@ -108,7 +101,7 @@ If the recon service is unreachable or crashes mid-scan:
 - A scanner-visible MRD `IMAGE(1022)` failure image is pushed on the active scanner TCP connection
 - A "reconstruction failed" PNG is written to `latest_error.png`
 - `GET /image/latest` returns `{"path": "...latest_error.png", "error": true}`
-- The viz client displays the failure visually
+- The webgl-client renders the failure image
 - Later scanner sessions can reconnect to recon when it is available again
 
 No special error handling is needed on the recon side — TCP disconnection is sufficient.
