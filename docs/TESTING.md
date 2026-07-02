@@ -95,6 +95,21 @@ docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python
 ```
 Browser (`from_scanner`) cycles through the three noise levels — visibly changing, recon untouched.
 
+### Streaming in dump mode (archives pile up; UI blank by design)
+Flip marshal to dump, then run **either stream loop above, unchanged**:
+```bash
+MARSHAL_DUMP=--dump docker compose --profile test-recon up -d --force-recreate mri-marshal
+# ...now run the k-space loop OR the direct-image loop from above...
+```
+Nothing shows in the browser (`/image/latest` = 404). Instead watch the per-scan archives
+accumulate — one `scan_<ts>.h5` per loop iteration:
+```bash
+watch -n1 'ls session-data/dump/from_scanner/ | wc -l'          # count climbs each frame
+# k-space also fills dump/from_reconstruction/:
+ls session-data/dump/from_reconstruction/ | wc -l
+curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/image/latest   # 404
+```
+
 ## Back to live / teardown
 ```bash
 docker compose --profile test-recon up -d --force-recreate mri-marshal   # live again (webgl at :3000)
