@@ -106,6 +106,12 @@ struct MarshalState {
 
     // Stored XML header and config name for current scan
     std::mutex scan_mtx;
+    // Bumped (under scan_mtx) each time a new scan's METADATA_XML arrives.
+    // Lets a finalizer that ran after an abnormal scanner EOF detect that a
+    // NEW scan has since taken ownership of the per-scan state and skip its
+    // (now stale) flush/mark — see mrd_tcp_listener.hpp done-path and the
+    // *_at_epoch helpers in live_image_store.hpp.
+    std::atomic<uint64_t> scan_epoch{0};
     std::string current_xml_header;
     std::string current_config;
     std::string current_scan_filename;

@@ -581,6 +581,10 @@ private:
                         scan_file = state_.current_scan_filename;
                         state_.current_xml_header = xml;
                         state_.recon_expected_slices = nz;
+                        // New scan takes ownership of the per-scan state; any
+                        // still-running finalizer for a previous (abnormally
+                        // ended) session must stand down.
+                        state_.scan_epoch.fetch_add(1);
                     }
                     if (state_.dump_enabled && state_.dump_recorder) {
                         // Pass the raw wire body for byte-exact
@@ -846,8 +850,14 @@ private:
         }
 
     done:
+        const bool recon_was_active = session_active_.load();
+        // Clear BEFORE the slot release below: once a new session can
+        // start, this (finalizing) thread must not clobber the new
+        // session's recon-engagement flag at its tail.
+        session_active_.store(false);
+
         if (!normal_close_seen) {
-            const bool recon_was_active = session_active_.load();
+            const uint64_t epoch_at_eof = state_.scan_epoch.load();
 
             // Scanner died abnormally with a recon session engaged: end the
             // recon session NOW rather than leaving it dangling until the
@@ -864,15 +874,34 @@ private:
                 forwarder_->end_session();
             }
 
+            // Non-blocking finalize (live mode): release the scanner slot
+            // BEFORE lane finalization. Spool->HDF5 conversion can take
+            // 10-30 s for long scans, and holding the slot through it
+            // rejected every scanner reconnect in that window (the measured
+            // ~35 s lockout). The epoch-guarded helpers below make the
+            // overlap safe: if a new scan's METADATA arrives first, its
+            // reset_live_outputs_for_new_scan already closed/converted the
+            // dead scan's spool and this finalizer stands down instead of
+            // converting the NEW scan's partial spool. Dump mode keeps the
+            // finalize-then-release order: DumpRecorder::close_lane has no
+            // epoch protection, and dump is not the live-scanning path
+            // where the lockout matters.
+            if (!state_.dump_enabled) {
+                std::lock_guard<std::mutex> lk(scanner_mtx_);
+                if (scanner_socket_ == sock) scanner_socket_.reset();
+            }
+
             LOG_INFO("Finalizing scanner lane after scanner socket ended");
             if (state_.dump_enabled) {
                 if (state_.dump_recorder) {
                     state_.dump_recorder->close_lane(DumpLane::Scanner);
                 }
+                mark_lane_finalized_after_eof(state_, LiveLane::Scanner);
             } else {
-                flush_live_lane(state_, LiveLane::Scanner);
+                flush_live_lane_at_epoch(state_, LiveLane::Scanner, epoch_at_eof);
+                mark_lane_finalized_after_eof_at_epoch(state_, LiveLane::Scanner,
+                                                       epoch_at_eof);
             }
-            mark_lane_finalized_after_eof(state_, LiveLane::Scanner);
             // Recon lane finalize is unconditional: with the recon session
             // ended above, no more recon frames can arrive. If a recon
             // failure already finalized the lane via on_failure, doing it
@@ -882,16 +911,23 @@ private:
                 if (state_.dump_recorder) {
                     state_.dump_recorder->close_lane(DumpLane::Recon);
                 }
+                mark_lane_finalized_after_eof(state_, LiveLane::Recon);
             } else {
-                flush_live_lane(state_, LiveLane::Recon);
+                flush_live_lane_at_epoch(state_, LiveLane::Recon, epoch_at_eof);
+                mark_lane_finalized_after_eof_at_epoch(state_, LiveLane::Recon,
+                                                       epoch_at_eof);
             }
-            mark_lane_finalized_after_eof(state_, LiveLane::Recon);
         }
         LOG_INFO("MRD session ended");
-        session_active_.store(false);
+        // Normal-close and dump paths release the slot here. Only reset
+        // OUR OWN socket: with the early release above, a new session may
+        // already occupy the slot by the time this (finalizing) thread
+        // gets here — an unconditional reset would clobber the new
+        // session's pushback path (its CLOSE would be dropped as "no
+        // scanner connected").
         {
             std::lock_guard<std::mutex> lk(scanner_mtx_);
-            scanner_socket_.reset();
+            if (scanner_socket_ == sock) scanner_socket_.reset();
         }
     }
 };

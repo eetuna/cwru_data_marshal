@@ -300,9 +300,34 @@ namespace mrd
         flush_live_lane(state, LiveLane::Recon);
     }
 
-    inline void mark_lane_finalized_after_eof(MarshalState &state, LiveLane lane)
+    // Epoch-guarded variant for the abnormal-EOF finalizer. With the
+    // scanner slot released BEFORE finalization (non-blocking finalize),
+    // a new session can start while the old session's thread is still
+    // flushing. If a new scan's METADATA has bumped scan_epoch, the new
+    // session's reset_live_outputs_for_new_scan already closed/converted
+    // the dead scan's spool — flushing again here would convert the NEW
+    // scan's partial spool. Skip instead. The epoch check and the flush
+    // are atomic under scan_mtx.
+    inline void flush_live_lane_at_epoch(MarshalState &state, LiveLane lane,
+                                         uint64_t epoch)
     {
         std::lock_guard<std::mutex> lk(state.scan_mtx);
+        if (state.scan_epoch.load() != epoch)
+            return;
+        auto &lane_store = lane_state(state, lane);
+        if (lane_store.recorder)
+        {
+            lane_store.recorder->close_scan();
+        }
+        if (lane == LiveLane::Recon)
+        {
+            state.recon_latest_group.reset();
+        }
+    }
+
+    // Core of the finalized-flag bookkeeping. Caller holds scan_mtx.
+    inline void mark_lane_finalized_after_eof_locked(MarshalState &state, LiveLane lane)
+    {
         if (lane == LiveLane::Scanner)
         {
             state.scanner_lane_finalized = true;
@@ -325,6 +350,26 @@ namespace mrd
             state.scanner_lane_finalized = false;
             state.recon_lane_finalized = false;
         }
+    }
+
+    inline void mark_lane_finalized_after_eof(MarshalState &state, LiveLane lane)
+    {
+        std::lock_guard<std::mutex> lk(state.scan_mtx);
+        mark_lane_finalized_after_eof_locked(state, lane);
+    }
+
+    // Epoch-guarded companion to flush_live_lane_at_epoch: skip the
+    // finalized-flag bookkeeping (and the combined per-scan state reset it
+    // can trigger) when a new scan has taken ownership — otherwise the old
+    // session's thread would clear the NEW scan's xml/filename mid-scan.
+    inline void mark_lane_finalized_after_eof_at_epoch(MarshalState &state,
+                                                       LiveLane lane,
+                                                       uint64_t epoch)
+    {
+        std::lock_guard<std::mutex> lk(state.scan_mtx);
+        if (state.scan_epoch.load() != epoch)
+            return;
+        mark_lane_finalized_after_eof_locked(state, lane);
     }
 
     inline void reset_live_outputs_for_new_scan(MarshalState &state)
