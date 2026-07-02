@@ -19,6 +19,20 @@ docker compose ps                                                          # wai
 ```
 UI `:3000` · API `:8080` · scanner MRD TCP `:9100`
 
+## Recon: bundled vs real
+Marshal always talks to a recon at `RECON_HOST:RECON_PORT` (default `recon:9002`). Two ways to supply it — **pick one, not both**:
+
+| | Enable it | RECON_HOST |
+|---|---|---|
+| **Bundled test recon** | `--profile test-recon` (starts the `recon` container at `recon:9002`) | leave default — don't set it |
+| **Real recon** | omit the profile (bundled recon stays off) | set `RECON_HOST=<ip> RECON_PORT=<port>` |
+
+Setting `RECON_HOST` *and* `--profile test-recon` runs an idle bundled recon that marshal ignores. Confirm which is on:
+```bash
+docker compose config --services | grep recon   # nothing = bundled recon off
+docker compose ps | grep recon                  # cwru-recon = bundled recon running
+```
+
 ## Send data
 ```bash
 # real scanner: point it at <marshal-host>:9100
