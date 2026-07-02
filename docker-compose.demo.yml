@@ -227,20 +227,6 @@ services:
     networks:
       - cwru-net
 
-  force-sensor:
-    image: cwru/robot-clients:latest
-    container_name: cwru-force-sensor
-    command: ["./force-sensor"]
-    environment:
-      - ROBOT_MARSHAL_HOST=robot-marshal
-      - ROBOT_MARSHAL_PORT=8081
-    depends_on:
-      robot-marshal:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - cwru-net
-
   controller:
     image: cwru/robot-clients:latest
     container_name: cwru-controller

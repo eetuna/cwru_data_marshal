@@ -1,0 +1,37 @@
+# Override for testing marshal with python-ismrmrd-server instead of the
+# built-in C++ scanner sim + mock_recon.py.
+#
+# Usage (live mode, with WebGL):
+#   docker compose --env-file .env.demo \
+#     -f docker-compose.demo.yml -f docker-compose.ismrmrd.yml up -d
+#
+# Then push a scan with python-ismrmrd-server's client.py (see repo notes):
+#   docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" \
+#     fire-python:latest python3 client.py -c invertcontrast \
+#     -o /data/out.h5 --address mri-marshal --port 9100 /data/phantom.h5
+#
+# What this override changes:
+#   - mock-recon      -> runs python-ismrmrd-server (main.py) as the recon on :9002
+#   - kspace-streamer -> disabled (we inject k-space via client.py instead)
+services:
+  mock-recon:
+    image: fire-python:latest
+    command:
+      - python3
+      - /opt/code/python-ismrmrd-server/main.py
+      - -v
+      - -H=0.0.0.0
+      - -p=9002
+      - --defaultConfig=invertcontrast
+
+  kspace-streamer:
+    # Moved to a non-default profile so `up` does not start the C++ scanner.
+    profiles:
+      - disabled
+
+  pose-client:
+    # Not in the WebGL data path (webgl reads robot geometry from robot-marshal
+    # and images from mri-marshal, never /pose). We also don't build its image
+    # for this test, so disable it to keep `up` from failing on a missing image.
+    profiles:
+      - disabled
