@@ -33,6 +33,11 @@ docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python
 curl -s localhost:8080/image/latest        # 200 -> .../from_scanner/latest_image.h5
 ```
 
+## View in WebGL (live mode)
+Open **http://localhost:3000** in a browser (on WSL, use the Windows browser). The
+reconstructed slice renders and updates on each live push. Hard-refresh (Ctrl-Shift-R)
+if it doesn't appear. In dump mode the UI stays blank (expected — `/image/latest` = 404).
+
 ## Switch to dump
 ```bash
 MARSHAL_DUMP=--dump docker compose --profile test-recon up -d --force-recreate mri-marshal
