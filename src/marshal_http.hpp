@@ -136,7 +136,80 @@ static auto handle_get_image_latest(const http::request<Body>& req, MarshalState
     nlohmann::json j;
     j["path"] = state.latest_image_path;
     j["error"] = state.latest_image_error;
+    // Monotonic per-scan publish generation. Clients remember the last value
+    // and skip re-reading the snapshot when it hasn't changed.
+    j["generation"] = state.latest_image_generation.load();
     return json_response(req, http::status::ok, j);
+}
+
+// ---------------------------------------------------------------------------
+// GET /image/latest.h5 — the snapshot BYTES over HTTP.
+//
+// The JSON endpoint above returns a filesystem path, which only works for
+// readers that share the marshal's volume. This endpoint serves the same
+// closed, atomically-renamed HDF5 snapshot as the response body, so clients
+// on OTHER machines can fetch the latest image with a plain HTTP GET and
+// open it in-memory (e.g. h5py.File(io.BytesIO(body))).
+//
+// ETag carries the publish generation: send If-None-Match with the previous
+// ETag and the marshal answers 304 Not Modified when nothing new was
+// published — pollers only download actual new images.
+// ---------------------------------------------------------------------------
+template <class Body>
+static auto handle_get_image_latest_h5(const http::request<Body>& req, MarshalState& state)
+    -> http::response<http::string_body>
+{
+    if (state.dump_enabled) {
+        return json_response(req, http::status::not_found,
+                             {{"error", "dump mode; no live snapshot"}});
+    }
+
+    std::string path;
+    bool error = false;
+    uint64_t generation = 0;
+    {
+        std::lock_guard<std::mutex> lk(state.latest_image_mtx);
+        path = state.latest_image_path;
+        error = state.latest_image_error;
+        generation = state.latest_image_generation.load();
+    }
+    if (path.empty()) {
+        http::response<http::string_body> res{http::status::no_content, req.version()};
+        res.keep_alive(req.keep_alive());
+        return res;
+    }
+    if (error) {
+        return json_response(req, http::status::service_unavailable,
+                             {{"error", "reconstruction failing"}, {"path", path}});
+    }
+
+    const std::string etag = "\"" + std::to_string(generation) + "\"";
+    auto inm = req.find(http::field::if_none_match);
+    if (inm != req.end() && inm->value() == etag) {
+        http::response<http::string_body> res{http::status::not_modified, req.version()};
+        res.set(http::field::etag, etag);
+        res.keep_alive(req.keep_alive());
+        return res;
+    }
+
+    // The snapshot is a closed file replaced by atomic rename; an open FD
+    // keeps whichever complete version we opened.
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        return json_response(req, http::status::not_found,
+                             {{"error", "snapshot unreadable"}, {"path", path}});
+    }
+    std::string body((std::istreambuf_iterator<char>(f)),
+                     std::istreambuf_iterator<char>());
+
+    http::response<http::string_body> res{http::status::ok, req.version()};
+    res.set(http::field::content_type, "application/x-hdf5");
+    res.set(http::field::etag, etag);
+    res.set(http::field::cache_control, "no-store");
+    res.keep_alive(req.keep_alive());
+    res.body() = std::move(body);
+    res.prepare_payload();
+    return res;
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +580,10 @@ void handle_http_request(http::request<Body>&& req, MarshalState& state, Send&& 
     // Query/control endpoints (scanner data arrives via MRD TCP, not HTTP)
     if (method == http::verb::get && target == "/image/latest") {
         send(handle_get_image_latest(req, state));
+        return;
+    }
+    if (method == http::verb::get && target == "/image/latest.h5") {
+        send(handle_get_image_latest_h5(req, state));
         return;
     }
     if (method == http::verb::get && target == "/transform") {
