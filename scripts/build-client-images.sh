@@ -125,13 +125,8 @@ echo ""
 echo "[3/3] Verifying images..."
 REQUIRED_IMAGES=(
     "cwru/mri-marshal"
+    "fire-python"
     "cwru/robot-marshal"
-    "cwru/image-streamer"
-    "cwru/ecg-client"
-    "cwru/pose-client"
-    "cwru/kspace-streamer"
-    "cwru/mock-recon"
-    "cwru/viz-client"
     "cwru/robot-clients"
     "cwru/webgl-client"
 )
@@ -150,7 +145,7 @@ done
 echo ""
 if [ "$ALL_GOOD" = true ]; then
     echo "============================================"
-    echo "  Build complete! All 10 images ready."
+    echo "  Build complete! All 5 images ready."
     echo "============================================"
     echo ""
     echo "Next steps:"
