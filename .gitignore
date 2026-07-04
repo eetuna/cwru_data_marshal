@@ -26,6 +26,10 @@ videos/
 # Backup files
 *.bak
 
+# Python bytecode
+__pycache__/
+*.pyc
+
 # IDE/editor
 .vscode/
 .idea/

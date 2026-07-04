@@ -51,18 +51,27 @@ docker compose ps | grep recon                  # cwru-recon = bundled recon run
 ```
 
 ## Send data
+Open the viewer first: **http://localhost:3000** (updates live in live mode).
 ```bash
 # real scanner: point it at <marshal-host>:9100
-# test data instead:
+
+# one-shot test push:
 docker run --rm -v "$PWD/session-data:/data" fire-python:latest \
   python3 generate_cartesian_shepp_logan_dataset.py -o /data/phantom.h5
 docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest \
   python3 client.py -c invertcontrast -o /data/out.h5 --address mri-marshal --port 9100 /data/phantom.h5
+
+# continuous stream (moving phantom; --mode image bypasses recon; --slices N for multislice):
+docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
+  python3 /scripts/fire_stream.py --address mri-marshal --port 9100 \
+  --mode kspace --fps 10 --frames 0 --matrix 128 --slices 5      # Ctrl-C to stop
 ```
+Full test matrix and troubleshooting: [TESTING.md](TESTING.md).
 
 ## Stop
 ```bash
-docker compose down
+docker compose --profile test-recon down   # include the profile, or the recon
+                                            # container stays up and holds the network
 ```
 
 ## Notes

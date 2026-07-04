@@ -69,17 +69,37 @@ One persistent MRD connection, paced, a *moving* phantom (image changes every fr
 closest to a real scan. Uses python-ismrmrd-server's `connection.py`.
 
 ```bash
-# k-space -> recon -> webgl  (5 fps, forever; Ctrl-C to stop)
+# k-space -> recon -> webgl  (10 fps, forever; Ctrl-C to stop)
 docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
-  python3 /scripts/fire_stream.py --address mri-marshal --port 9100 --mode kspace --fps 5 --frames 0 --matrix 128
+  python3 /scripts/fire_stream.py --address mri-marshal --port 9100 --mode kspace --fps 10 --frames 0 --matrix 128
 
 # direct image -> webgl (bypass recon)
 docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
-  python3 /scripts/fire_stream.py --address mri-marshal --port 9100 --mode image --fps 5 --frames 0 --matrix 128
+  python3 /scripts/fire_stream.py --address mri-marshal --port 9100 --mode image --fps 10 --frames 0 --matrix 128
+
+# MULTISLICE: 5-slice k-space volume per frame (2D panel = middle slice, 3D panel = all slices)
+docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
+  python3 /scripts/fire_stream.py --address mri-marshal --port 9100 --mode kspace --fps 5 --frames 0 --matrix 128 --slices 5
+
+# MULTISLICE image mode at target size (192x192x8)
+docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
+  python3 /scripts/fire_stream.py --address mri-marshal --port 9100 --mode image --fps 10 --frames 0 --matrix 192 --slices 8
 ```
-Flags: `--mode kspace|image` · `--fps` rate · `--frames 0` = forever · `--matrix` size.
-The orbiting bright dot makes each frame visibly different. `--mode kspace` lands in
-`from_reconstruction`, `--mode image` in `from_scanner`.
+Flags: `--mode kspace|image` · `--fps` rate · `--frames 0` = forever · `--matrix` size · `--slices` N.
+The orbiting bright dot makes each frame visibly different (each slice has its own phase).
+`--mode kspace` lands in `from_reconstruction`, `--mode image` in `from_scanner`.
+Expected rates (Python test-tool caps, not marshal): single-slice k-space ~10 fps,
+5-slice k-space ~3-4 volumes/s, image mode ~16 fps at 192×8.
+
+**Verify multislice while streaming** (snapshot = exactly one volume; 3D read = all slices):
+```bash
+docker exec cwru-webgl-client python3 -c "
+import h5py,os; os.environ['HDF5_USE_FILE_LOCKING']='FALSE'
+print(h5py.File('/session-data/live/from_reconstruction/latest_image.h5','r')['dataset/image_0/data'].shape)"
+#   -> (5, 1, 1, 128, 128)  = 5 slices, not growing over time
+docker exec cwru-webgl-client sh -c 'curl -s localhost:3000/api/read/client-webgl/1 | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[\"width\"],d[\"height\"],\"depth\",d[\"depth\"])"'
+#   -> 128 128 depth 5
+```
 
 **Dump streaming:** flip marshal to dump, run the same command; UI blank, archives grow:
 ```bash
@@ -142,3 +162,19 @@ docker compose --profile test-recon down                                 # stop
 Notes: from WSL `curl localhost:8080` works (ports publish to the host). Same phantom looks
 identical every run — confirm freshness via file mtime, a new `scan_<ts>.h5`, or
 `curl localhost:8080/debug/perf` counters.
+
+## Troubleshooting
+
+- **Stop streams with Ctrl-C**, not `docker rm -f` — Ctrl-C sends the MRD CLOSE. A killed
+  stream leaves the marshal finalizing the abandoned session for up to ~35 s, during which
+  new connections get `Rejecting concurrent scanner connection` (visible in
+  `docker logs cwru-mri-marshal`). Wait it out or `--force-recreate mri-marshal`.
+- **Streamer hangs right after CONFIG/METADATA** (no heartbeat): the recon may be wedged
+  from earlier killed sessions — the marshal blocks connecting to it and holds the scanner
+  session. Fix: `docker restart cwru-recon` then
+  `docker compose --profile test-recon up -d --force-recreate mri-marshal`.
+- **Viewer static while streaming**: hard-refresh the browser (Ctrl-Shift-R) after any
+  webgl-client recreate; confirm frames server-side with
+  `curl -s localhost:8080/debug/perf | grep -o '"recon_images":[0-9]*'` (run twice — climbs).
+- **Throughput checks**: `latest_writer.last_write_us` should stay flat (~2–10 ms) and the
+  snapshot shape constant for any stream length; if either grows, something regressed.
