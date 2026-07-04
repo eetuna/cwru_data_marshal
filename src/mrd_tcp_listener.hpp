@@ -70,6 +70,9 @@ public:
         , forwarder_(forwarder)
     {
         acceptor_.set_option(net::socket_base::reuse_address(true));
+        // GET /status hook. Safe lifetime: main() joins all HTTP sessions
+        // before this listener is destroyed.
+        state_.mrd_scanner_connected = [this] { return has_scanner(); };
         LOG_INFO("MRD TCP listener on port " << port);
         do_accept();
     }

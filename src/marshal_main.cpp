@@ -455,6 +455,11 @@ int main(int argc, char** argv)
         forwarder = std::make_unique<mrd::ReconForwarder>(
             recon_host, recon_port, on_message, on_failure,
             recon_connect_timeout_ms);
+        // GET /status hook. Safe lifetime: HTTP sessions are joined before
+        // the forwarder is destroyed at end of main().
+        state.recon_connected = [&forwarder] {
+            return forwarder && forwarder->is_connected();
+        };
     }
 
     // Log config

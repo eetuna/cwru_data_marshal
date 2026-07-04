@@ -105,6 +105,7 @@ namespace mrd
         {
             if (state.latest_image_generation.load() != generation)
                 return;
+            state.last_publish_ms.store(static_cast<int64_t>(now_ms_epoch()));
             std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
             state.latest_image_path = path.string();
             state.latest_image_error = false;

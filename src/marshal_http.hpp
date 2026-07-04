@@ -19,6 +19,7 @@
 #include "logging.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -334,6 +335,51 @@ static auto handle_get_health(const http::request<Body>& req, MarshalState& stat
 }
 
 // ---------------------------------------------------------------------------
+// GET /status — one-glance operational summary for experiment operators:
+// mode, scanner/recon connectivity, current scan, last-publish age, disk.
+// Read-only; aggregates state that already exists in-process.
+// ---------------------------------------------------------------------------
+template <class Body>
+static auto handle_get_status(const http::request<Body>& req, MarshalState& state)
+{
+    nlohmann::json j;
+    j["mode"] = state.dump_enabled ? "dump" : "live";
+    auto now = std::chrono::steady_clock::now();
+    j["uptime_s"] = std::chrono::duration_cast<std::chrono::seconds>(now - state.start).count();
+
+    j["scanner_connected"] = state.mrd_scanner_connected();
+
+    j["recon"]["configured"] = !state.recon_url.empty();
+    j["recon"]["target"] = state.recon_url;
+    j["recon"]["connected"] = state.recon_connected();
+
+    {
+        std::lock_guard<std::mutex> lk(state.scan_mtx);
+        j["scan"]["active"] = state.header_received.load();
+        j["scan"]["file"] = state.current_scan_filename;
+    }
+    j["images"]["from_scanner_total"] = state.perf_scanner_images_received.load();
+    j["images"]["from_recon_total"] = state.perf_recon_images_received.load();
+
+    const int64_t lp = state.last_publish_ms.load();
+    if (lp > 0) {
+        j["last_image_age_s"] =
+            static_cast<double>(static_cast<int64_t>(mrd::now_ms_epoch()) - lp) / 1000.0;
+    } else {
+        j["last_image_age_s"] = nullptr;
+    }
+
+    std::error_code ec;
+    const auto sp = std::filesystem::space(state.dump_dir, ec);
+    if (!ec) {
+        j["disk_free_gb"] =
+            std::round(static_cast<double>(sp.available) / 1e8) / 10.0;
+    }
+
+    return json_response(req, http::status::ok, j);
+}
+
+// ---------------------------------------------------------------------------
 // GET /debug/sinks — per-pipeline message counters for retention testing.
 // Returns sink-level acq/img/wf counters (only those incremented on
 // successful HDF5 writes) plus dump drop totals. Use this — not viz_client
@@ -499,6 +545,10 @@ void handle_http_request(http::request<Body>&& req, MarshalState& state, Send&& 
     }
     if (method == http::verb::get && target == "/health") {
         send(handle_get_health(req, state));
+        return;
+    }
+    if (method == http::verb::get && target == "/status") {
+        send(handle_get_status(req, state));
         return;
     }
     if (method == http::verb::get && target == "/debug/sinks") {

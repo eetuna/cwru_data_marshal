@@ -169,6 +169,15 @@ struct MarshalState {
     std::function<void(uint16_t, const void*, size_t)> mrd_push_message =
         [](uint16_t, const void*, size_t) {};
 
+    // Status hooks for GET /status (set by MrdTcpListener / main; the defaults
+    // report "not connected" when the component is absent).
+    std::function<bool()> mrd_scanner_connected = [] { return false; };
+    std::function<bool()> recon_connected = [] { return false; };
+
+    // Epoch ms of the most recent latest_image.h5 publish (0 = none yet).
+    // Written on LatestImageWriter completion; read by GET /status.
+    std::atomic<int64_t> last_publish_ms{0};
+
     // ------ Methods ------
 
     // Close both sinks and clear per-scan state. Ready for next POST /header.
