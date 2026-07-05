@@ -24,8 +24,17 @@ namespace mrd {
 LiveImageRecorder::LiveImageRecorder(std::filesystem::path lane_dir)
     : lane_dir_(std::move(lane_dir))
     , component_tag_(lane_dir_.filename().string())
-    , worker_([this] { worker_loop(); })
 {
+    // Start the worker in the constructor BODY, after every member is
+    // constructed. worker_ is declared before mtx_/cv_/queue_/stopping_,
+    // so starting it in the member-init list launched worker_loop()
+    // against unconstructed synchronization state (UB). Under the CPU
+    // contention of a full-stack recreate, the racing worker could read
+    // garbage stopping_=true and exit at birth — the first scan's
+    // close_scan() barrier then waited forever (the intermittent
+    // freeze-after-METADATA wedge). Same pattern as DumpRecorder's
+    // start_lane.
+    worker_ = std::thread([this] { worker_loop(); });
 }
 
 LiveImageRecorder::~LiveImageRecorder()
