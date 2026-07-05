@@ -45,9 +45,21 @@ namespace mrd
         return lane == LiveLane::Scanner ? live_scanner_dir(dump_dir) : live_recon_dir(dump_dir);
     }
 
-    inline std::filesystem::path lane_latest_path(const std::filesystem::path &dump_dir, LiveLane lane)
+    // Root under which the transient latest-snapshot artifacts live
+    // (latest_image.h5 per lane + latest_error.png). By default they sit
+    // next to the archives under dump_dir; --latest-dir points them at a
+    // separate root (typically a RAM-backed tmpfs) so per-volume snapshot
+    // I/O never touches — and can never be stalled by — the archive disk.
+    // The snapshot is disposable by design (rewritten per volume, deleted
+    // at scan start), so a volatile filesystem loses nothing durable.
+    inline std::filesystem::path latest_base_dir(const MarshalState &state)
     {
-        return lane_live_dir(dump_dir, lane) / "latest_image.h5";
+        return state.latest_dir.empty() ? state.dump_dir : state.latest_dir;
+    }
+
+    inline std::filesystem::path lane_latest_path(const MarshalState &state, LiveLane lane)
+    {
+        return lane_live_dir(latest_base_dir(state), lane) / "latest_image.h5";
     }
 
     struct ParsedWireImage
@@ -99,7 +111,7 @@ namespace mrd
             state.perf_publish_attempts_recon.fetch_add(1, std::memory_order_relaxed);
         }
 
-        auto dest = lane_latest_path(state.dump_dir, lane);
+        auto dest = lane_latest_path(state, lane);
         const auto generation = state.latest_image_generation.load();
         auto on_complete = [&state, generation](const std::filesystem::path &path)
         {
@@ -388,11 +400,11 @@ namespace mrd
         }
 
         std::error_code ec;
-        std::filesystem::remove(lane_latest_path(state.dump_dir, LiveLane::Scanner), ec);
+        std::filesystem::remove(lane_latest_path(state, LiveLane::Scanner), ec);
         ec.clear();
-        std::filesystem::remove(lane_latest_path(state.dump_dir, LiveLane::Recon), ec);
+        std::filesystem::remove(lane_latest_path(state, LiveLane::Recon), ec);
         ec.clear();
-        std::filesystem::remove(live_recon_dir(state.dump_dir) / "latest_error.png", ec);
+        std::filesystem::remove(live_recon_dir(latest_base_dir(state)) / "latest_error.png", ec);
 
         std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
         state.latest_image_path.clear();

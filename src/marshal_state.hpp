@@ -76,6 +76,12 @@ struct MarshalState {
     std::filesystem::path dump_dir{"./data"};
     bool dump_enabled{false};
 
+    // --latest-dir: alternate root for the transient latest-snapshot
+    // artifacts (latest_image.h5 / latest_error.png). Empty = keep them
+    // under dump_dir (historical layout). Point at a tmpfs to take the
+    // per-volume snapshot I/O off the archive disk.
+    std::filesystem::path latest_dir;
+
     // --recon-url (empty = no reconstruction target)
     std::string recon_url;
 

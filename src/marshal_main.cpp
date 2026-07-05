@@ -288,6 +288,7 @@ int main(int argc, char** argv)
     // Defaults
     std::string http_bind = "0.0.0.0:8080";
     std::string dump_dir  = "./data";
+    std::string latest_dir;      // empty = snapshots live under dump_dir
     bool dump_enabled = false;
     std::string recon_host;
     uint16_t recon_port = 9002;
@@ -321,6 +322,8 @@ int main(int argc, char** argv)
             }
         } else if (a == "--dump-dir" && i + 1 < argc)
             dump_dir = argv[++i];
+        else if (a == "--latest-dir" && i + 1 < argc)
+            latest_dir = argv[++i];
         else if (a == "--dump")
             dump_enabled = true;
         else if (a == "--max-body-size" && i + 1 < argc) {
@@ -356,6 +359,7 @@ int main(int argc, char** argv)
     state.http_port = http_port;
     state.ws_port = ws_port;
     state.dump_dir = dump_dir;
+    state.latest_dir = latest_dir;
     state.dump_enabled = dump_enabled;
     if (state.dump_enabled)
         state.dump_recorder = std::make_unique<mrd::DumpRecorder>(state.dump_dir);
@@ -402,8 +406,9 @@ int main(int argc, char** argv)
             // marker. In dump mode there is no live snapshot path and
             // /image/latest returns 404, so skip the live filesystem write.
             if (!state.dump_enabled) {
-                write_error_png(state.dump_dir);
-                auto png_path = mrd::live_recon_dir(state.dump_dir) / "latest_error.png";
+                const auto latest_root = mrd::latest_base_dir(state);
+                write_error_png(latest_root);
+                auto png_path = mrd::live_recon_dir(latest_root) / "latest_error.png";
                 std::lock_guard<std::mutex> lk(state.latest_image_mtx);
                 state.latest_image_path = png_path.string();
                 state.latest_image_error = true;
@@ -469,6 +474,7 @@ int main(int argc, char** argv)
             << " dump-dir=" << dump_dir
             << " dump=" << (dump_enabled ? "on" : "off")
             << " max_body=" << max_body_size;
+        if (!latest_dir.empty()) cfg << " latest-dir=" << latest_dir;
         if (!recon_host.empty()) cfg << " recon=" << recon_host << ":" << recon_port
                                      << " recon_close_timeout_ms=" << recon_close_timeout_ms
                                      << " recon_connect_timeout_ms=" << recon_connect_timeout_ms;
