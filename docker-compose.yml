@@ -19,13 +19,17 @@ services:
     image: cwru/mri-marshal:latest
     container_name: cwru-mri-marshal
     # sh -c so MARSHAL_DUMP / RECON_HOST / RECON_PORT are resolved at runtime.
-    command: ["sh", "-c", "exec /opt/mri/build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data --recon-host $$RECON_HOST --recon-port $$RECON_PORT $$MARSHAL_DUMP"]
+    command: ["sh", "-c", "exec /opt/mri/build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data --latest-dir /latest --recon-host $$RECON_HOST --recon-port $$RECON_PORT $$MARSHAL_DUMP"]
     environment:
       - MARSHAL_DUMP=${MARSHAL_DUMP:-}
       - RECON_HOST=${RECON_HOST:-recon}
       - RECON_PORT=${RECON_PORT:-9002}
     volumes:
       - ${SESSION_DATA_DIR:-./session-data}:/session-data
+      # RAM-backed snapshot dir (latest_image.h5 / latest_error.png). Shared
+      # host tmpfs so the viewer sees the same path. Snapshots are transient
+      # by design; archives stay on /session-data.
+      - /dev/shm/cwru-latest:/latest
     ports:
       - "${HTTP_PORT:-8080}:8080"   # HTTP API (/image/latest, /health)
       - "${MRD_PORT:-9100}:9100"    # MRD TCP (scanner)
@@ -137,6 +141,9 @@ services:
       - HDF5_USE_FILE_LOCKING=FALSE
     volumes:
       - ${SESSION_DATA_DIR:-./session-data}:/session-data:ro
+      # Same RAM-backed snapshot dir as mri-marshal (paths in /image/latest
+      # responses point here).
+      - /dev/shm/cwru-latest:/latest:ro
     ports:
       - "${UI_PORT:-3000}:3000"     # WebGL UI
       - "${WRITE_PORT:-3001}:3001"  # write-back server
