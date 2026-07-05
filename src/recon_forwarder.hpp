@@ -225,6 +225,12 @@ public:
     }
     void post_close() { send_close(); }
 
+    // Send a fully-assembled wire frame ([tag][body]) verbatim. Used by
+    // the ACQUISITION hot path, whose bytes are already contiguous in the
+    // listener's read buffer — avoids the per-message copy post_frame's
+    // tag-prepend would cost.
+    void post_wire(const void* data, size_t len) { send_message(data, len); }
+
     bool is_connected() const { return connected_.load(); }
 
     bool wait_for_close(std::chrono::milliseconds timeout) {

@@ -394,6 +394,67 @@ private:
         return read_exact(s, out.data(), n);
     }
 
+    // Buffered reader for the scanner ingest path.
+    //
+    // The previous per-message read_exact calls cost ~3 recv syscalls per
+    // ACQUISITION (tag, header, samples). A single userspace buffer takes
+    // whatever the kernel already has in one recv and parses messages out
+    // of it, amortizing to <1 syscall per message at streaming rates.
+    //
+    // This CANNOT delay a message: read_some returns as soon as ANY bytes
+    // are available, so a slow sender behaves exactly like the unbuffered
+    // path. ensure(n) blocks only until the current message is complete —
+    // the same wait read_exact performed.
+    //
+    // Message bytes are contiguous at cur() in wire order ([tag][body]),
+    // which lets the ACQUISITION hot path forward a frame verbatim with
+    // zero intermediate copies.
+    class StreamReader {
+    public:
+        explicit StreamReader(tcp::socket& s) : sock_(s), buf_(1 << 18) {}
+
+        // Make >= n contiguous bytes available at cur(). False on EOF/error.
+        bool ensure(size_t n) {
+            if (avail() >= n) return true;
+            if (n > buf_.size()) {
+                // Oversized message (callers cap n first): grow, keeping
+                // the unconsumed tail.
+                std::vector<uint8_t> bigger(((n + 4095) / 4096) * 4096);
+                std::memcpy(bigger.data(), buf_.data() + head_, avail());
+                tail_ = avail();
+                head_ = 0;
+                buf_.swap(bigger);
+            } else if (head_ + n > buf_.size()) {
+                // Not enough room at the tail: compact.
+                std::memmove(buf_.data(), buf_.data() + head_, avail());
+                tail_ = avail();
+                head_ = 0;
+            }
+            while (avail() < n) {
+                boost::system::error_code ec;
+                const size_t got = sock_.read_some(
+                    net::buffer(buf_.data() + tail_, buf_.size() - tail_), ec);
+                if (ec || got == 0) return false;
+                tail_ += got;
+            }
+            return true;
+        }
+
+        const uint8_t* cur() const { return buf_.data() + head_; }
+
+        void consume(size_t n) {
+            head_ += n;
+            if (head_ == tail_) { head_ = 0; tail_ = 0; }
+        }
+
+    private:
+        size_t avail() const { return tail_ - head_; }
+        tcp::socket& sock_;
+        std::vector<uint8_t> buf_;
+        size_t head_{0};
+        size_t tail_{0};
+    };
+
     void handle_session(std::shared_ptr<tcp::socket> sock) {
         LOG_INFO("MRD session started");
         close_sent_to_scanner_.store(false);
@@ -475,10 +536,12 @@ private:
             return session_active_.load() && forwarder_->is_connected();
         };
 
+        StreamReader rd(*sock);
         try {
             while (sock->is_open()) {
+                if (!rd.ensure(2)) break;
                 uint16_t msg_id = 0;
-                if (!read_exact(*sock, &msg_id, sizeof(msg_id))) break;
+                std::memcpy(&msg_id, rd.cur(), 2);
                 if (msg_id != MRD_MESSAGE_CLOSE) {
                     normal_close_seen = false;
                 }
@@ -486,8 +549,9 @@ private:
                 switch (msg_id) {
 
                 case MRD_MESSAGE_CONFIG_FILE: {
-                    std::vector<uint8_t> body;
-                    if (!read_exact(*sock, body, 1024)) goto done;
+                    if (!rd.ensure(2 + 1024)) goto done;
+                    std::vector<uint8_t> body(rd.cur() + 2, rd.cur() + 2 + 1024);
+                    rd.consume(2 + 1024);
                     const char* buf = reinterpret_cast<const char*>(body.data());
                     std::string config(buf, strnlen(buf, 1024));
                     LOG_INFO("CONFIG_FILE: " << config);
@@ -508,16 +572,17 @@ private:
                 }
 
                 case MRD_MESSAGE_CONFIG_TEXT: {
+                    if (!rd.ensure(2 + 4)) goto done;
                     uint32_t len = 0;
-                    if (!read_exact(*sock, &len, 4)) goto done;
+                    std::memcpy(&len, rd.cur() + 2, 4);
                     size_t body_size = 0;
                     if (!validate_len_prefix_body(len, body_size)) {
                         LOG_WARN("CONFIG_TEXT rejected: len " << len << " exceeds cap");
                         goto done;
                     }
-                    std::vector<uint8_t> body(body_size);
-                    std::memcpy(body.data(), &len, 4);
-                    if (len > 0 && !read_exact(*sock, body.data() + 4, len)) goto done;
+                    if (!rd.ensure(2 + body_size)) goto done;
+                    std::vector<uint8_t> body(rd.cur() + 2, rd.cur() + 2 + body_size);
+                    rd.consume(2 + body_size);
                     const auto* payload = body.data() + 4;
                     std::string config(reinterpret_cast<const char*>(payload),
                                        reinterpret_cast<const char*>(payload) + len);
@@ -541,16 +606,17 @@ private:
                 }
 
                 case MRD_MESSAGE_METADATA_XML_TEXT: {
+                    if (!rd.ensure(2 + 4)) goto done;
                     uint32_t len = 0;
-                    if (!read_exact(*sock, &len, 4)) goto done;
+                    std::memcpy(&len, rd.cur() + 2, 4);
                     size_t body_size = 0;
                     if (!validate_len_prefix_body(len, body_size)) {
                         LOG_WARN("METADATA_XML_TEXT rejected: len " << len << " exceeds cap");
                         goto done;
                     }
-                    std::vector<uint8_t> body(body_size);
-                    std::memcpy(body.data(), &len, 4);
-                    if (len > 0 && !read_exact(*sock, body.data() + 4, len)) goto done;
+                    if (!rd.ensure(2 + body_size)) goto done;
+                    std::vector<uint8_t> body(rd.cur() + 2, rd.cur() + 2 + body_size);
+                    rd.consume(2 + body_size);
                     const auto* payload = body.data() + 4;
                     std::string xml(reinterpret_cast<const char*>(payload),
                                     reinterpret_cast<const char*>(payload) + len);
@@ -613,6 +679,7 @@ private:
                 }
 
                 case MRD_MESSAGE_CLOSE: {
+                    rd.consume(2);
                     LOG_INFO("CLOSE");
                     // Who sends the scan-completion CLOSE back to the scanner
                     // depends on whether recon was engaged this scan. With a
@@ -678,16 +745,17 @@ private:
                 }
 
                 case MRD_MESSAGE_TEXT: {
+                    if (!rd.ensure(2 + 4)) goto done;
                     uint32_t len = 0;
-                    if (!read_exact(*sock, &len, 4)) goto done;
+                    std::memcpy(&len, rd.cur() + 2, 4);
                     size_t body_size = 0;
                     if (!validate_len_prefix_body(len, body_size)) {
                         LOG_WARN("TEXT rejected: len " << len << " exceeds cap");
                         goto done;
                     }
-                    std::vector<uint8_t> body(body_size);
-                    std::memcpy(body.data(), &len, 4);
-                    if (len > 0 && !read_exact(*sock, body.data() + 4, len)) goto done;
+                    if (!rd.ensure(2 + body_size)) goto done;
+                    std::vector<uint8_t> body(rd.cur() + 2, rd.cur() + 2 + body_size);
+                    rd.consume(2 + body_size);
                     std::string text(reinterpret_cast<const char*>(body.data() + 4), len);
                     auto nul = text.find('\0');
                     if (nul != std::string::npos) text.resize(nul);
@@ -709,45 +777,54 @@ private:
                 }
 
                 case MRD_MESSAGE_ISMRMRD_ACQUISITION: {
+                    // Hot path. The wire message ([tag][header][traj][samples])
+                    // sits contiguously in the read buffer and is forwarded to
+                    // recon VERBATIM from there — no per-acquisition allocations
+                    // or assembly copies. The header is memcpy'd into an aligned
+                    // local for field access (casting into the buffer at tag
+                    // offset +2 would be a misaligned access).
+                    if (!rd.ensure(2 + ACQUISITION_HEADER_BYTES)) goto done;
                     ISMRMRD::AcquisitionHeader ahdr;
-                    if (!read_exact(*sock, &ahdr, ACQUISITION_HEADER_BYTES)) goto done;
-                    size_t traj_bytes = size_t(ahdr.trajectory_dimensions)
-                                      * ahdr.number_of_samples * sizeof(float);
-                    std::vector<uint8_t> traj(traj_bytes);
-                    if (traj_bytes > 0 && !read_exact(*sock, traj.data(), traj_bytes)) goto done;
-                    size_t sample_bytes = size_t(ahdr.number_of_samples)
-                                        * ahdr.active_channels * sizeof(complex_float_t);
-                    std::vector<uint8_t> samples(sample_bytes);
-                    if (!read_exact(*sock, samples.data(), sample_bytes)) goto done;
-
-                    std::vector<uint8_t> body(ACQUISITION_HEADER_BYTES + traj_bytes + sample_bytes);
-                    std::memcpy(body.data(), &ahdr, ACQUISITION_HEADER_BYTES);
-                    if (traj_bytes > 0)
-                        std::memcpy(body.data() + ACQUISITION_HEADER_BYTES,
-                                    traj.data(), traj_bytes);
-                    std::memcpy(body.data() + ACQUISITION_HEADER_BYTES + traj_bytes,
-                                samples.data(), sample_bytes);
+                    std::memcpy(&ahdr, rd.cur() + 2, ACQUISITION_HEADER_BYTES);
+                    const size_t traj_bytes = size_t(ahdr.trajectory_dimensions)
+                                            * ahdr.number_of_samples * sizeof(float);
+                    const size_t sample_bytes = size_t(ahdr.number_of_samples)
+                                              * ahdr.active_channels * sizeof(complex_float_t);
+                    const size_t total = 2 + ACQUISITION_HEADER_BYTES
+                                       + traj_bytes + sample_bytes;
+                    // Sanity cap (same ceiling as the IMAGE path) so a corrupt
+                    // header cannot demand a multi-GB buffer.
+                    if (total > kMaxImageFrameBytes) {
+                        LOG_WARN("ACQUISITION rejected: implausible size " << total);
+                        goto done;
+                    }
+                    if (!rd.ensure(total)) goto done;
 
                     if (state_.dump_enabled && state_.dump_recorder) {
+                        const uint8_t* p = rd.cur() + 2 + ACQUISITION_HEADER_BYTES;
                         check_dump_result("scanner_acquisition",
                             state_.dump_recorder->append_scanner_acquisition(
-                                ahdr, std::vector<uint8_t>(traj),
-                                std::vector<uint8_t>(samples)));
+                                ahdr,
+                                std::vector<uint8_t>(p, p + traj_bytes),
+                                std::vector<uint8_t>(p + traj_bytes,
+                                                     p + traj_bytes + sample_bytes)));
                     }
 
-                    // Forward raw bytes to recon with correct tag
+                    // Forward the wire bytes verbatim (tag included).
                     if (ensure_recon_session()) {
-                        forwarder_->post_frame(MRD_MESSAGE_ISMRMRD_ACQUISITION, body);
+                        forwarder_->post_wire(rd.cur(), total);
                     }
+                    rd.consume(total);
                     break;
                 }
 
                 case MRD_MESSAGE_ISMRMRD_IMAGE: {
-                    std::vector<uint8_t> hdr_buf(IMAGE_HEADER_BYTES);
-                    if (!read_exact(*sock, hdr_buf.data(), IMAGE_HEADER_BYTES)) goto done;
-                    auto* ihdr = reinterpret_cast<const ISMRMRD::ImageHeader*>(hdr_buf.data());
+                    if (!rd.ensure(2 + IMAGE_HEADER_BYTES + 8)) goto done;
+                    ISMRMRD::ImageHeader ihdr_local;
+                    std::memcpy(&ihdr_local, rd.cur() + 2, IMAGE_HEADER_BYTES);
+                    const ISMRMRD::ImageHeader* ihdr = &ihdr_local;
                     uint64_t attr_len_raw = 0;
-                    if (!read_exact(*sock, &attr_len_raw, 8)) goto done;
+                    std::memcpy(&attr_len_raw, rd.cur() + 2 + IMAGE_HEADER_BYTES, 8);
 
                     // HIGH #5/#6/#7: validate sizes before any allocation.
                     size_t attr_len = 0;
@@ -776,56 +853,53 @@ private:
                         LOG_WARN("IMAGE rejected: body total overflow or cap");
                         goto done;
                     }
-
-                    std::vector<uint8_t> attr(attr_len);
-                    if (attr_len > 0 && !read_exact(*sock, attr.data(), attr_len)) goto done;
-                    std::vector<uint8_t> pixels(pixel_bytes);
-                    if (!read_exact(*sock, pixels.data(), pixel_bytes)) goto done;
-
-                    uint64_t attr_len_wire = static_cast<uint64_t>(attr_len);
-                    std::vector<uint8_t> body(total);
-                    size_t o = 0;
-                    std::memcpy(body.data()+o, hdr_buf.data(), IMAGE_HEADER_BYTES); o += IMAGE_HEADER_BYTES;
-                    std::memcpy(body.data()+o, &attr_len_wire, 8); o += 8;
-                    if (attr_len > 0) { std::memcpy(body.data()+o, attr.data(), attr_len); o += attr_len; }
-                    std::memcpy(body.data()+o, pixels.data(), pixel_bytes);
+                    // Whole wire message ([tag][hdr][attr_len][attr][pixels]).
+                    if (!rd.ensure(2 + total)) goto done;
+                    const uint8_t* body = rd.cur() + 2;   // wire body sans tag
 
                     LOG_DEBUG("IMAGE from scanner: "
                               << ihdr->matrix_size[0] << "x" << ihdr->matrix_size[1]);
                     if (state_.dump_enabled) {
                         if (state_.dump_recorder) {
+                            const uint8_t* attr_p = body + IMAGE_HEADER_BYTES + 8;
                             check_dump_result("scanner_image",
                                 state_.dump_recorder->append_scanner_image(
-                                    *ihdr, std::vector<uint8_t>(attr),
-                                    std::vector<uint8_t>(pixels)));
+                                    *ihdr,
+                                    std::vector<uint8_t>(attr_p, attr_p + attr_len),
+                                    std::vector<uint8_t>(attr_p + attr_len,
+                                                         attr_p + attr_len + pixel_bytes)));
                         }
                     } else {
                         // Scanner-origin IMAGE is already reconstructed image data.
-                        // In live mode, save/expose it for file-reading clients;
-                        // do not send it to the k-space reconstruction service.
-                        append_live_image(state_, LiveLane::Scanner, body.data(), body.size());
+                        // In live mode, save/expose it for file-reading clients
+                        // (append_live_image copies what it keeps); do not send it
+                        // to the k-space reconstruction service.
+                        append_live_image(state_, LiveLane::Scanner, body, total);
                     }
+                    rd.consume(2 + total);
                     break;
                 }
 
                 case MRD_MESSAGE_ISMRMRD_WAVEFORM: {
+                    if (!rd.ensure(2 + WAVEFORM_HEADER_BYTES)) goto done;
                     ISMRMRD::WaveformHeader whdr;
-                    if (!read_exact(*sock, &whdr, WAVEFORM_HEADER_BYTES)) goto done;
+                    std::memcpy(&whdr, rd.cur() + 2, WAVEFORM_HEADER_BYTES);
                     // LOW/NIT #21: use sizeof(uint32_t) to match marshal_http.hpp:95
                     // and make any future wire-format change stand out.
                     size_t data_bytes = size_t(whdr.number_of_samples) * whdr.channels * sizeof(uint32_t);
-                    std::vector<uint8_t> wf_data(data_bytes);
-                    if (!read_exact(*sock, wf_data.data(), data_bytes)) goto done;
-
-                    std::vector<uint8_t> body(WAVEFORM_HEADER_BYTES + data_bytes);
-                    std::memcpy(body.data(), &whdr, WAVEFORM_HEADER_BYTES);
-                    std::memcpy(body.data() + WAVEFORM_HEADER_BYTES, wf_data.data(), data_bytes);
+                    if (!rd.ensure(2 + WAVEFORM_HEADER_BYTES + data_bytes)) goto done;
+                    // Owned copy: this body may be buffered in the recon
+                    // preamble, which outlives the read buffer's next refill.
+                    std::vector<uint8_t> body(rd.cur() + 2,
+                                              rd.cur() + 2 + WAVEFORM_HEADER_BYTES + data_bytes);
+                    rd.consume(2 + WAVEFORM_HEADER_BYTES + data_bytes);
 
                     if (state_.dump_enabled) {
                         if (state_.dump_recorder) {
                             check_dump_result("scanner_waveform",
                                 state_.dump_recorder->append_scanner_waveform(
-                                    whdr, std::vector<uint8_t>(wf_data)));
+                                    whdr, std::vector<uint8_t>(
+                                        body.begin() + WAVEFORM_HEADER_BYTES, body.end())));
                         }
                     }
                     // Live mode: waveforms forward to recon but are not
