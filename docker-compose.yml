@@ -14,10 +14,20 @@
 #   docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" \
 #     fire-python:latest python3 client.py -c invertcontrast -o /data/out.h5 \
 #     --address mri-marshal --port 9100 /data/phantom.h5
+# Cap every container's console log at 2x50MB. Docker's default is UNLIMITED —
+# a chatty service (robot-marshal logs every request) once grew a 26 GB log
+# file and filled the disk. `docker logs` behaves the same, just bounded.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "2"
+
 services:
   mri-marshal:
     image: cwru/mri-marshal:latest
     container_name: cwru-mri-marshal
+    logging: *default-logging
     # sh -c so MARSHAL_DUMP / MARSHAL_LATEST / RECON_HOST / RECON_PORT are resolved at runtime.
     command: ["sh", "-c", "exec /opt/mri/build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data $$MARSHAL_LATEST --recon-host $$RECON_HOST --recon-port $$RECON_PORT $$MARSHAL_DUMP"]
     environment:
@@ -49,6 +59,7 @@ services:
   recon:
     image: fire-python:latest
     container_name: cwru-recon
+    logging: *default-logging
     # Bundled TEST recon (python-ismrmrd-server, MRD TCP :9002). OFF by default —
     # production points RECON_HOST at a real recon. Turn this on for testing with:
     #   docker compose --profile test-recon up -d      (RECON_HOST defaults to `recon`)
@@ -59,6 +70,7 @@ services:
   robot-marshal:
     image: cwru/robot-marshal:latest
     container_name: cwru-robot-marshal
+    logging: *default-logging
     command:
       - sh
       - -c
@@ -88,6 +100,7 @@ services:
   catheter-tracking:
     image: cwru/robot-clients:latest
     container_name: cwru-catheter-tracking
+    logging: *default-logging
     command: ["./catheter-tracking"]
     environment: [ROBOT_MARSHAL_HOST=robot-marshal, ROBOT_MARSHAL_PORT=8081]
     depends_on: { robot-marshal: { condition: service_healthy } }
@@ -96,6 +109,7 @@ services:
   force-sensor:
     image: cwru/robot-clients:latest
     container_name: cwru-force-sensor
+    logging: *default-logging
     command: ["./force-sensor"]
     environment: [ROBOT_MARSHAL_HOST=robot-marshal, ROBOT_MARSHAL_PORT=8081]
     depends_on: { robot-marshal: { condition: service_healthy } }
@@ -105,6 +119,7 @@ services:
   controller:
     image: cwru/robot-clients:latest
     container_name: cwru-controller
+    logging: *default-logging
     command: ["./controller"]
     environment: [ROBOT_MARSHAL_HOST=robot-marshal, ROBOT_MARSHAL_PORT=8081]
     depends_on: { robot-marshal: { condition: service_healthy } }
@@ -113,6 +128,7 @@ services:
   planning:
     image: cwru/robot-clients:latest
     container_name: cwru-planning
+    logging: *default-logging
     command: ["./planning"]
     environment: [ROBOT_MARSHAL_HOST=robot-marshal, ROBOT_MARSHAL_PORT=8081]
     depends_on: { robot-marshal: { condition: service_healthy } }
@@ -121,6 +137,7 @@ services:
   front-end:
     image: cwru/robot-clients:latest
     container_name: cwru-front-end
+    logging: *default-logging
     command: ["./front-end"]
     environment: [ROBOT_MARSHAL_HOST=robot-marshal, ROBOT_MARSHAL_PORT=8081]
     depends_on: { robot-marshal: { condition: service_healthy } }
@@ -129,6 +146,7 @@ services:
   surface-tracking:
     image: cwru/robot-clients:latest
     container_name: cwru-surface-tracking
+    logging: *default-logging
     command: ["./surface-tracking"]
     environment: [ROBOT_MARSHAL_HOST=robot-marshal, ROBOT_MARSHAL_PORT=8081]
     depends_on: { robot-marshal: { condition: service_healthy } }
@@ -137,6 +155,7 @@ services:
   webgl-client:
     image: cwru/webgl-client:latest
     container_name: cwru-webgl-client
+    logging: *default-logging
     environment:
       - ROBOT_MARSHAL_HOST=robot-marshal
       - ROBOT_MARSHAL_PORT=8081
