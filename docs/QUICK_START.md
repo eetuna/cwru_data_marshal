@@ -95,7 +95,7 @@ docker compose --profile test-recon down   # include the profile, or the recon
 ```
 
 ## Notes
-- Knobs: `MARSHAL_DUMP` (live | `--dump`), `RECON_HOST`/`RECON_PORT`, `SESSION_DATA_DIR`, exposed ports `HTTP_PORT`/`MRD_PORT`/`ROBOT_PORT`/`UI_PORT`/`WRITE_PORT`.
+- Knobs: `MARSHAL_DUMP` (live | `--dump`), `MARSHAL_LATEST` (default = snapshot in RAM; `MARSHAL_LATEST=` puts it on disk), `RECON_HOST`/`RECON_PORT`, `SESSION_DATA_DIR`, exposed ports `HTTP_PORT`/`MRD_PORT`/`ROBOT_PORT`/`UI_PORT`/`WRITE_PORT`.
 - Auto-routing: k-space → recon, images → UI.
 - Dump: `/image/latest` = 404, UI blank (archives to `session-data/dump/`).
 - ISMRMRD headers 340/198/40 must match scanner/marshal/recon.

@@ -18,10 +18,14 @@ services:
   mri-marshal:
     image: cwru/mri-marshal:latest
     container_name: cwru-mri-marshal
-    # sh -c so MARSHAL_DUMP / RECON_HOST / RECON_PORT are resolved at runtime.
-    command: ["sh", "-c", "exec /opt/mri/build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data --latest-dir /latest --recon-host $$RECON_HOST --recon-port $$RECON_PORT $$MARSHAL_DUMP"]
+    # sh -c so MARSHAL_DUMP / MARSHAL_LATEST / RECON_HOST / RECON_PORT are resolved at runtime.
+    command: ["sh", "-c", "exec /opt/mri/build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data $$MARSHAL_LATEST --recon-host $$RECON_HOST --recon-port $$RECON_PORT $$MARSHAL_DUMP"]
     environment:
       - MARSHAL_DUMP=${MARSHAL_DUMP:-}
+      # RAM snapshot on by default; MARSHAL_LATEST= (empty) puts the
+      # snapshot back on disk under session-data. Same on/off pattern as
+      # MARSHAL_DUMP — no compose editing.
+      - MARSHAL_LATEST=${MARSHAL_LATEST:---latest-dir /latest}
       - RECON_HOST=${RECON_HOST:-recon}
       - RECON_PORT=${RECON_PORT:-9002}
     volumes:
