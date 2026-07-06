@@ -28,15 +28,18 @@ docker run --rm -v "$PWD/session-data:/data" fire-python:latest \
 ```bash
 docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest \
   python3 client.py -c invertcontrast -o /data/out.h5 --address mri-marshal --port 9100 /data/phantom.h5
-curl -s localhost:8080/image/latest        # 200 -> .../from_reconstruction/latest_image.h5
+curl -s localhost:8080/image/latest        # 200, path ends .../from_reconstruction/latest_image.h5
+# save the recon image as input for test 2 (works for RAM or disk snapshot):
+curl -s localhost:8080/image/latest.h5 -o session-data/snap_recon.h5
 ```
 
 ## 2 — LIVE + image (bypass recon)
 ```bash
 docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest \
-  python3 client.py -o /data/out_img.h5 --address mri-marshal --port 9100 \
-  /data/live/from_reconstruction/latest_image.h5
-curl -s localhost:8080/image/latest        # 200 -> .../from_scanner/latest_image.h5
+  python3 client.py -o /data/out_img.h5 --address mri-marshal --port 9100 /data/snap_recon.h5
+curl -s localhost:8080/image/latest        # 200, path ends .../from_scanner/latest_image.h5
+# save the scanner-lane image as input for test 4:
+curl -s localhost:8080/image/latest.h5 -o session-data/snap_scanner.h5
 ```
 
 ## Switch to dump
@@ -55,8 +58,7 @@ ls session-data/dump/from_scanner session-data/dump/from_reconstruction # scan_*
 ## 4 — DUMP + image
 ```bash
 docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest \
-  python3 client.py -o /data/out_img.h5 --address mri-marshal --port 9100 \
-  /data/live/from_scanner/latest_image.h5
+  python3 client.py -o /data/out_img.h5 --address mri-marshal --port 9100 /data/snap_scanner.h5
 curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/image/latest   # 404
 ```
 
@@ -95,7 +97,9 @@ Expected rates (Python test-tool caps, not marshal): single-slice k-space ~10 fp
 ```bash
 docker exec cwru-webgl-client python3 -c "
 import h5py,os; os.environ['HDF5_USE_FILE_LOCKING']='FALSE'
-print(h5py.File('/session-data/live/from_reconstruction/latest_image.h5','r')['dataset/image_0/data'].shape)"
+print(h5py.File('/latest/live/from_reconstruction/latest_image.h5','r')['dataset/image_0/data'].shape)"
+# (default RAM snapshot path; with MARSHAL_LATEST= (disk) use
+#  /session-data/live/from_reconstruction/latest_image.h5)
 #   -> (5, 1, 1, 128, 128)  = 5 slices, not growing over time
 docker exec cwru-webgl-client sh -c 'curl -s localhost:3000/api/read/client-webgl/1 | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[\"width\"],d[\"height\"],\"depth\",d[\"depth\"])"'
 #   -> 128 128 depth 5

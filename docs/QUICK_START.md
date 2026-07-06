@@ -61,6 +61,34 @@ MARSHAL_DUMP=--dump RECON_HOST=10.0.0.5 RECON_PORT=9002 docker compose up -d
 > You get: recon = **yours** · mode = **dump** · data → **./session-data** ·
 > snapshot = **none** · ports = **defaults**
 
+**2e. MRI-only — no robot** (scanner → marshal → recon → viewer; the robot
+marshal and the 6 robot data clients are not started at all):
+```bash
+docker compose --profile test-recon up -d --no-deps mri-marshal recon webgl-client
+```
+> You get: recon = **bundled test recon** · mode = **live** · data →
+> **./session-data** · snapshot = **RAM** · ports = **3000 UI / 8080 API /
+> 9100 scanner** (no robot, so nothing on 8081). The viewer's robot panel
+> stays empty and webgl logs harmless robot-connection errors — expected.
+> Measured 2026-07-06: this subset sustains the full 20 fps kspace stream.
+
+For MRI-only with a **real** recon: same idea, drop the profile and the recon
+service, set the recon address:
+```bash
+RECON_HOST=10.0.0.5 RECON_PORT=9002 docker compose up -d --no-deps mri-marshal webgl-client
+```
+
+If the **full stack is already running** and you want to switch to MRI-only,
+stop the robot side (everything else keeps running):
+```bash
+docker stop cwru-robot-marshal cwru-catheter-tracking cwru-force-sensor \
+  cwru-controller cwru-planning cwru-front-end cwru-surface-tracking
+```
+To bring the robot side back later:
+```bash
+docker compose --profile test-recon up -d
+```
+
 ### Changing the remaining settings — add to the front of ANY command above
 
 Each example shows the FULL command and the FULL result:
@@ -110,6 +138,8 @@ curl localhost:8080/status   # use your HTTP_PORT here if you changed it in step
 `docker compose ps` should list: `cwru-mri-marshal` (healthy),
 `cwru-robot-marshal` (healthy), `cwru-webgl-client`, the six robot data
 clients — and `cwru-recon` only if you used the test-recon profile.
+(With MRI-only **2e**: just `cwru-mri-marshal`, `cwru-recon`,
+`cwru-webgl-client`.)
 
 Healthy `/status` looks like:
 ```json
