@@ -16,7 +16,27 @@ MARSHAL_DUMP=--dump RECON_HOST=<ip> RECON_PORT=<port> docker compose up -d  # re
 MARSHAL_DUMP=--dump docker compose --profile test-recon up -d              # test recon
 
 docker compose ps                                                          # wait healthy
+curl localhost:8080/status                                                 # one-glance health:
 ```
+`/status` shows mode, scanner/recon connectivity, active scan, last-image age,
+and free disk on the archive volume — the first thing to check when anything
+looks wrong.
+
+### Where data lands
+
+All scan data (`scan_<ts>.h5` archives) goes to **`session-data/`** — change
+the location with `SESSION_DATA_DIR=/your/path` in front of the compose
+command. That is the only data-location decision.
+
+(The viewer's current-frame snapshot is internal plumbing, managed
+automatically; it is not user data.)
+
+**Moving to another computer:** load the images, copy `docker-compose.yml`,
+optionally set `SESSION_DATA_DIR`. Verify with one test scan:
+`ls session-data/live/from_reconstruction/` → `scan_*.h5` appearing.
+
+Clients on **other machines** fetch the latest image over HTTP:
+`GET http://<host>:8080/image/latest.h5` (see API_REFERENCE.md).
 ### Ports
 
 | What | Default | Change with |

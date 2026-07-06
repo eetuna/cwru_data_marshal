@@ -165,16 +165,39 @@ identical every run — confirm freshness via file mtime, a new `scan_<ts>.h5`, 
 
 ## Troubleshooting
 
-- **Stop streams with Ctrl-C**, not `docker rm -f` — Ctrl-C sends the MRD CLOSE. A killed
-  stream leaves the marshal finalizing the abandoned session for up to ~35 s, during which
-  new connections get `Rejecting concurrent scanner connection` (visible in
-  `docker logs cwru-mri-marshal`). Wait it out or `--force-recreate mri-marshal`.
-- **Streamer hangs right after CONFIG/METADATA** (no heartbeat): the recon may be wedged
-  from earlier killed sessions — the marshal blocks connecting to it and holds the scanner
-  session. Fix: `docker restart cwru-recon` then
-  `docker compose --profile test-recon up -d --force-recreate mri-marshal`.
+- **First check, always:** `curl localhost:8080/status` — mode, scanner/recon
+  connectivity, active scan, last-image age, free disk, in one response.
+- **Stop streams with Ctrl-C**, not `docker rm -f` — Ctrl-C sends the MRD CLOSE. (A killed
+  stream is tolerated: the marshal accepts a new connection immediately and finalizes the
+  abandoned session in the background.)
+- **Recon down or unreachable**: scans proceed archived-only; the scanner receives a
+  failure image and a CLOSE (never hangs). The recon connect attempt is bounded (5 s) and
+  retried once per scan — restart the recon and start the next scan.
 - **Viewer static while streaming**: hard-refresh the browser (Ctrl-Shift-R) after any
   webgl-client recreate; confirm frames server-side with
   `curl -s localhost:8080/debug/perf | grep -o '"recon_images":[0-9]*'` (run twice — climbs).
 - **Throughput checks**: `latest_writer.last_write_us` should stay flat (~2–10 ms) and the
   snapshot shape constant for any stream length; if either grows, something regressed.
+
+## Performance check (marshal-only)
+
+`scripts/mrd_bench.py` drives the marshal with byte-pump endpoints so neither the
+streamer's nor the recon's speed pollutes the numbers. Reference numbers and full
+procedure: `docs/reviews/2026-07-03-marshal-performance-audit.md`. Quick forward-path
+check (expect ≥60 fps of 5-slice 96² frames, ≥190 MB/s):
+
+```bash
+docker run --rm --network cwru-demo-net -v "$PWD/scripts:/probe" fire-python:latest \
+  python3 /probe/mrd_bench.py gen --dir /probe/bench_data --matrix 96 --coils 8 --slices 5
+docker stop cwru-recon
+docker run -d --name bench-sink --network cwru-demo-net --network-alias recon \
+  -v "$PWD/scripts:/probe" fire-python:latest \
+  python3 /probe/mrd_bench.py sink --dir /probe/bench_data --port 9002 --acq-body 6484 --nacq 480 --once
+docker run --rm --network cwru-demo-net -v "$PWD/scripts:/probe" fire-python:latest \
+  python3 /probe/mrd_bench.py blast --dir /probe/bench_data --address mri-marshal --port 9100 --frames 200 --fps 0
+docker rm -f bench-sink; docker start cwru-recon
+```
+
+**Acceptance for the real recon (April):** repeat with the real recon as the sink
+target at the experiment's matrix/slices; if recon consumes faster than the marshal
+forwards, the marshal is the bottleneck and needs another look — otherwise done.

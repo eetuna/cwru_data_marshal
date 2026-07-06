@@ -35,13 +35,15 @@ Health check. Returns `{"status": "ok", "uptime_s": 95}`.
 **Live mode (default, no `--dump`):** returns a pointer to the closed companion snapshot — a stable path holding the most recently published live image update (2D slice, multi-slice stack image, or 3D volume image):
 ```json
 {
-  "path": "/session-data/live/from_reconstruction/latest_image.h5",
-  "error": false
+  "path": "/latest/live/from_reconstruction/latest_image.h5",
+  "error": false,
+  "generation": 57
 }
 ```
 
-- `path` — stable reader-facing HDF5 file. Always a closed HDF5 atomically renamed by marshal on each incoming live IMAGE. Openable with default ISMRMRD / h5py / HDFView settings. Contents live under group `image_0`.
+- `path` — stable reader-facing HDF5 file. Always a closed HDF5 atomically renamed by marshal on each incoming live IMAGE. Openable with default ISMRMRD / h5py / HDFView settings. Contents live under group `image_0`. With `--latest-dir` (the compose default: a RAM-backed dir shared with the viewer) the path is under that root; without the flag, under `--dump-dir`.
 - `error` — true if reconstruction is currently failing.
+- `generation` — monotonic publish counter. Remember the last value and skip re-reading the snapshot when it hasn't changed.
 
 When reconstruction has failed:
 ```json
@@ -58,6 +60,38 @@ Before the current scan has published any live IMAGE, `GET /image/latest` return
 **Dump mode (`--dump`):** returns `404 Not Found` with body `{"error":"dump mode; no live snapshot"}`. Dump mode is archival-only — poll `/image/latest` only in live mode.
 
 The per-scan history file (`<mode>/from_*/scan_<ts>.h5`) is an archival output produced on CLOSE. It is not a mid-scan reader interface in either mode. Clients that need the per-scan archive open it after the scan ends.
+
+#### GET /image/latest.h5
+
+The same closed snapshot served as **HTTP response bytes** (`Content-Type: application/x-hdf5`). Use this from clients that do not share the marshal's filesystem — anything on another machine, or a container without the volume:
+
+```python
+import io, urllib.request, h5py
+r = urllib.request.urlopen("http://<marshal>:8080/image/latest.h5")
+img = h5py.File(io.BytesIO(r.read()), "r")["dataset/image_0/data"]
+```
+
+- `ETag` carries the publish generation. Send `If-None-Match: <etag>` when polling; the marshal answers `304 Not Modified` until a new image is published, so only actual new images are downloaded.
+- `204 No Content` before the first image; `503 Service Unavailable` while reconstruction is failing; `404` in dump mode.
+
+#### GET /status
+
+One-glance operational summary (read-only):
+
+```json
+{
+  "mode": "live",
+  "scanner_connected": true,
+  "recon": {"configured": true, "target": "recon:9002", "connected": true},
+  "scan": {"active": true, "file": "scan_2026-07-03T....h5"},
+  "images": {"from_scanner_total": 300, "from_recon_total": 198},
+  "last_image_age_s": 0.2,
+  "disk_free_gb": 41.3,
+  "uptime_s": 5231
+}
+```
+
+`disk_free_gb` refers to the archive root (`--dump-dir`). `last_image_age_s` is null until the first snapshot publish.
 
 #### GET /debug/sinks
 
@@ -195,8 +229,11 @@ List archived reconstruction HDF5 files under `dump/from_reconstruction/` (same 
 | `--mrd-port N` | `0` (disabled) | MRD TCP listen port (scanner connections). Listener only starts when a non-zero value is passed (`docker-compose.yml` passes `9100`). |
 | `--dump-dir path` | `./data` | Session-data root. Holds `live/from_scanner/`, `live/from_reconstruction/`, and — when `--dump` is on — `dump/from_scanner/`, `dump/from_reconstruction/`. |
 | `--dump` | off | Enable retrospective canonical ISMRMRD H5 dump writing |
+| `--latest-dir path` | (unset) | Alternate root for the transient snapshot artifacts (`latest_image.h5`, `latest_error.png`). Unset = they live under `--dump-dir` (historical layout, byte-identical behavior). The compose file points this at a shared RAM-backed dir (`/dev/shm/cwru-latest`) so per-volume snapshot I/O never touches — or stalls on — the archive disk. Archives are unaffected either way. |
 | `--recon-host host` | (none) | Recon service hostname for MRD TCP forwarding |
 | `--recon-port N` | `9002` | Recon service port. Used only when `--recon-host` is set. |
+| `--recon-connect-timeout-ms N` | `5000` | Bound on recon DNS resolve + TCP connect. On expiry the scan proceeds archived-only (scanner receives a failure image and a marshal CLOSE). |
+| `--recon-close-timeout-ms N` | `30000` | After the scanner's CLOSE is forwarded, how long to wait for recon to flush tail images and send its own CLOSE. On expiry the marshal emits its own CLOSE so the scanner never hangs. Sized for slow recons (e.g. GRAPPA on a remote VM). |
 | `--ws-port N` | (none) | Optional WebSocket listener port |
 
 ---
