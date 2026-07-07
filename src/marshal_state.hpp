@@ -141,6 +141,11 @@ struct MarshalState {
     std::mutex slice_translation_mtx;
     std::string latest_slice_translation_json;
 
+    // Latest absolute slice prescription (position + orientation) from the
+    // UI; cached like the ±1 nudge. See POST /write/slice_target.
+    std::mutex slice_target_mtx;
+    std::string latest_slice_target_json;
+
     // Slice geometry observed in image headers (position + orientation per
     // slice index), updated on every IMAGE from either lane, cleared at each
     // scan start (METADATA_XML). Embedded in the slice-translation TEXT

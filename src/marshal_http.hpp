@@ -287,11 +287,25 @@ inline nlohmann::json slice_geometry_json(MarshalState& state)
     return j;
 }
 
-// Build the slice-translation command payload and push it to the scanner as
-// an MRD TEXT (5) frame. Wire format matches python-ismrmrd-server's
-// connection.py read_text(): uint32 LE length, then that many bytes of
-// null-terminated UTF-8 (length includes the terminator). Returns true when
-// the frame was written to a connected scanner.
+// Push a JSON payload to the scanner as an MRD TEXT (5) frame. Wire format
+// matches python-ismrmrd-server's connection.py read_text(): uint32 LE
+// length, then that many bytes of null-terminated UTF-8 (length includes the
+// terminator). Returns true when the frame was written to a connected
+// scanner. Scanner-side consumers dispatch on the payload's "type" field.
+inline bool push_text_to_scanner(MarshalState& state, const nlohmann::json& payload)
+{
+    const std::string text = payload.dump();
+    const uint32_t wire_len = static_cast<uint32_t>(text.size() + 1); // + NUL
+    std::vector<uint8_t> frame(sizeof(uint32_t) + wire_len);
+    std::memcpy(frame.data(), &wire_len, sizeof(uint32_t));
+    std::memcpy(frame.data() + sizeof(uint32_t), text.data(), text.size());
+    frame[sizeof(uint32_t) + text.size()] = '\0';
+
+    return state.mrd_push_message(mrd::MRD_MESSAGE_TEXT,
+                                  frame.data(), frame.size());
+}
+
+// Build the slice-translation (relative ±1 nudge) command payload and push it.
 inline bool push_slice_command_to_scanner(MarshalState& state, double direction,
                                           const std::string& ts)
 {
@@ -321,15 +335,7 @@ inline bool push_slice_command_to_scanner(MarshalState& state, double direction,
         payload["slice_geometry"] = std::move(geom);
     }
 
-    const std::string text = payload.dump();
-    const uint32_t wire_len = static_cast<uint32_t>(text.size() + 1); // + NUL
-    std::vector<uint8_t> frame(sizeof(uint32_t) + wire_len);
-    std::memcpy(frame.data(), &wire_len, sizeof(uint32_t));
-    std::memcpy(frame.data() + sizeof(uint32_t), text.data(), text.size());
-    frame[sizeof(uint32_t) + text.size()] = '\0';
-
-    return state.mrd_push_message(mrd::MRD_MESSAGE_TEXT,
-                                  frame.data(), frame.size());
+    return push_text_to_scanner(state, payload);
 }
 
 template <class Body>
@@ -391,6 +397,122 @@ static auto handle_get_slice_geometry(const http::request<Body>& req, MarshalSta
         return res;
     }
     return json_response(req, http::status::ok, j);
+}
+
+// ---------------------------------------------------------------------------
+// POST /write/slice_target and GET /read/slice_target
+//
+// Absolute slice prescription from the UI: "put the slice exactly here,
+// facing this way". Body (JSON):
+//   { "position": [x,y,z],                       // slice center, mm
+//     "read_dir": [..], "phase_dir": [..], "slice_dir": [..] }  // unit vectors
+// Pushed to the connected scanner as MRD TEXT {"type":"slice_target",...}
+// (same channel as the ±1 nudge; scanners dispatch on "type"). The latest
+// prescription is cached; GET returns it without clearing.
+// ---------------------------------------------------------------------------
+
+// Parse a 3-vector field. Returns false (and sets err) on absence/shape/type.
+inline bool parse_vec3(const nlohmann::json& body, const char* key,
+                       double out[3], std::string& err)
+{
+    if (!body.contains(key) || !body[key].is_array() || body[key].size() != 3) {
+        err = std::string(key) + " must be a 3-element array";
+        return false;
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (!body[key][i].is_number()) {
+            err = std::string(key) + "[" + std::to_string(i) + "] must be numeric";
+            return false;
+        }
+        out[i] = body[key][i].get<double>();
+    }
+    return true;
+}
+
+template <class Body>
+static auto handle_post_slice_target(const http::request<Body>& req, MarshalState& state)
+    -> http::response<http::string_body>
+{
+    nlohmann::json body;
+    try {
+        body = nlohmann::json::parse(req.body());
+    } catch (const std::exception& e) {
+        return json_response(req, http::status::bad_request,
+                             {{"error", std::string("bad JSON: ") + e.what()}});
+    }
+
+    double pos[3], rd[3], pd[3], sd[3];
+    std::string err;
+    if (!parse_vec3(body, "position", pos, err) ||
+        !parse_vec3(body, "read_dir", rd, err) ||
+        !parse_vec3(body, "phase_dir", pd, err) ||
+        !parse_vec3(body, "slice_dir", sd, err)) {
+        return json_response(req, http::status::bad_request, {{"error", err}});
+    }
+
+    // The three direction vectors must be unit length and mutually
+    // orthogonal — a malformed frame would silently mis-aim the scanner.
+    constexpr double kTol = 1e-3;
+    auto dot = [](const double a[3], const double b[3]) {
+        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+    };
+    const double* dirs[3] = {rd, pd, sd};
+    const char* names[3] = {"read_dir", "phase_dir", "slice_dir"};
+    for (int i = 0; i < 3; ++i) {
+        if (std::fabs(dot(dirs[i], dirs[i]) - 1.0) > kTol) {
+            return json_response(req, http::status::bad_request,
+                {{"error", std::string(names[i]) + " must be unit length"}});
+        }
+        for (int k = i + 1; k < 3; ++k) {
+            if (std::fabs(dot(dirs[i], dirs[k])) > kTol) {
+                return json_response(req, http::status::bad_request,
+                    {{"error", std::string(names[i]) + " and " + names[k]
+                               + " must be orthogonal"}});
+            }
+        }
+    }
+
+    const std::string ts = mrd::iso8601_now_ms();
+    nlohmann::json payload;
+    payload["type"] = "slice_target";
+    payload["position"] = {pos[0], pos[1], pos[2]};
+    payload["read_dir"] = {rd[0], rd[1], rd[2]};
+    payload["phase_dir"] = {pd[0], pd[1], pd[2]};
+    payload["slice_dir"] = {sd[0], sd[1], sd[2]};
+    payload["ts"] = ts;
+
+    {
+        std::lock_guard<std::mutex> lk(state.slice_target_mtx);
+        state.latest_slice_target_json = payload.dump();
+    }
+
+    const bool delivered = push_text_to_scanner(state, payload);
+
+    return json_response(req, http::status::ok,
+                         {{"file", "slice_target"}, {"delivered", delivered}});
+}
+
+template <class Body>
+static auto handle_get_slice_target(const http::request<Body>& req, MarshalState& state)
+    -> http::response<http::string_body>
+{
+    std::string cached;
+    {
+        std::lock_guard<std::mutex> lk(state.slice_target_mtx);
+        cached = state.latest_slice_target_json;
+    }
+    if (cached.empty()) {
+        http::response<http::string_body> res{http::status::no_content, req.version()};
+        res.keep_alive(req.keep_alive());
+        res.prepare_payload();
+        return res;
+    }
+    try {
+        return json_response(req, http::status::ok, nlohmann::json::parse(cached));
+    } catch (...) {
+        return json_response(req, http::status::internal_server_error,
+                             {{"error", "failed to parse slice target cache"}});
+    }
 }
 
 template <class Body>
@@ -707,6 +829,14 @@ void handle_http_request(http::request<Body>&& req, MarshalState& state, Send&& 
     }
     if (method == http::verb::get && target == "/read/slice_geometry") {
         send(handle_get_slice_geometry(req, state));
+        return;
+    }
+    if (method == http::verb::post && target == "/write/slice_target") {
+        send(handle_post_slice_target(req, state));
+        return;
+    }
+    if (method == http::verb::get && target == "/read/slice_target") {
+        send(handle_get_slice_target(req, state));
         return;
     }
     if (method == http::verb::post && target == "/pose") {

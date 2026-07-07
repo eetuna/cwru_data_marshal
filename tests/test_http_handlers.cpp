@@ -289,6 +289,86 @@ TEST_CASE("Slice command pushback + geometry", "[http][slice]") {
     }
 }
 
+TEST_CASE("Slice target: absolute prescription pushback", "[http][slice]") {
+    MarshalState state; init_state(state);
+
+    std::vector<std::pair<uint16_t, std::vector<uint8_t>>> pushed;
+    bool push_ok = true;
+    state.mrd_push_message = [&](uint16_t tag, const void* d, size_t l) {
+        const auto* p = static_cast<const uint8_t*>(d);
+        pushed.emplace_back(tag, std::vector<uint8_t>(p, p + l));
+        return push_ok;
+    };
+
+    auto post_target = [&](json body) {
+        http::request<http::string_body> req{http::verb::post, "/write/slice_target", 11};
+        req.body() = body.dump();
+        req.prepare_payload();
+        return dispatch(req, state);
+    };
+    const json valid = {
+        {"position", {12.5, -3.0, 40.0}},
+        {"read_dir", {1.0, 0.0, 0.0}},
+        {"phase_dir", {0.0, 1.0, 0.0}},
+        {"slice_dir", {0.0, 0.0, 1.0}},
+    };
+
+    SECTION("GET before any POST returns 204") {
+        http::request<http::string_body> req{http::verb::get, "/read/slice_target", 11};
+        REQUIRE(dispatch(req, state).result() == http::status::no_content);
+    }
+
+    SECTION("valid prescription: pushed as TEXT, cached, delivered=true") {
+        auto res = post_target(valid);
+        REQUIRE(res.result() == http::status::ok);
+        CHECK(json::parse(res.body())["delivered"] == true);
+
+        REQUIRE(pushed.size() == 1);
+        CHECK(pushed[0].first == mrd::MRD_MESSAGE_TEXT);
+        const auto& bytes = pushed[0].second;
+        uint32_t wire_len = 0;
+        std::memcpy(&wire_len, bytes.data(), sizeof(uint32_t));
+        REQUIRE(bytes.size() == sizeof(uint32_t) + wire_len);
+        REQUIRE(bytes.back() == '\0');
+        auto payload = json::parse(std::string(
+            bytes.begin() + sizeof(uint32_t), bytes.end() - 1));
+        CHECK(payload["type"] == "slice_target");
+        CHECK(payload["position"][0] == Catch::Approx(12.5));
+        CHECK(payload["slice_dir"][2] == Catch::Approx(1.0));
+        CHECK(payload.contains("ts"));
+
+        http::request<http::string_body> get_req{http::verb::get, "/read/slice_target", 11};
+        auto get_res = dispatch(get_req, state);
+        REQUIRE(get_res.result() == http::status::ok);
+        CHECK(json::parse(get_res.body())["position"][1] == Catch::Approx(-3.0));
+    }
+
+    SECTION("rejections: missing field, non-unit, non-orthogonal") {
+        json missing = valid; missing.erase("phase_dir");
+        CHECK(post_target(missing).result() == http::status::bad_request);
+
+        json non_unit = valid; non_unit["read_dir"] = {2.0, 0.0, 0.0};
+        CHECK(post_target(non_unit).result() == http::status::bad_request);
+
+        json non_ortho = valid; non_ortho["phase_dir"] = {1.0, 0.0, 0.0};
+        CHECK(post_target(non_ortho).result() == http::status::bad_request);
+
+        json bad_shape = valid; bad_shape["position"] = {1.0, 2.0};
+        CHECK(post_target(bad_shape).result() == http::status::bad_request);
+
+        CHECK(pushed.empty());   // nothing invalid reaches the scanner
+    }
+
+    SECTION("no scanner: delivered=false, still cached") {
+        push_ok = false;
+        auto res = post_target(valid);
+        REQUIRE(res.result() == http::status::ok);
+        CHECK(json::parse(res.body())["delivered"] == false);
+        http::request<http::string_body> get_req{http::verb::get, "/read/slice_target", 11};
+        REQUIRE(dispatch(get_req, state).result() == http::status::ok);
+    }
+}
+
 TEST_CASE("GET /image/latest returns 204 before first image", "[http]") {
     MarshalState state; init_state(state);
     http::request<http::string_body> req{http::verb::get, "/image/latest", 11};
