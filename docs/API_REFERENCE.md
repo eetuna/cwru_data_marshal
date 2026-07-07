@@ -188,11 +188,44 @@ Slice-nudge command channel used by the WebGL client to step the MRI imaging sli
 ```json
 {"client_id": "webgl", "sent_at": 1706126625123456789, "values": [1]}
 ```
-`values` must be a single-element array whose value is exactly `+1` or `-1`; anything else returns `400`. The latest command is cached in memory (a `ts` field with `iso8601_now_ms()` is stamped on it). On success returns `{"file": "file_slice_translation", "direction": 1}`. (`/write/file_slice_translation.json` is accepted as an alias.)
+`values` must be a single-element array whose value is exactly `+1` or `-1`; anything else returns `400`. The latest command is cached in memory (a `ts` field with `iso8601_now_ms()` is stamped on it). (`/write/file_slice_translation.json` is accepted as an alias.)
+
+In addition to caching, the marshal **pushes the command to the connected scanner** over the live MRD TCP connection as an `MRD_MESSAGE_TEXT (5)` frame (uint32 LE length + null-terminated UTF-8, the exact framing python-ismrmrd-server's `connection.py read_text()` parses). The text is JSON:
+```json
+{"type": "slice_translation", "direction": 1, "ts": "2026-07-07T...",
+ "slice_geometry": {"slice": 2, "position": [10.5, -20.0, 30.0],
+                    "read_dir": [1,0,0], "phase_dir": [0,1,0], "slice_dir": [0,0,1]}}
+```
+`slice_geometry` is the most recently observed slice's position/orientation from the scan's image headers (`null` before the first image of a scan). The scanner side filters on `"type": "slice_translation"` — other TEXT traffic (e.g. relayed from the recon) may share the channel.
+
+On success returns `{"file": "file_slice_translation", "direction": 1, "delivered": true}` — `delivered` is `false` when no scanner is connected (or the send failed); the command is still cached either way.
 
 #### GET /read/file_slice_translation
 
 Returns the last cached slice-nudge command JSON (non-consuming — the value is not cleared). Returns `204 No Content` when no command has been posted yet. (`/read/file_slice_translation.json` is accepted as an alias.)
+
+#### POST /write/slice_target
+
+Absolute slice prescription from the UI: "put the slice exactly here, facing this way". Body:
+```json
+{"position": [12.5, -3.0, 40.0],
+ "read_dir": [1,0,0], "phase_dir": [0,1,0], "slice_dir": [0,0,1]}
+```
+`position` = slice center in mm; the three direction vectors are the slice plane's axes (same convention as MRD image headers). All three must be unit length and mutually orthogonal (tolerance 1e-3) — otherwise `400` with the reason, and nothing is sent. On success the prescription is cached and pushed to the connected scanner as `MRD_MESSAGE_TEXT` `{"type": "slice_target", ..., "ts": ...}` (same channel and framing as the ±1 nudge; scanners dispatch on `type`). Returns `{"file": "slice_target", "delivered": true|false}`.
+
+#### GET /read/slice_target
+
+Returns the last cached prescription (non-consuming); `204 No Content` before the first POST.
+
+#### GET /read/slice_geometry
+
+Position + orientation per slice index as observed in the current scan's image headers (both lanes — scanner-sent and recon-returned images). Cleared at each scan start; `204 No Content` until the first image. Response:
+```json
+{"latest_slice": 2,
+ "slices": {"2": {"slice": 2, "position": [10.5, -20.0, 30.0],
+                  "read_dir": [1,0,0], "phase_dir": [0,1,0], "slice_dir": [0,0,1],
+                  "ts": "2026-07-07T..."}}}
+```
 
 #### POST /pose
 

@@ -213,6 +213,15 @@ docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python
 > You'll see: one static (contrast-inverted) phantom image appear in the
 > viewer; the recon's returned images are also saved to `session-data/out.h5`.
 
+One-shot **multislice** variant (5e's generator is single-slice only; this
+sends exactly one 5-slice volume through the recon, then exits — the scan
+closes immediately, so the archive lands right away):
+```bash
+docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
+  python3 /scripts/fire_stream.py --address mri-marshal --port 9100 \
+  --mode kspace --fps 5 --frames 1 --matrix 96 --slices 5
+```
+
 Knobs for 5b–5d: `--fps N` (pace) · `--frames N` (how many; 0 = until Ctrl-C)
 · `--matrix N` (image size) · `--slices N` (multislice) ·
 `--mode kspace|image` (through recon | straight to viewer).

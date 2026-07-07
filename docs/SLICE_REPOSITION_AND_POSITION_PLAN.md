@@ -1,7 +1,14 @@
 # Plan: make the marshal reroute slice-translation AND know slice geometry
 
-> **Status: PLANNED — not implemented.** This is intended work, not shipped behavior.
-> Endpoints and structs named below (e.g. `GET /read/slice_geometry`, `SliceGeometry`) do not exist yet.
+> **Status: IMPLEMENTED 2026-07-07** on marshal branch `feat/slice-command-pushback`
+> (Option B, as recommended below). Piece 1 (geometry extraction from image headers →
+> `SliceGeometry` map + `GET /read/slice_geometry`) and Piece 2 (delivery: the command
+> is pushed to the scanner as an `MRD_MESSAGE_TEXT (5)` frame over the live MRD TCP
+> connection, with the geometry embedded; the HTTP response reports
+> `"delivered": true|false`). Payload format + framing: see
+> [API_REFERENCE.md](API_REFERENCE.md) `POST /write/file_slice_translation`.
+> Scanner-side remains to be done by Andrew: handle `str` messages in the
+> connection.py-style receive loop, filter `"type": "slice_translation"`, apply.
 
 ## Context / problem
 
