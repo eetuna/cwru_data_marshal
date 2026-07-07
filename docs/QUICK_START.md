@@ -222,6 +222,29 @@ docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:l
   --mode kspace --fps 5 --frames 1 --matrix 96 --slices 5
 ```
 
+**5f. Slice-command check** — verifies the UI→marshal→scanner control channel
+with a mock scanner (no real scanner needed). Two terminals:
+
+Terminal 1 — a mock scanner connects and waits for a command:
+```bash
+docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
+  python3 /scripts/slice_command_mock_scanner.py mri-marshal 9100
+```
+> You'll see: `IMAGE_SENT slice=2 position=(10.5,-20.0,30.0)`, then it waits.
+
+Terminal 2 — read the slice geometry, then send an absolute prescription:
+```bash
+curl -s localhost:8080/read/slice_geometry
+curl -s -X POST localhost:8080/write/slice_target \
+  -d '{"position":[12.5,-3,40],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,1]}'
+```
+> You'll see: the geometry the mock sent (slice 2 at [10.5, −20, 30]); then
+> `{"delivered":true,...}` — and Terminal 1 prints
+> `TEXT_RECEIVED:{"type":"slice_target","position":[12.5,-3.0,40.0],...}` and
+> exits. That line is the proof: the command went UI-side HTTP → marshal →
+> scanner connection. Without Terminal 1 running, the same POST returns
+> `"delivered":false` — command cached, no scanner to receive it.
+
 Knobs for 5b–5d: `--fps N` (pace) · `--frames N` (how many; 0 = until Ctrl-C)
 · `--matrix N` (image size) · `--slices N` (multislice) ·
 `--mode kspace|image` (through recon | straight to viewer).

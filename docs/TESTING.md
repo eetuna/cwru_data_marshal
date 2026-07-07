@@ -157,6 +157,48 @@ ls session-data/dump/from_reconstruction/ | wc -l
 curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/image/latest   # 404
 ```
 
+## Slice command channel (nudge + slice_target)
+
+The marshal relays UI slice commands to the scanner over the scan's MRD TCP
+connection as TEXT messages (`{"type":"slice_translation"|"slice_target",...}`;
+full formats in [API_REFERENCE.md](API_REFERENCE.md)). Test the whole loop with
+the mock scanner — it connects like a real python-ismrmrd-server scanner, sends
+one image with known geometry, and prints any command it receives:
+
+```bash
+# Terminal 1 — mock scanner (occupies the scanner slot; exits after one command)
+docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
+  python3 /scripts/slice_command_mock_scanner.py mri-marshal 9100
+#   IMAGE_SENT slice=2 position=(10.5,-20.0,30.0)  ... waits ...
+
+# Terminal 2 — while Terminal 1 is connected:
+curl -s localhost:8080/read/slice_geometry
+#   {"latest_slice":2,"slices":{"2":{"position":[10.5,-20.0,30.0],...}}}
+curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}'
+#   {"delivered":true,...}  -> Terminal 1 prints TEXT_RECEIVED:{"type":"slice_translation",
+#   "direction":1.0,"slice_geometry":{...the geometry above...},...} and exits
+```
+
+Repeat with the absolute prescription (rerun Terminal 1 first):
+```bash
+curl -s -X POST localhost:8080/write/slice_target \
+  -d '{"position":[12.5,-3,40],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,1]}'
+#   {"delivered":true,...} -> Terminal 1: TEXT_RECEIVED:{"type":"slice_target",...}
+```
+
+No-scanner and rejection checks (no mock needed):
+```bash
+curl -s -X POST localhost:8080/write/slice_target \
+  -d '{"position":[0,0,0],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,1]}'
+#   {"delivered":false,...}          (no scanner connected; cached)
+curl -s localhost:8080/read/slice_target        # echoes the cached prescription
+curl -s -X POST localhost:8080/write/slice_target \
+  -d '{"position":[0,0,0],"read_dir":[1,0,0],"phase_dir":[1,0,0],"slice_dir":[0,0,1]}'
+#   400 {"error":"read_dir and phase_dir must be orthogonal"} — never sent
+```
+
+`./scripts/test-modes.sh` runs these checks automatically as test [5].
+
 ## Back to live / teardown
 ```bash
 docker compose --profile test-recon up -d --force-recreate mri-marshal   # live again (webgl at :3000)

@@ -13,7 +13,12 @@
 set -u
 cd "$(dirname "$0")/.."
 NET=cwru-demo-net
-DATA="$PWD/session-data"
+# SESSION_DATA_DIR: set when $PWD is not the path the DOCKER HOST sees for
+# this repo (e.g. running from a devcontainer whose /workspaces/... is not
+# the host checkout). It is also passed through to docker compose, which
+# uses the same variable for the marshal's /session-data bind.
+DATA="${SESSION_DATA_DIR:-$PWD/session-data}"
+SCRIPTS="${MARSHAL_SCRIPTS_DIR:-$PWD/scripts}"
 FP=fire-python:latest
 pass=0; fail=0
 chk(){ if [ "$2" = "$3" ]; then echo "  PASS $1 ($2)"; pass=$((pass+1)); else echo "  FAIL $1 (got $2 want $3)"; fail=$((fail+1)); fi; }
@@ -68,6 +73,30 @@ chk "dump scanner archive (image)" "$(exists 'dump/from_scanner/scan_*.h5')" "ye
 
 echo "== restore LIVE mode =="
 docker compose --profile test-recon up -d --force-recreate mri-marshal >/dev/null 2>&1
+for i in $(seq 1 30); do [ "$(mexec curl -s -o /dev/null -w '%{http_code}' localhost:8080/health 2>/dev/null)" = "200" ] && break; sleep 2; done
+
+echo "[5] SLICE COMMANDS (marshal -> scanner TEXT pushback)"
+TGT='{"position":[12.5,-3,40],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,1]}'
+BAD='{"position":[0,0,0],"read_dir":[1,0,0],"phase_dir":[1,0,0],"slice_dir":[0,0,1]}'
+deliv(){ mexec curl -s -X POST localhost:8080/write/slice_target -d "$1" | grep -o '"delivered":[a-z]*'; }
+# no scanner connected yet: cached but not delivered
+chk "slice_target no scanner" "$(deliv "$TGT")" '"delivered":false'
+# invalid prescription is rejected before reaching any scanner
+badcode=$(mexec curl -s -o /dev/null -w "%{http_code}" -X POST localhost:8080/write/slice_target -d "$BAD")
+chk "slice_target bad frame = 400" "$badcode" "400"
+# mock scanner connects (sends image w/ known geometry), then must receive the
+# TEXT. Its output lands in $DATA which may only be host-reachable — read it
+# back through a container mount (same reason exists() does).
+docker run --rm --network $NET -v "$SCRIPTS:/scripts" -v "$DATA:/data" $FP sh -c \
+  "python3 /scripts/slice_command_mock_scanner.py mri-marshal 9100 > /data/mock_scanner_out.txt 2>&1" &
+MOCK_PID=$!
+sleep 6
+chk "slice geometry from mock image" \
+  "$(mexec curl -s localhost:8080/read/slice_geometry | grep -o '"latest_slice":[0-9-]*')" '"latest_slice":2'
+chk "slice_target delivered" "$(deliv "$TGT")" '"delivered":true'
+wait $MOCK_PID 2>/dev/null
+chk "mock scanner received TEXT" \
+  "$(docker run --rm -v "$DATA:/d" $FP sh -c "grep -q 'TEXT_RECEIVED:.*slice_target' /d/mock_scanner_out.txt && echo yes || echo no; rm -f /d/mock_scanner_out.txt")" "yes"
 
 echo ""
 echo "== RESULT: $pass passed, $fail failed =="
