@@ -190,6 +190,105 @@ static uint16_t latest_image_matrix_z(const fs::path& path) {
     return image.getHead().matrix_size[2];
 }
 
+TEST_CASE("Slice command pushback + geometry", "[http][slice]") {
+    MarshalState state; init_state(state);
+
+    // Capture frames pushed to the (stubbed) scanner connection.
+    std::vector<std::pair<uint16_t, std::vector<uint8_t>>> pushed;
+    bool push_ok = true;
+    state.mrd_push_message = [&](uint16_t tag, const void* d, size_t l) {
+        const auto* p = static_cast<const uint8_t*>(d);
+        pushed.emplace_back(tag, std::vector<uint8_t>(p, p + l));
+        return push_ok;
+    };
+
+    auto post_nudge = [&](double dir) {
+        json payload = {{"client_id", "client-webgl"}, {"values", {dir}}};
+        http::request<http::string_body> req{http::verb::post, "/write/file_slice_translation", 11};
+        req.body() = payload.dump();
+        req.prepare_payload();
+        return dispatch(req, state);
+    };
+
+    SECTION("GET /read/slice_geometry is 204 before any image") {
+        http::request<http::string_body> req{http::verb::get, "/read/slice_geometry", 11};
+        auto res = dispatch(req, state);
+        REQUIRE(res.result() == http::status::no_content);
+    }
+
+    SECTION("no geometry yet: pushed TEXT has null slice_geometry, delivered=true") {
+        auto res = post_nudge(1);
+        REQUIRE(res.result() == http::status::ok);
+        CHECK(json::parse(res.body())["delivered"] == true);
+        REQUIRE(pushed.size() == 1);
+        CHECK(pushed[0].first == mrd::MRD_MESSAGE_TEXT);
+
+        const auto& bytes = pushed[0].second;
+        REQUIRE(bytes.size() > sizeof(uint32_t));
+        uint32_t wire_len = 0;
+        std::memcpy(&wire_len, bytes.data(), sizeof(uint32_t));
+        REQUIRE(bytes.size() == sizeof(uint32_t) + wire_len);
+        REQUIRE(bytes.back() == '\0');   // NUL-terminated, per connection.py
+
+        auto payload = json::parse(std::string(
+            bytes.begin() + sizeof(uint32_t), bytes.end() - 1));
+        CHECK(payload["type"] == "slice_translation");
+        CHECK(payload["direction"] == 1.0);
+        CHECK(payload["slice_geometry"].is_null());
+    }
+
+    SECTION("geometry from image header flows into endpoint and pushed command") {
+        ISMRMRD::ImageHeader hdr{};
+        hdr.slice = 3;
+        hdr.position[0] = 10.5f; hdr.position[1] = -20.f; hdr.position[2] = 30.f;
+        hdr.read_dir[0] = 1.f; hdr.phase_dir[1] = 1.f; hdr.slice_dir[2] = 1.f;
+        std::vector<uint8_t> wire(mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t), 0);
+        std::memcpy(wire.data(), &hdr, sizeof(hdr));
+        mrd::update_slice_geometry(state, wire.data(), wire.size());
+
+        http::request<http::string_body> req{http::verb::get, "/read/slice_geometry", 11};
+        auto res = dispatch(req, state);
+        REQUIRE(res.result() == http::status::ok);
+        auto geom = json::parse(res.body());
+        CHECK(geom["latest_slice"] == 3);
+        REQUIRE(geom["slices"].contains("3"));
+        CHECK(geom["slices"]["3"]["position"][0] == Catch::Approx(10.5));
+        CHECK(geom["slices"]["3"]["slice_dir"][2] == Catch::Approx(1.0));
+
+        auto post_res = post_nudge(-1);
+        REQUIRE(post_res.result() == http::status::ok);
+        REQUIRE(pushed.size() == 1);
+        const auto& bytes = pushed[0].second;
+        auto payload = json::parse(std::string(
+            bytes.begin() + sizeof(uint32_t), bytes.end() - 1));
+        CHECK(payload["direction"] == -1.0);
+        CHECK(payload["slice_geometry"]["slice"] == 3);
+        CHECK(payload["slice_geometry"]["position"][1] == Catch::Approx(-20.0));
+
+        // New scan clears the geometry (same reset the METADATA_XML handler runs)
+        {
+            std::lock_guard<std::mutex> lk(state.slice_geom_mtx);
+            state.slice_geom.clear();
+            state.latest_slice = -1;
+        }
+        http::request<http::string_body> req2{http::verb::get, "/read/slice_geometry", 11};
+        auto res2 = dispatch(req2, state);
+        REQUIRE(res2.result() == http::status::no_content);
+    }
+
+    SECTION("no scanner connected: delivered=false, cache still written") {
+        push_ok = false;
+        auto res = post_nudge(1);
+        REQUIRE(res.result() == http::status::ok);
+        CHECK(json::parse(res.body())["delivered"] == false);
+
+        http::request<http::string_body> get_req{http::verb::get, "/read/file_slice_translation", 11};
+        auto get_res = dispatch(get_req, state);
+        REQUIRE(get_res.result() == http::status::ok);
+        CHECK(json::parse(get_res.body())["values"][0] == 1);
+    }
+}
+
 TEST_CASE("GET /image/latest returns 204 before first image", "[http]") {
     MarshalState state; init_state(state);
     http::request<http::string_body> req{http::verb::get, "/image/latest", 11};

@@ -145,7 +145,11 @@ public:
     // above, not an in-process queue. A queue re-introduces choices
     // between drop (contract violation) and unbounded growth (OOM)
     // that TCP flow control already solves.
-    void push_message_to_scanner(uint16_t tag, const void* data, size_t len) {
+    // Returns true when the frame was written to a connected scanner socket;
+    // false when no scanner is connected or the send failed. Existing relay
+    // callers ignore the result; the slice-command path reports it as
+    // "delivered" to the HTTP client.
+    bool push_message_to_scanner(uint16_t tag, const void* data, size_t len) {
         // scanner_send_mtx_ serializes the whole frame (tag + body) so
         // concurrent callers (e.g. recon reader thread + recon-failure
         // path on the session thread) can't interleave bytes on the
@@ -171,7 +175,7 @@ public:
         }
         if (!sock) {
             LOG_DEBUG("Scanner writer: no scanner connected, drop tag=" << tag);
-            return;
+            return false;
         }
 
         // Single gather write: tag + body leave in one syscall. Same
@@ -214,6 +218,7 @@ public:
                 sock->close(ignore);
             }
         }
+        return sent;
     }
 
     bool has_scanner() const {
@@ -655,6 +660,13 @@ private:
                         // ended) session must stand down.
                         state_.scan_epoch.fetch_add(1);
                     }
+                    {
+                        // Geometry belongs to a scan's slice prescription;
+                        // a new scan starts with a clean slate.
+                        std::lock_guard<std::mutex> lk(state_.slice_geom_mtx);
+                        state_.slice_geom.clear();
+                        state_.latest_slice = -1;
+                    }
                     if (state_.dump_enabled && state_.dump_recorder) {
                         // Pass the raw wire body for byte-exact
                         // METADATA_XML preservation in the spool.
@@ -859,6 +871,10 @@ private:
 
                     LOG_DEBUG("IMAGE from scanner: "
                               << ihdr->matrix_size[0] << "x" << ihdr->matrix_size[1]);
+                    // Track slice geometry in every mode (before live/dump
+                    // gating) — the slice-translation command pushed to the
+                    // scanner embeds it.
+                    update_slice_geometry(state_, body, total);
                     if (state_.dump_enabled) {
                         if (state_.dump_recorder) {
                             const uint8_t* attr_p = body + IMAGE_HEADER_BYTES + 8;

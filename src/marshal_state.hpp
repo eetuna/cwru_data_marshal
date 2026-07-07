@@ -15,6 +15,7 @@
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -140,6 +141,22 @@ struct MarshalState {
     std::mutex slice_translation_mtx;
     std::string latest_slice_translation_json;
 
+    // Slice geometry observed in image headers (position + orientation per
+    // slice index), updated on every IMAGE from either lane, cleared at each
+    // scan start (METADATA_XML). Embedded in the slice-translation TEXT
+    // command pushed to the scanner and served at GET /read/slice_geometry.
+    struct SliceGeometry {
+        uint16_t slice{0};
+        float position[3]{};
+        float read_dir[3]{};
+        float phase_dir[3]{};
+        float slice_dir[3]{};
+        std::string ts;   // ISO8601 of the last update
+    };
+    std::mutex slice_geom_mtx;
+    std::map<uint16_t, SliceGeometry> slice_geom;
+    int latest_slice{-1};   // slice index of the most recent image, -1 = none
+
     // Pose cache
     PoseStore poses;
 
@@ -171,9 +188,11 @@ struct MarshalState {
     // WS emit hook (set by WsServer on init, optional)
     std::function<void(const std::string&)> ws_emit = [](const std::string&) {};
 
-    // MRD TCP return hook (set by MrdTcpListener, pushes recon messages to scanner)
-    std::function<void(uint16_t, const void*, size_t)> mrd_push_message =
-        [](uint16_t, const void*, size_t) {};
+    // MRD TCP return hook (set by MrdTcpListener, pushes recon messages to
+    // scanner). Returns true if the frame was written to a connected scanner
+    // socket; false when no scanner is connected or the send failed.
+    std::function<bool(uint16_t, const void*, size_t)> mrd_push_message =
+        [](uint16_t, const void*, size_t) { return false; };
 
     // Status hooks for GET /status (set by MrdTcpListener / main; the defaults
     // report "not connected" when the component is absent).

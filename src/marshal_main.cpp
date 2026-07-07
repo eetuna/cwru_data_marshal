@@ -499,7 +499,8 @@ int main(int argc, char** argv)
             ioc, mrd_port, state, forwarder.get());
         // Hook: recon MRD return messages are pushed to the scanner via MRD TCP.
         state.mrd_push_message = [&mrd_listener](uint16_t tag, const void* data, size_t len) {
-            if (mrd_listener) mrd_listener->push_message_to_scanner(tag, data, len);
+            if (!mrd_listener) return false;
+            return mrd_listener->push_message_to_scanner(tag, data, len);
         };
     }
 

@@ -94,6 +94,35 @@ namespace mrd
         return true;
     }
 
+    // Record the slice geometry (position + orientation) carried by an IMAGE
+    // header so the slice-translation command pushed to the scanner can name
+    // the current slice location. Called from BOTH image paths (scanner lane
+    // in mrd_tcp_listener.hpp, recon lane in handle_recon_image) before any
+    // live/dump gating — geometry is tracked in every mode. Cleared at scan
+    // start (METADATA_XML handler).
+    inline void update_slice_geometry(MarshalState &state, const uint8_t *data, size_t size)
+    {
+        if (size < IMAGE_HEADER_BYTES)
+            return;
+        ISMRMRD::ImageHeader hdr{};
+        std::memcpy(&hdr, data, sizeof(ISMRMRD::ImageHeader));
+
+        MarshalState::SliceGeometry g;
+        g.slice = hdr.slice;
+        for (int i = 0; i < 3; ++i)
+        {
+            g.position[i] = hdr.position[i];
+            g.read_dir[i] = hdr.read_dir[i];
+            g.phase_dir[i] = hdr.phase_dir[i];
+            g.slice_dir[i] = hdr.slice_dir[i];
+        }
+        g.ts = iso8601_now_ms();
+
+        std::lock_guard<std::mutex> lk(state.slice_geom_mtx);
+        state.slice_geom[hdr.slice] = std::move(g);
+        state.latest_slice = hdr.slice;
+    }
+
     inline void publish_latest_snapshot(MarshalState &state,
                                         LiveLane lane,
                                         std::string xml,

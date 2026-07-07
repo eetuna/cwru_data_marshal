@@ -80,6 +80,10 @@ static auto text_response(const http::request<Body>& req,
 // ---------------------------------------------------------------------------
 inline void handle_recon_image(MarshalState& state, const void* data, size_t size)
 {
+    // Track slice geometry in every mode (recon lane) — the slice-translation
+    // command pushed to the scanner embeds it.
+    mrd::update_slice_geometry(state, static_cast<const uint8_t*>(data), size);
+
     // Dump mode is exclusive of the live snapshot/history pipeline. Gate
     // purely on the mode flag so a missing dump_recorder does not silently
     // fall back to writing live output.
@@ -255,7 +259,79 @@ static auto handle_put_transform(const http::request<Body>& req, MarshalState& s
 // Command channel: the WebGL client nudges the MRI imaging slice by ±1.
 // Body (JSON): { "client_id": "...", "sent_at": 123, "values": [ ±1 ] }
 // The latest command is cached in memory; GET returns it without clearing.
+// In addition, the command is pushed to the connected scanner as an MRD
+// TEXT (5) message over the live MRD TCP connection, carrying the current
+// slice geometry — see push_slice_command_to_scanner below. The HTTP
+// response reports delivery ("delivered": true|false).
 // ---------------------------------------------------------------------------
+
+// JSON snapshot of the geometry cache. {"latest_slice":-1,"slices":{}} when
+// nothing has been observed yet.
+inline nlohmann::json slice_geometry_json(MarshalState& state)
+{
+    nlohmann::json j;
+    nlohmann::json slices = nlohmann::json::object();
+    std::lock_guard<std::mutex> lk(state.slice_geom_mtx);
+    for (const auto& [idx, g] : state.slice_geom) {
+        slices[std::to_string(idx)] = {
+            {"slice", g.slice},
+            {"position", {g.position[0], g.position[1], g.position[2]}},
+            {"read_dir", {g.read_dir[0], g.read_dir[1], g.read_dir[2]}},
+            {"phase_dir", {g.phase_dir[0], g.phase_dir[1], g.phase_dir[2]}},
+            {"slice_dir", {g.slice_dir[0], g.slice_dir[1], g.slice_dir[2]}},
+            {"ts", g.ts},
+        };
+    }
+    j["latest_slice"] = state.latest_slice;
+    j["slices"] = std::move(slices);
+    return j;
+}
+
+// Build the slice-translation command payload and push it to the scanner as
+// an MRD TEXT (5) frame. Wire format matches python-ismrmrd-server's
+// connection.py read_text(): uint32 LE length, then that many bytes of
+// null-terminated UTF-8 (length includes the terminator). Returns true when
+// the frame was written to a connected scanner.
+inline bool push_slice_command_to_scanner(MarshalState& state, double direction,
+                                          const std::string& ts)
+{
+    nlohmann::json payload;
+    payload["type"] = "slice_translation";
+    payload["direction"] = direction;
+    payload["ts"] = ts;
+    {
+        // Geometry of the most recently seen slice, if any — turns the bare
+        // nudge into a real reposition instruction.
+        nlohmann::json geom;   // null when no image seen yet this scan
+        std::lock_guard<std::mutex> lk(state.slice_geom_mtx);
+        if (state.latest_slice >= 0) {
+            auto it = state.slice_geom.find(
+                static_cast<uint16_t>(state.latest_slice));
+            if (it != state.slice_geom.end()) {
+                const auto& g = it->second;
+                geom = {
+                    {"slice", g.slice},
+                    {"position", {g.position[0], g.position[1], g.position[2]}},
+                    {"read_dir", {g.read_dir[0], g.read_dir[1], g.read_dir[2]}},
+                    {"phase_dir", {g.phase_dir[0], g.phase_dir[1], g.phase_dir[2]}},
+                    {"slice_dir", {g.slice_dir[0], g.slice_dir[1], g.slice_dir[2]}},
+                };
+            }
+        }
+        payload["slice_geometry"] = std::move(geom);
+    }
+
+    const std::string text = payload.dump();
+    const uint32_t wire_len = static_cast<uint32_t>(text.size() + 1); // + NUL
+    std::vector<uint8_t> frame(sizeof(uint32_t) + wire_len);
+    std::memcpy(frame.data(), &wire_len, sizeof(uint32_t));
+    std::memcpy(frame.data() + sizeof(uint32_t), text.data(), text.size());
+    frame[sizeof(uint32_t) + text.size()] = '\0';
+
+    return state.mrd_push_message(mrd::MRD_MESSAGE_TEXT,
+                                  frame.data(), frame.size());
+}
+
 template <class Body>
 static auto handle_post_slice_translation(const http::request<Body>& req, MarshalState& state)
     -> http::response<http::string_body>
@@ -283,13 +359,38 @@ static auto handle_post_slice_translation(const http::request<Body>& req, Marsha
                              {{"error", "values[0] must be +1 or -1"}, {"got", direction}});
     }
 
-    body["ts"] = mrd::iso8601_now_ms();
+    const std::string ts = mrd::iso8601_now_ms();
+    body["ts"] = ts;
     {
         std::lock_guard<std::mutex> lk(state.slice_translation_mtx);
         state.latest_slice_translation_json = body.dump();
     }
+
+    // Push to the scanner over the live MRD connection (best effort — the
+    // cache above is always written; "delivered" tells the UI whether a
+    // connected scanner actually received the command).
+    const bool delivered = push_slice_command_to_scanner(state, direction, ts);
+
     return json_response(req, http::status::ok,
-                         {{"file", "file_slice_translation"}, {"direction", direction}});
+                         {{"file", "file_slice_translation"},
+                          {"direction", direction},
+                          {"delivered", delivered}});
+}
+
+// GET /read/slice_geometry — position/orientation per slice as observed in
+// this scan's image headers (both lanes). 204 until the first image.
+template <class Body>
+static auto handle_get_slice_geometry(const http::request<Body>& req, MarshalState& state)
+    -> http::response<http::string_body>
+{
+    auto j = slice_geometry_json(state);
+    if (j["latest_slice"].get<int>() < 0) {
+        http::response<http::string_body> res{http::status::no_content, req.version()};
+        res.keep_alive(req.keep_alive());
+        res.prepare_payload();
+        return res;
+    }
+    return json_response(req, http::status::ok, j);
 }
 
 template <class Body>
@@ -602,6 +703,10 @@ void handle_http_request(http::request<Body>&& req, MarshalState& state, Send&& 
     if (method == http::verb::get &&
         (target == "/read/file_slice_translation" || target == "/read/file_slice_translation.json")) {
         send(handle_get_slice_translation(req, state));
+        return;
+    }
+    if (method == http::verb::get && target == "/read/slice_geometry") {
+        send(handle_get_slice_geometry(req, state));
         return;
     }
     if (method == http::verb::post && target == "/pose") {
