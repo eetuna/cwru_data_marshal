@@ -5,7 +5,7 @@ WORKDIR /app
 
 # Copy source files
 COPY server.cpp files.json httplib.h json.hpp circularBuffer.hpp ./
-COPY  file1.json file2.json file3.json file_3D_images.json file_biological_signals.json file_catheter_base_configuration.json file_desired_planned_motion.json file_forward_kinematics.json file_localization_data.json file_streaming_2D_images.json file_surface_model_parameters.json file_tip_position_orientation.json file_user_input.json file_rendered_2D_image.json file_force_sensing.json /files/
+COPY  file1.json file2.json file3.json file_3D_images.json file_biological_signals.json file_catheter_base_configuration.json file_desired_planned_motion.json file_forward_kinematics.json file_localization_data.json file_streaming_2D_images.json file_surface_model_parameters.json file_tip_position_orientation.json file_user_input.json file_rendered_2D_image.json file_force_sensing.json saved_transform_1.json /files/
 
 # Build server
 RUN g++ server.cpp -o server -pthread

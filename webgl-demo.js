@@ -56,10 +56,12 @@ async function main() {
   const canvas3D = document.querySelector("#glcanvas");
   const canvas2D = document.querySelector("#canvas2d");
   const canvasSlices3D = document.querySelector("#canvasSlices3d");
+  const canvasSavedTransform = document.querySelector("#canvasSavedTransform");
   const canvasFK = document.querySelector("#canvasFK");
   const gl = canvas3D.getContext("webgl");
   const gl2d = canvas2D.getContext("2d");
   const glSlices = canvasSlices3D ? canvasSlices3D.getContext("webgl") : null;
+  const savedTransformCtx = canvasSavedTransform ? canvasSavedTransform.getContext("2d") : null;
   const glFK = canvasFK.getContext("webgl");
 
   if (gl === null) {
@@ -165,11 +167,61 @@ async function main() {
   let lastFKTimestamp = -1;
   let lastForceTimestamp = -1;
   let currentForceSensingData = null;
+  let savedTransformData = null;
 
   // Create 2D image renderer
   const image2DRenderer = new Image2DRenderer(gl);
 initCurrentSliders();
 initRotationSliders();
+
+  function renderSavedTransformCanvas(ctx, transformData) {
+    if (!ctx) return;
+
+    const { canvas } = ctx;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#050505';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.strokeStyle = '#333';
+    ctx.strokeRect(0.5, 0.5, canvas.width - 1, canvas.height - 1);
+
+    ctx.fillStyle = '#ff66aa';
+    ctx.font = '26px monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillText('saved_transform_1.json', 18, 16);
+
+    if (!transformData) {
+      ctx.fillStyle = '#aaa';
+      ctx.font = '22px monospace';
+      ctx.fillText('No saved transform yet.', 18, 64);
+      return;
+    }
+
+    const pos = Array.isArray(transformData.position) ? transformData.position : null;
+    const ori = transformData.orientation || null;
+    const readDir = ori && Number.isFinite(ori.m00) ? [ori.m00, ori.m10, ori.m20] : null;
+    const phaseDir = ori && Number.isFinite(ori.m01) ? [ori.m01, ori.m11, ori.m21] : null;
+    const sliceDir = ori && Number.isFinite(ori.m02) ? [ori.m02, ori.m12, ori.m22] : null;
+    const px = Array.isArray(transformData.pixelSize) ? transformData.pixelSize : null;
+
+    const lines = [
+      `frame_index: ${transformData.frame_index ?? '-'}`,
+      `saved_at: ${transformData.saved_at ?? '-'}`,
+      pos ? `position: [${pos.map(v => v.toFixed(3)).join(', ')}]` : 'position: missing',
+      readDir ? `read_dir: [${readDir.map(v => v.toFixed(3)).join(', ')}]` : 'read_dir: missing',
+      phaseDir ? `phase_dir: [${phaseDir.map(v => v.toFixed(3)).join(', ')}]` : 'phase_dir: missing',
+      sliceDir ? `slice_dir: [${sliceDir.map(v => v.toFixed(3)).join(', ')}]` : 'slice_dir: missing',
+      px ? `pixelSize: [${px.map(v => v.toFixed(3)).join(', ')}]` : 'pixelSize: missing'
+    ];
+
+    ctx.fillStyle = '#ddd';
+    ctx.font = '20px monospace';
+    lines.forEach((line, idx) => {
+      ctx.fillText(line, 18, 64 + idx * 34);
+    });
+  }
+
+  renderSavedTransformCanvas(savedTransformCtx, savedTransformData);
   // Create volume slices from 3D data
   function createVolumeSlices(volumeData, maxSlices = 16) {
     const { width, height, depth, values, step } = volumeData;
@@ -607,6 +659,48 @@ initRotationSliders();
     } catch (error) {
       console.error('Error posting slice thickness:', error);
       updateStatus('debug', `✗ Failed to post slice thickness: ${error.message}`);
+    }
+  }
+
+  async function postSavedTransformToServer(imageData) {
+    const pos = Array.isArray(imageData?.position) && imageData.position.length === 3 ? imageData.position : null;
+    const ori = imageData?.orientation || null;
+
+    if (!(pos && ori)) {
+      updateStatus('savedTransformStatus', 'Missing image header pose');
+      updateStatus('debug', 'Cannot save transform: latest image header pose missing');
+      return;
+    }
+
+    const payload = {
+      client_id: clientId,
+      saved_at: new Date().toISOString(),
+      image_timestamp: imageData.timestamp ?? null,
+      frame_index: imageData.frame_index ?? null,
+      position: imageData.position,
+      orientation: imageData.orientation,
+      pixelSize: imageData.pixelSize ?? null
+    };
+
+    try {
+      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/14`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+      savedTransformData = payload;
+      renderSavedTransformCanvas(savedTransformCtx, savedTransformData);
+      updateStatus('savedTransformStatus', `Saved frame ${payload.frame_index ?? '-'} to saved_transform_1.json`);
+      updateStatus('debug', `Saved transform pos=(${pos.map(v => v.toFixed(2)).join(', ')})`);
+    } catch (error) {
+      console.error('Error posting saved transform:', error);
+      updateStatus('savedTransformStatus', `Save failed: ${error.message}`);
+      updateStatus('debug', `✗ Failed to save transform: ${error.message}`);
     }
   }
 
@@ -1541,6 +1635,7 @@ initRotationSliders();
 
   const slicePlusBtn = document.getElementById('slicePlusBtn');
   const sliceMinusBtn = document.getElementById('sliceMinusBtn');
+  const savePositionBtn = document.getElementById('savePositionBtn');
   const rotXSlider = document.getElementById('sliderRotX');
   const rotYSlider = document.getElementById('sliderRotY');
   const rotZSlider = document.getElementById('sliderRotZ');
@@ -1559,6 +1654,12 @@ initRotationSliders();
   if (sliceMinusBtn) {
     sliceMinusBtn.addEventListener('click', () => {
       postSliceTranslationToServer(-1);
+    });
+  }
+
+  if (savePositionBtn) {
+    savePositionBtn.addEventListener('click', async () => {
+      await postSavedTransformToServer(currentImageData);
     });
   }
 

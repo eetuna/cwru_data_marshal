@@ -16,5 +16,6 @@
     "file_updated_force_sensing_from_server.json",
     "file_user_input.json",
     "file_force_sensing.json",
-    "file_slice_translation.json"
+    "file_slice_translation.json",
+    "saved_transform_1.json"
 ]

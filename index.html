@@ -49,6 +49,11 @@
         cursor: crosshair;
       }
 
+      #canvasSavedTransform {
+        border: 2px solid #ff66aa;
+        background-color: black;
+      }
+
       #canvas2d {
         border: 2px solid #00ff00;
         background-color: black;
@@ -216,6 +221,35 @@
         font-size: 28px;
         color: #00ccff;
       }
+
+      .save-transform-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .save-transform-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      #savePositionBtn {
+        font-size: 28px;
+        font-weight: bold;
+        color: #111;
+        background-color: #ffd43b;
+        border: none;
+        border-radius: 6px;
+        padding: 10px 16px;
+        cursor: pointer;
+      }
+
+      #savePositionBtn:disabled {
+        background-color: #666;
+        color: #222;
+        cursor: not-allowed;
+      }
     </style>
     <script src="gl-matrix-min.js"></script>
     <script src="webgl-demo.js" type="module"></script>
@@ -235,6 +269,13 @@
       <div class="canvas-section">
         <h2>3D Slice History</h2>
         <canvas id="canvasSlices3d" width="960" height="720"></canvas>
+      </div>
+      <div class="canvas-section save-transform-panel">
+        <h2>Saved Transform</h2>
+        <div class="save-transform-actions">
+          <button id="savePositionBtn" type="button">Save Position</button>
+        </div>
+        <canvas id="canvasSavedTransform" width="960" height="320"></canvas>
       </div>
       <div class="canvas-section">
         <div style="display: flex; gap: 10px;">
@@ -325,6 +366,7 @@
       <p><strong>Force Sensing:</strong> <span id="forceSensing" style="color: #ff9900;">Waiting...</span></p>
       <p><strong>Forward Kinematics:</strong> <span id="fwdKinematics" style="color: #00ccff;">Waiting...</span></p>
       <p><strong>FK Control Points:</strong> <span id="fkCtrlPts" style="color: #00ccff;">Waiting...</span></p>
+      <p><strong>Saved Transform:</strong> <span id="savedTransformStatus" style="color: #ff66aa;">Waiting...</span></p>
       <p><strong>Debug Info:</strong> <span id="debug"></span></p>
       <p><strong>Selected Point:</strong> <span id="selectedPoint">None</span></p>
       <p><strong>Point Value:</strong> <span id="pointValue">-</span></p>
