@@ -245,6 +245,15 @@ curl -s -X POST localhost:8080/write/slice_target \
 > scanner connection. Without Terminal 1 running, the same POST returns
 > `"delivered":false` — command cached, no scanner to receive it.
 
+The relative command works the same way (rerun Terminal 1 first):
+```bash
+curl -s -X POST localhost:8080/write/slice_delta \
+  -d '{"translation_mm":[1.5,0,-2],"rotation_rad":[0,0.1,0]}'
+```
+> You'll see: `{"delivered":true,...}` and Terminal 1 prints
+> `TEXT_RECEIVED:{"type":"slice_delta",...}` — or `"delivered":false`
+> without Terminal 1.
+
 Knobs for 5b–5d: `--fps N` (pace) · `--frames N` (how many; 0 = until Ctrl-C)
 · `--matrix N` (image size) · `--slices N` (multislice) ·
 `--mode kspace|image` (through recon | straight to viewer).
