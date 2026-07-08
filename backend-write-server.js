@@ -100,6 +100,8 @@ app.post('/api/write/:clientId/:fileKey', async (req, res) => {
       fileName = clientRoutes.write_to14;
     } else if (fileKey === '14') {
       fileName = clientRoutes.write_to15;
+    } else if (fileKey === '15') {
+      fileName = clientRoutes.write_to16;
     }  else {
       console.warn(`[Backend Write Server] Invalid fileKey: ${fileKey}`);
       return res.status(400).json({ error: `Invalid fileKey: ${fileKey}` });
@@ -124,7 +126,8 @@ app.post('/api/write/:clientId/:fileKey', async (req, res) => {
       'file_slice_pose_transform',
       'file_slice_pose_transform.json',
       'file_slice_thickness',
-      'file_slice_thickness.json'
+      'file_slice_thickness.json',
+      'slice_target'
     ]);
     const isMriWrite = mriWriteKeys.has(fileName);
     const targetServer = isMriWrite ? MRI_MARSHAL_SERVER : DATA_MARSHAL_SERVER;

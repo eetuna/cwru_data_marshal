@@ -234,6 +234,23 @@
         gap: 10px;
       }
 
+      #sendAbsolutePositionBtn {
+        font-size: 28px;
+        font-weight: bold;
+        color: #111;
+        background-color: #51cf66;
+        border: none;
+        border-radius: 6px;
+        padding: 10px 16px;
+        cursor: pointer;
+      }
+
+      #sendAbsolutePositionBtn:disabled {
+        background-color: #666;
+        color: #222;
+        cursor: not-allowed;
+      }
+
       #savePositionBtn {
         font-size: 28px;
         font-weight: bold;
@@ -274,6 +291,7 @@
         <h2>Saved Transform</h2>
         <div class="save-transform-actions">
           <button id="savePositionBtn" type="button">Save Position</button>
+          <button id="sendAbsolutePositionBtn" type="button" disabled>Send Absolute Position</button>
         </div>
         <canvas id="canvasSavedTransform" width="960" height="320"></canvas>
       </div>

@@ -674,6 +674,12 @@ initRotationSliders();
 
     const payload = {
       client_id: clientId,
+      sent_at: Date.now(),
+      // Robot marshal requires a values array on every write payload.
+      values: [
+        ...(Array.isArray(imageData.position) ? imageData.position : []),
+        ...(Number.isFinite(ori?.m00) ? [ori.m00, ori.m01, ori.m02, ori.m10, ori.m11, ori.m12, ori.m20, ori.m21, ori.m22] : [])
+      ],
       saved_at: new Date().toISOString(),
       image_timestamp: imageData.timestamp ?? null,
       frame_index: imageData.frame_index ?? null,
@@ -695,12 +701,60 @@ initRotationSliders();
 
       savedTransformData = payload;
       renderSavedTransformCanvas(savedTransformCtx, savedTransformData);
+      const sendAbsolutePositionBtn = document.getElementById('sendAbsolutePositionBtn');
+      if (sendAbsolutePositionBtn) {
+        sendAbsolutePositionBtn.disabled = false;
+      }
       updateStatus('savedTransformStatus', `Saved frame ${payload.frame_index ?? '-'} to saved_transform_1.json`);
       updateStatus('debug', `Saved transform pos=(${pos.map(v => v.toFixed(2)).join(', ')})`);
     } catch (error) {
       console.error('Error posting saved transform:', error);
       updateStatus('savedTransformStatus', `Save failed: ${error.message}`);
       updateStatus('debug', `✗ Failed to save transform: ${error.message}`);
+    }
+  }
+
+  async function postSavedTransformToSliceTarget(transformData) {
+    const pos = Array.isArray(transformData?.position) && transformData.position.length === 3 ? transformData.position : null;
+    const ori = transformData?.orientation || null;
+
+    if (!(pos && ori)) {
+      updateStatus('savedTransformStatus', 'No saved transform available');
+      updateStatus('debug', 'Cannot send absolute position: saved transform missing');
+      return;
+    }
+
+    const readDir = [ori.m00, ori.m10, ori.m20];
+    const phaseDir = [ori.m01, ori.m11, ori.m21];
+    const sliceDir = [ori.m02, ori.m12, ori.m22];
+
+    const payload = {
+      position: pos,
+      read_dir: readDir,
+      phase_dir: phaseDir,
+      slice_dir: sliceDir
+    };
+
+    try {
+      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/15`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const result = await response.json();
+      updateStatus('savedTransformStatus', `Sent absolute position to slice_target (${result.delivered ? 'delivered' : 'cached'})`);
+      updateStatus('debug', `Sent absolute slice target pos=(${pos.map(v => v.toFixed(2)).join(', ')})`);
+    } catch (error) {
+      console.error('Error posting absolute position:', error);
+      updateStatus('savedTransformStatus', `Send failed: ${error.message}`);
+      updateStatus('debug', `✗ Failed to send absolute position: ${error.message}`);
     }
   }
 
@@ -1636,6 +1690,7 @@ initRotationSliders();
   const slicePlusBtn = document.getElementById('slicePlusBtn');
   const sliceMinusBtn = document.getElementById('sliceMinusBtn');
   const savePositionBtn = document.getElementById('savePositionBtn');
+  const sendAbsolutePositionBtn = document.getElementById('sendAbsolutePositionBtn');
   const rotXSlider = document.getElementById('sliderRotX');
   const rotYSlider = document.getElementById('sliderRotY');
   const rotZSlider = document.getElementById('sliderRotZ');
@@ -1660,6 +1715,13 @@ initRotationSliders();
   if (savePositionBtn) {
     savePositionBtn.addEventListener('click', async () => {
       await postSavedTransformToServer(currentImageData);
+    });
+  }
+
+  if (sendAbsolutePositionBtn) {
+    sendAbsolutePositionBtn.disabled = !savedTransformData;
+    sendAbsolutePositionBtn.addEventListener('click', async () => {
+      await postSavedTransformToSliceTarget(savedTransformData);
     });
   }
 

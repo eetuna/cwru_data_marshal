@@ -53,7 +53,8 @@
       "write_to12": "file_z_rotation.json",
       "write_to13": "file_slice_pose_transform.json",
       "write_to14": "file_slice_thickness.json",
-      "write_to15": "saved_transform_1.json"
+      "write_to15": "saved_transform_1.json",
+      "write_to16": "slice_target"
     },
     "client-force-sensor": {
       "read_from": "file_forward_kinematics.json",
