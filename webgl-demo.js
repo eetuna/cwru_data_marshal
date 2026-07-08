@@ -627,6 +627,30 @@ initRotationSliders();
   }
 
   // Fetch 2D image from server
+  function formatHeaderPoseForDebug(data) {
+    const pos = Array.isArray(data?.position) && data.position.length === 3 ? data.position : null;
+    const ori = data?.orientation || null;
+    const px = Array.isArray(data?.pixelSize) && data.pixelSize.length >= 2 ? data.pixelSize : null;
+
+    const readDir = (ori && Number.isFinite(ori.m00) && Number.isFinite(ori.m10) && Number.isFinite(ori.m20))
+      ? [ori.m00, ori.m10, ori.m20] : null;
+    const phaseDir = (ori && Number.isFinite(ori.m01) && Number.isFinite(ori.m11) && Number.isFinite(ori.m21))
+      ? [ori.m01, ori.m11, ori.m21] : null;
+    const sliceDir = (ori && Number.isFinite(ori.m02) && Number.isFinite(ori.m12) && Number.isFinite(ori.m22))
+      ? [ori.m02, ori.m12, ori.m22] : null;
+
+    if (!(pos && readDir && phaseDir && sliceDir)) {
+      return `header pose missing (frame ${data?.frame_index ?? '-'})`;
+    }
+
+    const posStr = `pos=(${pos[0].toFixed(2)}, ${pos[1].toFixed(2)}, ${pos[2].toFixed(2)})`;
+    const readStr = `read=(${readDir[0].toFixed(3)}, ${readDir[1].toFixed(3)}, ${readDir[2].toFixed(3)})`;
+    const phaseStr = `phase=(${phaseDir[0].toFixed(3)}, ${phaseDir[1].toFixed(3)}, ${phaseDir[2].toFixed(3)})`;
+    const sliceStr = `slice=(${sliceDir[0].toFixed(3)}, ${sliceDir[1].toFixed(3)}, ${sliceDir[2].toFixed(3)})`;
+    const pxStr = px ? ` px=(${px[0].toFixed(3)}, ${px[1].toFixed(3)})` : '';
+    return `frame ${data?.frame_index ?? '-'} ${posStr} ${readStr} ${phaseStr} ${sliceStr}${pxStr}`;
+  }
+
   async function updateTextureFromServer() {
     //postWillRender2DImageToServer(data);
     try {
@@ -657,6 +681,9 @@ initRotationSliders();
             pixelSize: data.pixelSize
           };
           image2DRenderer.updateImage(data.values, data.width, data.height, metadata);
+
+          // Surface the image-header pose in the UI debug line for live verification.
+          updateStatus('debug', formatHeaderPoseForDebug(data));
           
           updateStatus('status2d', `✓ last ${Math.min(currentImageHistory.length, 3)} slices (${data.width}x${data.height})`);
           return true;
