@@ -1963,7 +1963,7 @@ initRotationSliders();
   await updateTextureFromServer();
   await updateVolumeFromServer();
 
-  // Load chest surface mesh from static file
+  // Load chest surface mesh from static file (currently disabled)
   let meshBuffers = null;
   async function loadMesh() {
     const meshUrls = [
@@ -1995,7 +1995,8 @@ initRotationSliders();
     updateStatus('status3d', `✗ mesh load failed (${lastError ? lastError.message : 'unknown'})`);
   }
 
-  await loadMesh();
+  // Mesh loading disabled to avoid startup 404s when OFF file is unavailable.
+  // await loadMesh();
 
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
@@ -2053,7 +2054,7 @@ initRotationSliders();
 
     // renderVolumeCube(gl, programInfo, volumeSlices);
     renderLatest2DSliceIn3D(gl, programInfo, currentImageData);
-    renderMesh(gl, meshProgramInfo, meshBuffers);
+    // renderMesh(gl, meshProgramInfo, meshBuffers);
 
     if (glSlices && sliceProgramInfo) {
       glSlices.clearColor(0.0, 0.0, 0.0, 1.0);
