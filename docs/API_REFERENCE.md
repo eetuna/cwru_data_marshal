@@ -217,6 +217,18 @@ Absolute slice prescription from the UI: "put the slice exactly here, facing thi
 
 Returns the last cached prescription (non-consuming); `204 No Content` before the first POST.
 
+#### POST /write/slice_delta
+
+Relative slice move — the command style for incremental UI buttons. Body (at least one field; the other defaults to zeros):
+```json
+{"translation_mm": [1.5, 0, -2.0], "rotation_rad": [0, 0.1, 0]}
+```
+Translation in scanner-frame mm; rotation in radians about the slice's read/phase/slice axes (convention to be pinned to the scanner-side slice control API when available). Pushed to the scanner as `{"type": "slice_delta", "translation_mm": ..., "rotation_rad": ..., "slice_geometry": {...current geometry, the base of the move...}, "ts": ...}`. Returns `{"file": "slice_delta", "delivered": true|false}`.
+
+#### GET /read/slice_delta
+
+Returns the last cached delta (non-consuming); `204 No Content` before the first POST.
+
 #### GET /read/slice_geometry
 
 Position + orientation per slice index as observed in the current scan's image headers (both lanes — scanner-sent and recon-returned images). Cleared at each scan start; `204 No Content` until the first image. Response:

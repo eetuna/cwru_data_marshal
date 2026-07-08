@@ -46,9 +46,23 @@ POST http://mri-marshal:8080/write/slice_target
   prescription; or run `scripts/slice_command_mock_scanner.py` as a fake
   scanner and watch it print the received command (QUICK_START 5f).
 
-**Planned:** once `slice_target` is integrated in the UI, the ±1 translation
-endpoint becomes redundant and will be removed — treat `slice_target` as the
-long-term interface.
+**Relative controls (added 2026-07-08, deployed):** if your buttons make
+incremental moves (translate a bit / rotate a bit), post them as-is:
+
+```
+POST http://mri-marshal:8080/write/slice_delta
+{"translation_mm": [dx, dy, dz], "rotation_rad": [rx, ry, rz]}
+```
+
+Either field alone is fine (the other defaults to zero). The scanner receives
+the deltas together with the current slice geometry as the base of the move.
+Recommended UI shape: **relative buttons for normal use + an absolute "reset"
+using `slice_target`** (seeded from `GET /read/slice_geometry`) to snap the
+slice back to a known state if anything gets out of sync.
+
+**Planned:** once `slice_target` is integrated in the UI, the ±1
+`file_slice_translation` endpoint becomes redundant and will be removed —
+`slice_delta` and `slice_target` are the long-term pair.
 
 ---
 
