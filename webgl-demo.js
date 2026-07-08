@@ -53,7 +53,12 @@ function initRotationSliders() {
 main();
 
 async function main() {
-  const canvas3D = document.querySelector("#glcanvas");
+  const canvas3DEl = document.querySelector("#glcanvas");
+  const canvas3D = canvas3DEl || document.createElement('canvas');
+  if (!canvas3DEl) {
+    canvas3D.width = 1280;
+    canvas3D.height = 960;
+  }
   const canvas2D = document.querySelector("#canvas2d");
   const canvasSlices3D = document.querySelector("#canvasSlices3d");
   const savedTransformCanvases = [
@@ -61,7 +66,12 @@ async function main() {
     document.querySelector("#canvasSavedTransform2"),
     document.querySelector("#canvasSavedTransform3")
   ];
-  const canvasFK = document.querySelector("#canvasFK");
+  const canvasFKEl = document.querySelector("#canvasFK");
+  const canvasFK = canvasFKEl || document.createElement('canvas');
+  if (!canvasFKEl) {
+    canvasFK.width = 960;
+    canvasFK.height = 720;
+  }
   const gl = canvas3D.getContext("webgl");
   const gl2d = canvas2D.getContext("2d");
   const glSlices = canvasSlices3D ? canvasSlices3D.getContext("webgl") : null;
