@@ -56,12 +56,16 @@ async function main() {
   const canvas3D = document.querySelector("#glcanvas");
   const canvas2D = document.querySelector("#canvas2d");
   const canvasSlices3D = document.querySelector("#canvasSlices3d");
-  const canvasSavedTransform = document.querySelector("#canvasSavedTransform");
+  const savedTransformCanvases = [
+    document.querySelector("#canvasSavedTransform1"),
+    document.querySelector("#canvasSavedTransform2"),
+    document.querySelector("#canvasSavedTransform3")
+  ];
   const canvasFK = document.querySelector("#canvasFK");
   const gl = canvas3D.getContext("webgl");
   const gl2d = canvas2D.getContext("2d");
   const glSlices = canvasSlices3D ? canvasSlices3D.getContext("webgl") : null;
-  const savedTransformCtx = canvasSavedTransform ? canvasSavedTransform.getContext("2d") : null;
+  const savedTransformCtxs = savedTransformCanvases.map((canvas) => canvas ? canvas.getContext("2d") : null);
   const glFK = canvasFK.getContext("webgl");
 
   if (gl === null) {
@@ -167,14 +171,14 @@ async function main() {
   let lastFKTimestamp = -1;
   let lastForceTimestamp = -1;
   let currentForceSensingData = null;
-  let savedTransformData = null;
+  let savedTransformDataBySlot = [null, null, null];
 
   // Create 2D image renderer
   const image2DRenderer = new Image2DRenderer(gl);
 initCurrentSliders();
 initRotationSliders();
 
-  function renderSavedTransformCanvas(ctx, transformData) {
+  function renderSavedTransformCanvas(ctx, transformData, slotIndex) {
     if (!ctx) return;
 
     const { canvas } = ctx;
@@ -188,7 +192,7 @@ initRotationSliders();
     ctx.fillStyle = '#ff66aa';
     ctx.font = '26px monospace';
     ctx.textBaseline = 'top';
-    ctx.fillText('saved_transform_1.json', 18, 16);
+    ctx.fillText(`saved_transform_${slotIndex + 1}.json`, 18, 16);
 
     if (!transformData) {
       ctx.fillStyle = '#aaa';
@@ -204,6 +208,58 @@ initRotationSliders();
     const sliceDir = ori && Number.isFinite(ori.m02) ? [ori.m02, ori.m12, ori.m22] : null;
     const px = Array.isArray(transformData.pixelSize) ? transformData.pixelSize : null;
 
+    const imageWidth = Number.isFinite(transformData.image_width) ? transformData.image_width : null;
+    const imageHeight = Number.isFinite(transformData.image_height) ? transformData.image_height : null;
+    const imageValues = Array.isArray(transformData.image_values) ? transformData.image_values : null;
+
+    const drawImageFromValues = () => {
+      if (!(imageWidth && imageHeight && imageValues && imageValues.length)) {
+        ctx.fillStyle = '#222';
+        ctx.fillRect(18, 64, canvas.width - 36, 208);
+        ctx.fillStyle = '#888';
+        ctx.font = '20px monospace';
+        ctx.fillText('No saved image snapshot.', 30, 124);
+        return;
+      }
+
+      let minValue = Infinity;
+      let maxValue = -Infinity;
+      for (let i = 0; i < imageValues.length; i++) {
+        if (imageValues[i] < minValue) minValue = imageValues[i];
+        if (imageValues[i] > maxValue) maxValue = imageValues[i];
+      }
+      const range = maxValue - minValue > 0.001 ? maxValue - minValue : 1.0;
+
+      const rgbaData = new Uint8ClampedArray(imageWidth * imageHeight * 4);
+      for (let i = 0; i < imageValues.length; i++) {
+        const normalized = (imageValues[i] - minValue) / range;
+        const value = Math.min(1.0, Math.max(0.0, normalized));
+        const byteValue = Math.round(value * 255);
+        rgbaData[i * 4] = byteValue;
+        rgbaData[i * 4 + 1] = byteValue;
+        rgbaData[i * 4 + 2] = byteValue;
+        rgbaData[i * 4 + 3] = 255;
+      }
+
+      const tmpCanvas = document.createElement('canvas');
+      tmpCanvas.width = imageWidth;
+      tmpCanvas.height = imageHeight;
+      const tmpCtx = tmpCanvas.getContext('2d');
+      if (!tmpCtx) return;
+      tmpCtx.putImageData(new ImageData(rgbaData, imageWidth, imageHeight), 0, 0);
+
+      const imageAreaX = 18;
+      const imageAreaY = 64;
+      const imageAreaWidth = canvas.width - 36;
+      const imageAreaHeight = 208;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(tmpCanvas, 0, 0, imageWidth, imageHeight, imageAreaX, imageAreaY, imageAreaWidth, imageAreaHeight);
+      ctx.strokeStyle = '#666';
+      ctx.strokeRect(imageAreaX + 0.5, imageAreaY + 0.5, imageAreaWidth - 1, imageAreaHeight - 1);
+    };
+
+    drawImageFromValues();
+
     const lines = [
       `frame_index: ${transformData.frame_index ?? '-'}`,
       `saved_at: ${transformData.saved_at ?? '-'}`,
@@ -214,14 +270,19 @@ initRotationSliders();
       px ? `pixelSize: [${px.map(v => v.toFixed(3)).join(', ')}]` : 'pixelSize: missing'
     ];
 
-    ctx.fillStyle = '#ddd';
     ctx.font = '20px monospace';
     lines.forEach((line, idx) => {
-      ctx.fillText(line, 18, 64 + idx * 34);
+      const y = 72 + idx * 28;
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+      ctx.fillRect(26, y - 2, canvas.width - 52, 24);
+      ctx.fillStyle = '#f5f5f5';
+      ctx.fillText(line, 32, y);
     });
   }
 
-  renderSavedTransformCanvas(savedTransformCtx, savedTransformData);
+  savedTransformCtxs.forEach((ctx, idx) => {
+    renderSavedTransformCanvas(ctx, savedTransformDataBySlot[idx], idx);
+  });
   // Create volume slices from 3D data
   function createVolumeSlices(volumeData, maxSlices = 16) {
     const { width, height, depth, values, step } = volumeData;
@@ -662,12 +723,15 @@ initRotationSliders();
     }
   }
 
-  async function postSavedTransformToServer(imageData) {
+  const savedTransformWriteFileKeys = [14, 16, 18];
+  const sliceTargetWriteFileKeys = [15, 17, 19];
+
+  async function postSavedTransformToServer(slotIndex, imageData) {
     const pos = Array.isArray(imageData?.position) && imageData.position.length === 3 ? imageData.position : null;
     const ori = imageData?.orientation || null;
 
     if (!(pos && ori)) {
-      updateStatus('savedTransformStatus', 'Missing image header pose');
+      updateStatus(`savedTransformStatus${slotIndex + 1}`, 'Missing image header pose');
       updateStatus('debug', 'Cannot save transform: latest image header pose missing');
       return;
     }
@@ -685,11 +749,14 @@ initRotationSliders();
       frame_index: imageData.frame_index ?? null,
       position: imageData.position,
       orientation: imageData.orientation,
-      pixelSize: imageData.pixelSize ?? null
+      pixelSize: imageData.pixelSize ?? null,
+      image_width: imageData.width ?? null,
+      image_height: imageData.height ?? null,
+      image_values: Array.isArray(imageData.values) ? [...imageData.values] : null
     };
 
     try {
-      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/14`, {
+      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/${savedTransformWriteFileKeys[slotIndex]}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -699,27 +766,27 @@ initRotationSliders();
 
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
 
-      savedTransformData = payload;
-      renderSavedTransformCanvas(savedTransformCtx, savedTransformData);
-      const sendAbsolutePositionBtn = document.getElementById('sendAbsolutePositionBtn');
+      savedTransformDataBySlot[slotIndex] = payload;
+      renderSavedTransformCanvas(savedTransformCtxs[slotIndex], savedTransformDataBySlot[slotIndex], slotIndex);
+      const sendAbsolutePositionBtn = document.getElementById(`sendAbsolutePositionBtn${slotIndex + 1}`);
       if (sendAbsolutePositionBtn) {
         sendAbsolutePositionBtn.disabled = false;
       }
-      updateStatus('savedTransformStatus', `Saved frame ${payload.frame_index ?? '-'} to saved_transform_1.json`);
-      updateStatus('debug', `Saved transform pos=(${pos.map(v => v.toFixed(2)).join(', ')})`);
+      updateStatus(`savedTransformStatus${slotIndex + 1}`, `Saved frame ${payload.frame_index ?? '-'} to saved_transform_${slotIndex + 1}.json`);
+      updateStatus('debug', `Saved transform ${slotIndex + 1} pos=(${pos.map(v => v.toFixed(2)).join(', ')})`);
     } catch (error) {
       console.error('Error posting saved transform:', error);
-      updateStatus('savedTransformStatus', `Save failed: ${error.message}`);
-      updateStatus('debug', `✗ Failed to save transform: ${error.message}`);
+      updateStatus(`savedTransformStatus${slotIndex + 1}`, `Save failed: ${error.message}`);
+      updateStatus('debug', `✗ Failed to save transform ${slotIndex + 1}: ${error.message}`);
     }
   }
 
-  async function postSavedTransformToSliceTarget(transformData) {
+  async function postSavedTransformToSliceTarget(slotIndex, transformData) {
     const pos = Array.isArray(transformData?.position) && transformData.position.length === 3 ? transformData.position : null;
     const ori = transformData?.orientation || null;
 
     if (!(pos && ori)) {
-      updateStatus('savedTransformStatus', 'No saved transform available');
+      updateStatus(`savedTransformStatus${slotIndex + 1}`, 'No saved transform available');
       updateStatus('debug', 'Cannot send absolute position: saved transform missing');
       return;
     }
@@ -736,7 +803,7 @@ initRotationSliders();
     };
 
     try {
-      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/15`, {
+      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/${sliceTargetWriteFileKeys[slotIndex]}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -749,12 +816,12 @@ initRotationSliders();
       }
 
       const result = await response.json();
-      updateStatus('savedTransformStatus', `Sent absolute position to slice_target (${result.delivered ? 'delivered' : 'cached'})`);
-      updateStatus('debug', `Sent absolute slice target pos=(${pos.map(v => v.toFixed(2)).join(', ')})`);
+      updateStatus(`savedTransformStatus${slotIndex + 1}`, `Sent absolute position to slice_target (${result.delivered ? 'delivered' : 'cached'})`);
+      updateStatus('debug', `Sent absolute slice target ${slotIndex + 1} pos=(${pos.map(v => v.toFixed(2)).join(', ')})`);
     } catch (error) {
       console.error('Error posting absolute position:', error);
-      updateStatus('savedTransformStatus', `Send failed: ${error.message}`);
-      updateStatus('debug', `✗ Failed to send absolute position: ${error.message}`);
+      updateStatus(`savedTransformStatus${slotIndex + 1}`, `Send failed: ${error.message}`);
+      updateStatus('debug', `✗ Failed to send absolute position ${slotIndex + 1}: ${error.message}`);
     }
   }
 
@@ -1689,8 +1756,16 @@ initRotationSliders();
 
   const slicePlusBtn = document.getElementById('slicePlusBtn');
   const sliceMinusBtn = document.getElementById('sliceMinusBtn');
-  const savePositionBtn = document.getElementById('savePositionBtn');
-  const sendAbsolutePositionBtn = document.getElementById('sendAbsolutePositionBtn');
+  const savePositionButtons = [
+    document.getElementById('savePositionBtn1'),
+    document.getElementById('savePositionBtn2'),
+    document.getElementById('savePositionBtn3')
+  ];
+  const sendAbsolutePositionButtons = [
+    document.getElementById('sendAbsolutePositionBtn1'),
+    document.getElementById('sendAbsolutePositionBtn2'),
+    document.getElementById('sendAbsolutePositionBtn3')
+  ];
   const rotXSlider = document.getElementById('sliderRotX');
   const rotYSlider = document.getElementById('sliderRotY');
   const rotZSlider = document.getElementById('sliderRotZ');
@@ -1712,17 +1787,22 @@ initRotationSliders();
     });
   }
 
-  if (savePositionBtn) {
-    savePositionBtn.addEventListener('click', async () => {
-      await postSavedTransformToServer(currentImageData);
-    });
-  }
+  for (let i = 0; i < 3; i++) {
+    const saveBtn = savePositionButtons[i];
+    const sendBtn = sendAbsolutePositionButtons[i];
 
-  if (sendAbsolutePositionBtn) {
-    sendAbsolutePositionBtn.disabled = !savedTransformData;
-    sendAbsolutePositionBtn.addEventListener('click', async () => {
-      await postSavedTransformToSliceTarget(savedTransformData);
-    });
+    if (saveBtn) {
+      saveBtn.addEventListener('click', async () => {
+        await postSavedTransformToServer(i, currentImageData);
+      });
+    }
+
+    if (sendBtn) {
+      sendBtn.disabled = !savedTransformDataBySlot[i];
+      sendBtn.addEventListener('click', async () => {
+        await postSavedTransformToSliceTarget(i, savedTransformDataBySlot[i]);
+      });
+    }
   }
 
   if (sliceThicknessSlider && sliceThicknessVal) {

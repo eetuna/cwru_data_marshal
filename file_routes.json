@@ -54,7 +54,11 @@
       "write_to13": "file_slice_pose_transform.json",
       "write_to14": "file_slice_thickness.json",
       "write_to15": "saved_transform_1.json",
-      "write_to16": "slice_target"
+      "write_to16": "slice_target",
+      "write_to17": "saved_transform_2.json",
+      "write_to18": "slice_target",
+      "write_to19": "saved_transform_3.json",
+      "write_to20": "slice_target"
     },
     "client-force-sensor": {
       "read_from": "file_forward_kinematics.json",
