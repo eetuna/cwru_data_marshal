@@ -43,6 +43,12 @@
         cursor: crosshair;
       }
 
+      #canvasSlices3d {
+        border: 2px solid #ffcc00;
+        background-color: black;
+        cursor: crosshair;
+      }
+
       #canvas2d {
         border: 2px solid #00ff00;
         background-color: black;
@@ -227,6 +233,10 @@
         <canvas id="glcanvas" width="1280" height="960"></canvas>
       </div>
       <div class="canvas-section">
+        <h2>3D Slice History</h2>
+        <canvas id="canvasSlices3d" width="960" height="720"></canvas>
+      </div>
+      <div class="canvas-section">
         <div style="display: flex; gap: 10px;">
           <div>
             <h2>Forward Kinematics Control Points</h2>
@@ -310,6 +320,7 @@
       <p><strong>Canvas Status:</strong> <span id="status">Initializing...</span></p>
       <p><strong>2D Image (Left):</strong> <span id="status2d">Loading...</span></p>
       <p><strong>3D Volume (Right):</strong> <span id="status3d">Loading...</span></p>
+      <p><strong>3D Slice History:</strong> <span id="status3dSlices">Loading...</span></p>
       <p><strong>Tip Position / Orientation:</strong> <span id="tipPose" style="color: #ffcc00;">Waiting...</span></p>
       <p><strong>Force Sensing:</strong> <span id="forceSensing" style="color: #ff9900;">Waiting...</span></p>
       <p><strong>Forward Kinematics:</strong> <span id="fwdKinematics" style="color: #00ccff;">Waiting...</span></p>

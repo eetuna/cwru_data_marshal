@@ -5,9 +5,17 @@ let deltaTime = 0;
 let mouseRotationX = 0.0;
 let mouseRotationY = 0.0;
 let mouseRotationZ = 0.0;
+let volumeZoom = -6.0;
+let sliceHistoryZoom = -90.0;
 let isMouseDown = false;
 let lastMouseX = 0;
 let lastMouseY = 0;
+let sliceHistoryRotationX = -0.3;
+let sliceHistoryRotationY = 0.4;
+let sliceHistoryRotationZ = 0.0;
+let isSliceHistoryMouseDown = false;
+let lastSliceHistoryMouseX = 0;
+let lastSliceHistoryMouseY = 0;
 function initCurrentSliders() {
   for (let i = 1; i <= 6; i++) {
     const slider = document.getElementById(`sliderI${i}`);
@@ -47,9 +55,11 @@ main();
 async function main() {
   const canvas3D = document.querySelector("#glcanvas");
   const canvas2D = document.querySelector("#canvas2d");
+  const canvasSlices3D = document.querySelector("#canvasSlices3d");
   const canvasFK = document.querySelector("#canvasFK");
   const gl = canvas3D.getContext("webgl");
   const gl2d = canvas2D.getContext("2d");
+  const glSlices = canvasSlices3D ? canvasSlices3D.getContext("webgl") : null;
   const glFK = canvasFK.getContext("webgl");
 
   if (gl === null) {
@@ -60,6 +70,10 @@ async function main() {
   if (glFK === null) {
     alert("Unable to initialize WebGL for FK canvas.");
     return;
+  }
+
+  if (canvasSlices3D && glSlices === null) {
+    updateStatus('status3dSlices', '✗ WebGL init failed');
   }
 
   // FK canvas mouse rotation state (independent from 3D volume)
@@ -122,6 +136,20 @@ async function main() {
       uSampler: gl.getUniformLocation(shaderProgram, "uSampler"),
     },
   };
+
+  const sliceShaderProgram = glSlices ? initShaderProgram(glSlices, vsSource, fsSource) : null;
+  const sliceProgramInfo = glSlices && sliceShaderProgram ? {
+    program: sliceShaderProgram,
+    attribLocations: {
+      vertexPosition: glSlices.getAttribLocation(sliceShaderProgram, "aVertexPosition"),
+      textureCoord: glSlices.getAttribLocation(sliceShaderProgram, "aTextureCoord"),
+    },
+    uniformLocations: {
+      projectionMatrix: glSlices.getUniformLocation(sliceShaderProgram, "uProjectionMatrix"),
+      modelViewMatrix: glSlices.getUniformLocation(sliceShaderProgram, "uModelViewMatrix"),
+      uSampler: glSlices.getUniformLocation(sliceShaderProgram, "uSampler"),
+    },
+  } : null;
 
   const readServerUrl = "http://localhost:3000";    // Main server (handles routing and fallbacks)
   const writeServerUrl = "http://localhost:3001";   // Backend write server (for writing data)
@@ -507,9 +535,14 @@ initRotationSliders();
     }
   }
 
-  // POST slice translation command (+1 or -1) to file_slice_translation endpoint
-  async function postSliceTranslationToServer(direction) {
-    if (direction !== 1 && direction !== -1) {
+  // POST relative slice delta command to MRI marshal via backend write proxy.
+  // Payload contract:
+  // {"translation_mm": [dx,dy,dz], "rotation_rad": [rx,ry,rz]}
+  async function postSliceDeltaToServer(translationMm, rotationRad) {
+    if (!Array.isArray(translationMm) || translationMm.length !== 3 || !translationMm.every(Number.isFinite)) {
+      return;
+    }
+    if (!Array.isArray(rotationRad) || rotationRad.length !== 3 || !rotationRad.every(Number.isFinite)) {
       return;
     }
 
@@ -517,7 +550,8 @@ initRotationSliders();
       const payload = {
         client_id: clientId,
         sent_at: Date.now(),
-        values: [direction]
+        translation_mm: translationMm,
+        rotation_rad: rotationRad
       };
 
       const response = await fetch(`${writeServerUrl}/api/write/${clientId}/8`, {
@@ -529,15 +563,21 @@ initRotationSliders();
       });
 
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-
-      // Keep cumulative MRI homogeneous transform in sync with this action.
-      await postSlicePoseTransformDeltaToServer(direction, 0, 0, 0);
-
-      updateStatus('debug', `Sent slice translation ${direction > 0 ? '+1' : '-1'}`);
+      updateStatus('debug', `Sent slice_delta t=[${translationMm.map(v => v.toFixed(2)).join(', ')}] r=[${rotationRad.map(v => v.toFixed(3)).join(', ')}]`);
     } catch (error) {
-      console.error('Error posting slice translation:', error);
-      updateStatus('debug', `✗ Failed to post slice translation: ${error.message}`);
+      console.error('Error posting slice_delta:', error);
+      updateStatus('debug', `✗ Failed to post slice_delta: ${error.message}`);
     }
+  }
+
+  // POST slice translation command (+1 or -1) as slice_delta translation.
+  async function postSliceTranslationToServer(direction) {
+    if (direction !== 1 && direction !== -1) {
+      return;
+    }
+
+    // Preserve legacy button semantics: ±1 mm along slice axis.
+    await postSliceDeltaToServer([0, 0, direction], [0, 0, 0]);
   }
 
   // POST slice thickness command [1..15] to file_slice_thickness endpoint
@@ -570,47 +610,19 @@ initRotationSliders();
     }
   }
 
-  // POST cumulative slice pose transform deltas:
-  // [translation_z_delta, rot_x_deg_delta, rot_y_deg_delta, rot_z_deg_delta]
-  async function postSlicePoseTransformDeltaToServer(translationDelta, rotXDelta, rotYDelta, rotZDelta) {
-    if (![translationDelta, rotXDelta, rotYDelta, rotZDelta].every(Number.isFinite)) {
-      return;
-    }
-
-    try {
-      const payload = {
-        client_id: clientId,
-        sent_at: Date.now(),
-        values: [translationDelta, rotXDelta, rotYDelta, rotZDelta]
-      };
-
-      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/12`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-    } catch (error) {
-      console.error('Error posting cumulative slice pose transform:', error);
-    }
-  }
-
   async function postRotationDeltaToPoseTransform(axis, degrees) {
     if (!Number.isFinite(degrees) || degrees < -180 || degrees > 180 || degrees === 0) {
       return;
     }
 
-    const deltas = {
-      x: [0, degrees, 0, 0],
-      y: [0, 0, degrees, 0],
-      z: [0, 0, 0, degrees],
+    const rad = (degrees * Math.PI) / 180.0;
+    const rotationRad = {
+      x: [rad, 0, 0],
+      y: [0, rad, 0],
+      z: [0, 0, rad],
     };
 
-    const [tz, dx, dy, dz] = deltas[axis] || [0, 0, 0, 0];
-    await postSlicePoseTransformDeltaToServer(tz, dx, dy, dz);
+    await postSliceDeltaToServer([0, 0, 0], rotationRad[axis] || [0, 0, 0]);
     updateStatus('debug', `Applied ${axis.toUpperCase()} rotation delta ${degrees} deg`);
   }
 
@@ -803,7 +815,7 @@ initRotationSliders();
     gl.depthMask(false);
     
     const baseMatrix = glMatrix.mat4.create();
-    glMatrix.mat4.translate(baseMatrix, baseMatrix, [0.0, 0.0, -6.0]);
+      glMatrix.mat4.translate(baseMatrix, baseMatrix, [0.0, 0.0, volumeZoom]);
     glMatrix.mat4.rotate(baseMatrix, baseMatrix, mouseRotationX, [1, 0, 0]);
     glMatrix.mat4.rotate(baseMatrix, baseMatrix, mouseRotationY, [0, 1, 0]);
     glMatrix.mat4.rotate(baseMatrix, baseMatrix, mouseRotationZ, [0, 0, 1]);
@@ -903,7 +915,7 @@ initRotationSliders();
     const px = getPixelSize(pixelSize);
 
     const modelViewMatrix = glMatrix.mat4.create();
-    glMatrix.mat4.translate(modelViewMatrix, modelViewMatrix, [0.0, 0.0, -6.0]);
+    glMatrix.mat4.translate(modelViewMatrix, modelViewMatrix, [0.0, 0.0, volumeZoom]);
     glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, mouseRotationX, [1, 0, 0]);
     glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, mouseRotationY, [0, 1, 0]);
     glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, mouseRotationZ, [0, 0, 1]);
@@ -936,6 +948,120 @@ initRotationSliders();
 
     const sliceTexture = createTextureFromMatrix(gl, values, width, height);
     renderQuad(gl, programInfo, sliceTexture, projectionMatrix, modelViewMatrix);
+  }
+
+  // Render the latest 3 slices as planes in 3D, using each image header's
+  // position/orientation metadata for placement.
+  function renderSliceHistoryIn3D(gl, programInfo, imageHistory) {
+    if (!Array.isArray(imageHistory) || imageHistory.length === 0) return false;
+
+    const getOrientationMatrix = (ori) => {
+      if (!ori) return null;
+      if (Number.isFinite(ori.m00) && Number.isFinite(ori.m01) && Number.isFinite(ori.m02) &&
+          Number.isFinite(ori.m10) && Number.isFinite(ori.m11) && Number.isFinite(ori.m12) &&
+          Number.isFinite(ori.m20) && Number.isFinite(ori.m21) && Number.isFinite(ori.m22)) {
+        return [
+          ori.m00, ori.m01, ori.m02,
+          ori.m10, ori.m11, ori.m12,
+          ori.m20, ori.m21, ori.m22,
+        ];
+      }
+      if (Array.isArray(ori) && ori.length === 9 && ori.every(Number.isFinite)) return ori;
+      if (Array.isArray(ori) && ori.length === 3 && ori.every(row => Array.isArray(row) && row.length === 3)) {
+        const flat = [ori[0][0], ori[0][1], ori[0][2], ori[1][0], ori[1][1], ori[1][2], ori[2][0], ori[2][1], ori[2][2]];
+        if (flat.every(Number.isFinite)) return flat;
+      }
+      return null;
+    };
+
+    const getPosition = (pos) => {
+      if (!pos) return null;
+      if (Array.isArray(pos) && pos.length === 3 && pos.every(Number.isFinite)) return [pos[0], pos[1], pos[2]];
+      if (Number.isFinite(pos.x) && Number.isFinite(pos.y) && Number.isFinite(pos.z)) return [pos.x, pos.y, pos.z];
+      return null;
+    };
+
+    const getPixelSize = (ps) => {
+      if (!ps) return null;
+      if (Array.isArray(ps) && ps.length === 2 && Number.isFinite(ps[0]) && Number.isFinite(ps[1])) return [ps[0], ps[1]];
+      if (Number.isFinite(ps.x) && Number.isFinite(ps.y)) return [ps.x, ps.y];
+      return null;
+    };
+
+    const slices = imageHistory.slice(0, 3)
+      .map((img) => {
+        if (!img || !Array.isArray(img.values) || !img.width || !img.height) return null;
+        const pos = getPosition(img.position);
+        const ori = getOrientationMatrix(img.orientation);
+        const px = getPixelSize(img.pixelSize);
+        if (!(pos && ori && px)) return null;
+        return {
+          values: img.values,
+          width: img.width,
+          height: img.height,
+          pos,
+          ori,
+          px,
+        };
+      })
+      .filter(Boolean);
+
+    if (slices.length === 0) return false;
+
+    let cx = 0, cy = 0, cz = 0;
+    for (const s of slices) {
+      cx += s.pos[0];
+      cy += s.pos[1];
+      cz += s.pos[2];
+    }
+    cx /= slices.length;
+    cy /= slices.length;
+    cz /= slices.length;
+
+    const fieldOfView = (45 * Math.PI) / 180;
+    const aspect = gl.canvas.clientWidth / gl.canvas.clientHeight;
+    const projectionMatrix = glMatrix.mat4.create();
+    glMatrix.mat4.perspective(projectionMatrix, fieldOfView, aspect, 0.1, 300.0);
+
+    const viewMatrix = glMatrix.mat4.create();
+    glMatrix.mat4.translate(viewMatrix, viewMatrix, [0.0, 0.0, sliceHistoryZoom]);
+    glMatrix.mat4.rotate(viewMatrix, viewMatrix, sliceHistoryRotationX, [1, 0, 0]);
+    glMatrix.mat4.rotate(viewMatrix, viewMatrix, sliceHistoryRotationY, [0, 1, 0]);
+    glMatrix.mat4.rotate(viewMatrix, viewMatrix, sliceHistoryRotationZ, [0, 0, 1]);
+
+    gl.disable(gl.CULL_FACE);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.enable(gl.DEPTH_TEST);
+
+    for (const s of slices) {
+      const localPos = [s.pos[0] - cx, s.pos[1] - cy, s.pos[2] - cz];
+
+      const poseMatrix = glMatrix.mat4.fromValues(
+        s.ori[0], s.ori[3], s.ori[6], 0,
+        s.ori[1], s.ori[4], s.ori[7], 0,
+        s.ori[2], s.ori[5], s.ori[8], 0,
+        localPos[0], localPos[1], localPos[2], 1
+      );
+
+      const halfWidthWorld = 0.5 * s.width * s.px[0];
+      const halfHeightWorld = 0.5 * s.height * s.px[1];
+      const scaleMatrix = glMatrix.mat4.create();
+      glMatrix.mat4.scale(scaleMatrix, scaleMatrix, [halfWidthWorld, halfHeightWorld, 1.0]);
+
+      const planeModel = glMatrix.mat4.create();
+      glMatrix.mat4.multiply(planeModel, poseMatrix, scaleMatrix);
+
+      const modelViewMatrix = glMatrix.mat4.create();
+      glMatrix.mat4.multiply(modelViewMatrix, viewMatrix, planeModel);
+
+      const sliceTexture = createTextureFromMatrix(gl, s.values, s.width, s.height);
+      renderQuad(gl, programInfo, sliceTexture, projectionMatrix, modelViewMatrix);
+    }
+
+    gl.disable(gl.BLEND);
+    gl.enable(gl.CULL_FACE);
+    return true;
   }
 
   // =========================================================================
@@ -1223,7 +1349,7 @@ initRotationSliders();
     glMatrix.mat4.perspective(projectionMatrix, fieldOfView, aspect, 0.1, 100.0);
 
     const modelViewMatrix = glMatrix.mat4.create();
-    glMatrix.mat4.translate(modelViewMatrix, modelViewMatrix, [0.0, 0.0, -6.0]);
+    glMatrix.mat4.translate(modelViewMatrix, modelViewMatrix, [0.0, 0.0, volumeZoom]);
     glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, mouseRotationX, [1, 0, 0]);
     glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, mouseRotationY, [0, 1, 0]);
     glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, mouseRotationZ, [0, 0, 1]);
@@ -1489,6 +1615,61 @@ initRotationSliders();
     isMouseDown = false;
   });
 
+  function normalizeWheelDelta(e) {
+    // deltaMode: 0=pixels, 1=lines, 2=pages
+    if (e.deltaMode === 1) return e.deltaY * 16;
+    if (e.deltaMode === 2) return e.deltaY * 120;
+    return e.deltaY;
+  }
+
+  canvas3D.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const delta = normalizeWheelDelta(e);
+    volumeZoom += delta * 0.04;
+    volumeZoom = Math.min(-1.5, Math.max(-120.0, volumeZoom));
+    updateStatus('debug', `Vol zoom ${volumeZoom.toFixed(1)} | Slice zoom ${sliceHistoryZoom.toFixed(1)}`);
+  }, { passive: false });
+
+  if (canvasSlices3D) {
+    canvasSlices3D.addEventListener('mousedown', (e) => {
+      isSliceHistoryMouseDown = true;
+      lastSliceHistoryMouseX = e.clientX;
+      lastSliceHistoryMouseY = e.clientY;
+      e.preventDefault();
+    });
+
+    canvasSlices3D.addEventListener('mousemove', (e) => {
+      if (isSliceHistoryMouseDown) {
+        const deltaX = e.clientX - lastSliceHistoryMouseX;
+        const deltaY = e.clientY - lastSliceHistoryMouseY;
+        const sensitivity = 0.01;
+        sliceHistoryRotationY += deltaX * sensitivity;
+        sliceHistoryRotationX += deltaY * sensitivity;
+        if (e.shiftKey) {
+          sliceHistoryRotationZ += deltaX * sensitivity;
+        }
+        lastSliceHistoryMouseX = e.clientX;
+        lastSliceHistoryMouseY = e.clientY;
+      }
+    });
+
+    canvasSlices3D.addEventListener('mouseup', () => {
+      isSliceHistoryMouseDown = false;
+    });
+
+    canvasSlices3D.addEventListener('mouseleave', () => {
+      isSliceHistoryMouseDown = false;
+    });
+
+    canvasSlices3D.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const delta = normalizeWheelDelta(e);
+      sliceHistoryZoom += delta * 0.2;
+      sliceHistoryZoom = Math.min(-5.0, Math.max(-600.0, sliceHistoryZoom));
+      updateStatus('debug', `Vol zoom ${volumeZoom.toFixed(1)} | Slice zoom ${sliceHistoryZoom.toFixed(1)}`);
+    }, { passive: false });
+  }
+
   // Click handler for 2D canvas
   canvas2D.addEventListener('click', (e) => {
     const rect = canvas2D.getBoundingClientRect();
@@ -1593,6 +1774,16 @@ initRotationSliders();
     // renderVolumeCube(gl, programInfo, volumeSlices);
     renderLatest2DSliceIn3D(gl, programInfo, currentImageData);
     renderMesh(gl, meshProgramInfo, meshBuffers);
+
+    if (glSlices && sliceProgramInfo) {
+      glSlices.clearColor(0.0, 0.0, 0.0, 1.0);
+      glSlices.clearDepth(1.0);
+      glSlices.enable(glSlices.DEPTH_TEST);
+      glSlices.depthFunc(glSlices.LEQUAL);
+      glSlices.clear(glSlices.COLOR_BUFFER_BIT | glSlices.DEPTH_BUFFER_BIT);
+      const rendered = renderSliceHistoryIn3D(glSlices, sliceProgramInfo, currentImageHistory);
+      updateStatus('status3dSlices', rendered ? `✓ last ${Math.min(currentImageHistory.length, 3)} slices in 3D` : 'Waiting for slice metadata...');
+    }
 
     // Render FK control points on the separate canvas
     renderFKControlPoints(glFK, fkProgramInfo, fkControlPoints);

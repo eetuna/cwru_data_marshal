@@ -109,6 +109,8 @@ app.post('/api/write/:clientId/:fileKey', async (req, res) => {
     }
 
     const mriWriteKeys = new Set([
+      'slice_delta',
+      'slice_delta.json',
       'file_slice_translation',
       'file_slice_translation.json',
       'file_x_rotation',
