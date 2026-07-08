@@ -47,7 +47,12 @@
       "write_to6": "file_updated_texture_from_server.json",
       "write_to7": "file_will_update_force_sensing_from_server.json",
       "write_to8": "file_updated_force_sensing_from_server.json",
-      "write_to9": "file_slice_translation.json"
+      "write_to9": "file_slice_translation.json",
+      "write_to10": "file_x_rotation.json",
+      "write_to11": "file_y_rotation.json",
+      "write_to12": "file_z_rotation.json",
+      "write_to13": "file_slice_pose_transform.json",
+      "write_to14": "file_slice_thickness.json"
     },
     "client-force-sensor": {
       "read_from": "file_forward_kinematics.json",

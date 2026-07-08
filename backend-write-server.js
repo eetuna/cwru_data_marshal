@@ -88,6 +88,16 @@ app.post('/api/write/:clientId/:fileKey', async (req, res) => {
       fileName = clientRoutes.write_to8;
     } else if (fileKey === '8') {
       fileName = clientRoutes.write_to9;
+    } else if (fileKey === '9') {
+      fileName = clientRoutes.write_to10;
+    } else if (fileKey === '10') {
+      fileName = clientRoutes.write_to11;
+    } else if (fileKey === '11') {
+      fileName = clientRoutes.write_to12;
+    } else if (fileKey === '12') {
+      fileName = clientRoutes.write_to13;
+    } else if (fileKey === '13') {
+      fileName = clientRoutes.write_to14;
     }  else {
       console.warn(`[Backend Write Server] Invalid fileKey: ${fileKey}`);
       return res.status(400).json({ error: `Invalid fileKey: ${fileKey}` });
@@ -98,28 +108,42 @@ app.post('/api/write/:clientId/:fileKey', async (req, res) => {
       return res.status(404).json({ error: `File mapping not found for fileKey: ${fileKey}` });
     }
 
-    const isSliceTranslationWrite = fileName === 'file_slice_translation.json' || fileName === 'file_slice_translation';
-    const targetServer = isSliceTranslationWrite ? MRI_MARSHAL_SERVER : DATA_MARSHAL_SERVER;
-    const targetFileKey = isSliceTranslationWrite ? fileName.replace(/\.json$/, '') : fileName;
+    const mriWriteKeys = new Set([
+      'file_slice_translation',
+      'file_slice_translation.json',
+      'file_x_rotation',
+      'file_x_rotation.json',
+      'file_y_rotation',
+      'file_y_rotation.json',
+      'file_z_rotation',
+      'file_z_rotation.json',
+      'file_slice_pose_transform',
+      'file_slice_pose_transform.json',
+      'file_slice_thickness',
+      'file_slice_thickness.json'
+    ]);
+    const isMriWrite = mriWriteKeys.has(fileName);
+    const targetServer = isMriWrite ? MRI_MARSHAL_SERVER : DATA_MARSHAL_SERVER;
+    const targetFileKey = isMriWrite ? fileName.replace(/\.json$/, '') : fileName;
 
     console.log(`[Backend Write Server] Resolved file name: ${fileName}`);
-    console.log(`[Backend Write Server] Posting to ${isSliceTranslationWrite ? 'MRI' : 'Robot'} marshal at: ${targetServer}/write/${targetFileKey}`);
+    console.log(`[Backend Write Server] Posting to ${isMriWrite ? 'MRI' : 'Robot'} marshal at: ${targetServer}/write/${targetFileKey}`);
 
     // Write directly to C++ data marshal
     try {
       const response = await axios.post(`${targetServer}/write/${targetFileKey}`, data, {
         timeout: 5000
       });
-      console.log(`✓ [Backend Write Server] Successfully posted data to ${isSliceTranslationWrite ? 'MRI' : 'Robot'} marshal for ${fileName}`);
+      console.log(`✓ [Backend Write Server] Successfully posted data to ${isMriWrite ? 'MRI' : 'Robot'} marshal for ${fileName}`);
       console.log(`✓ [Backend Write Server] Server response:`, response.data);
       return res.json({
         success: true,
         message: `Data written to ${fileName}`,
-        target_marshal: isSliceTranslationWrite ? 'mri' : 'robot',
+        target_marshal: isMriWrite ? 'mri' : 'robot',
         backend_response: response.data
       });
     } catch (backendError) {
-      console.error(`✗ [Backend Write Server] Failed to reach ${isSliceTranslationWrite ? 'MRI' : 'Robot'} marshal at ${targetServer}/write/${targetFileKey}`);
+      console.error(`✗ [Backend Write Server] Failed to reach ${isMriWrite ? 'MRI' : 'Robot'} marshal at ${targetServer}/write/${targetFileKey}`);
       console.error(`✗ [Backend Write Server] Error details:`, backendError.message);
 
       if (backendError.response) {
@@ -128,10 +152,10 @@ app.post('/api/write/:clientId/:fileKey', async (req, res) => {
       }
 
       return res.status(503).json({
-        error: `Failed to reach ${isSliceTranslationWrite ? 'MRI' : 'Robot'} data marshal server`,
+        error: `Failed to reach ${isMriWrite ? 'MRI' : 'Robot'} data marshal server`,
         details: backendError.message,
         backend_url: `${targetServer}/write/${targetFileKey}`,
-        target_marshal: isSliceTranslationWrite ? 'mri' : 'robot',
+        target_marshal: isMriWrite ? 'mri' : 'robot',
         fileName: fileName
       });
     }

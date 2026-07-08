@@ -20,6 +20,28 @@ function initCurrentSliders() {
     });
   }
 }
+
+function initRotationSliders() {
+  const sliderIds = [
+    { sliderId: 'sliderRotX', valueId: 'valRotX' },
+    { sliderId: 'sliderRotY', valueId: 'valRotY' },
+    { sliderId: 'sliderRotZ', valueId: 'valRotZ' }
+  ];
+
+  for (const { sliderId, valueId } of sliderIds) {
+    const slider = document.getElementById(sliderId);
+    const valSpan = document.getElementById(valueId);
+    if (!slider || !valSpan) continue;
+    slider.value = '0';
+    valSpan.dataset.lastApplied = '0';
+    valSpan.textContent = '0 (last 0)';
+    slider.addEventListener('input', () => {
+      const pending = parseInt(slider.value, 10);
+      const lastApplied = valSpan.dataset.lastApplied || '0';
+      valSpan.textContent = `${Number.isFinite(pending) ? pending : 0} (last ${lastApplied})`;
+    });
+  }
+}
 main();
 
 async function main() {
@@ -108,6 +130,7 @@ async function main() {
   let volumeSlices = null;
   let currentVolumeData = null;
   let currentImageData = null;
+  let currentImageHistory = [];
   let lastTimestamp = -1;
   let lastVolumeTimestamp = -1;
   let lastTipTimestamp = -1;
@@ -118,6 +141,7 @@ async function main() {
   // Create 2D image renderer
   const image2DRenderer = new Image2DRenderer(gl);
 initCurrentSliders();
+initRotationSliders();
   // Create volume slices from 3D data
   function createVolumeSlices(volumeData, maxSlices = 16) {
     const { width, height, depth, values, step } = volumeData;
@@ -190,69 +214,114 @@ initCurrentSliders();
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
   }
 
-  // Render 2D image on 2D canvas using simple 2D context
-  function render2DImage(ctx, imageData) {
-    if (!imageData || !imageData.values) return;
+  // Render the latest 3 slices side-by-side on the 2D canvas.
+  function render2DImage(ctx, imageHistory) {
+    if (!Array.isArray(imageHistory) || imageHistory.length === 0) return;
 
-    const { width, height, values } = imageData;
-    
-    // Resize canvas to match image dimensions
-    ctx.canvas.width = width;
-    ctx.canvas.height = height;
+    const maxPanels = 3;
+    const panels = imageHistory.slice(0, maxPanels);
+    const targetWidth = Math.max(...panels.map(img => img?.width || 1));
+    const targetHeight = Math.max(...panels.map(img => img?.height || 1));
+    const gap = 8;
 
-    // Find min/max for normalization
-    let minValue = Infinity;
-    let maxValue = -Infinity;
-    for (let i = 0; i < values.length; i++) {
-      if (values[i] < minValue) minValue = values[i];
-      if (values[i] > maxValue) maxValue = values[i];
+    ctx.canvas.width = targetWidth * maxPanels + gap * (maxPanels - 1);
+    ctx.canvas.height = targetHeight;
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.font = '12px sans-serif';
+    ctx.textBaseline = 'top';
+
+    for (let panelIdx = 0; panelIdx < maxPanels; panelIdx++) {
+      const offsetX = panelIdx * (targetWidth + gap);
+      const imageData = panels[panelIdx];
+
+      if (!imageData || !Array.isArray(imageData.values)) {
+        ctx.fillStyle = '#111';
+        ctx.fillRect(offsetX, 0, targetWidth, targetHeight);
+        ctx.strokeStyle = '#333';
+        ctx.strokeRect(offsetX + 0.5, 0.5, targetWidth - 1, targetHeight - 1);
+        ctx.fillStyle = '#888';
+        ctx.fillText('No slice', offsetX + 8, 8);
+        continue;
+      }
+
+      const { width, height, values } = imageData;
+      let minValue = Infinity;
+      let maxValue = -Infinity;
+      for (let i = 0; i < values.length; i++) {
+        if (values[i] < minValue) minValue = values[i];
+        if (values[i] > maxValue) maxValue = values[i];
+      }
+      const range = maxValue - minValue > 0.001 ? maxValue - minValue : 1.0;
+
+      const slicePixels = new Uint8ClampedArray(width * height * 4);
+      for (let i = 0; i < values.length; i++) {
+        const normalized = (values[i] - minValue) / range;
+        const value = Math.min(1.0, Math.max(0.0, normalized));
+        const byteValue = Math.round(value * 255);
+        slicePixels[i * 4] = byteValue;
+        slicePixels[i * 4 + 1] = byteValue;
+        slicePixels[i * 4 + 2] = byteValue;
+        slicePixels[i * 4 + 3] = 255;
+      }
+
+      const tmpCanvas = document.createElement('canvas');
+      tmpCanvas.width = width;
+      tmpCanvas.height = height;
+      const tmpCtx = tmpCanvas.getContext('2d');
+      if (!tmpCtx) {
+        continue;
+      }
+      tmpCtx.putImageData(new ImageData(slicePixels, width, height), 0, 0);
+
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(tmpCanvas, 0, 0, width, height, offsetX, 0, targetWidth, targetHeight);
+
+      ctx.strokeStyle = '#333';
+      ctx.strokeRect(offsetX + 0.5, 0.5, targetWidth - 1, targetHeight - 1);
+      ctx.fillStyle = '#0ff';
+      const frame = Number.isFinite(imageData.frame_index) ? imageData.frame_index : '-';
+      ctx.fillText(`#${panelIdx + 1} frame ${frame}`, offsetX + 8, 8);
     }
-    
-    const range = maxValue - minValue > 0.001 ? maxValue - minValue : 1.0;
-
-    // Create image data
-    const imageDataObj = ctx.createImageData(width, height);
-    const data = imageDataObj.data;
-
-    for (let i = 0; i < values.length; i++) {
-      const normalized = (values[i] - minValue) / range;
-      const value = Math.min(1.0, Math.max(0.0, normalized));
-      const byteValue = Math.round(value * 255);
-      
-      data[i * 4] = byteValue;     // R
-      data[i * 4 + 1] = byteValue; // G
-      data[i * 4 + 2] = byteValue; // B
-      data[i * 4 + 3] = 255;       // A
-    }
-
-    ctx.putImageData(imageDataObj, 0, 0);
-    // console.log(`[2D Image] Rendered ${width}x${height}`);
   }
 
   // Get pixel from 2D image click
-  function getPixelFromImage2DClick(screenX, screenY, canvas, imageData) {
-    if (!imageData || !imageData.values) return null;
+  function getPixelFromImage2DClick(screenX, screenY, canvas, imageHistory) {
+    if (!Array.isArray(imageHistory) || imageHistory.length === 0) return null;
+
+    const maxPanels = 3;
+    const gap = 8;
+    const panels = imageHistory.slice(0, maxPanels);
+    const targetWidth = Math.max(...panels.map(img => img?.width || 1));
+    const targetHeight = Math.max(...panels.map(img => img?.height || 1));
+    const panelSpan = targetWidth + gap;
+
+    const canvasX = (screenX / canvas.clientWidth) * canvas.width;
+    const canvasY = (screenY / canvas.clientHeight) * canvas.height;
+
+    if (canvasY < 0 || canvasY > targetHeight) return null;
+
+    const panelIndex = Math.max(0, Math.min(maxPanels - 1, Math.floor(canvasX / panelSpan)));
+    const panelLocalX = canvasX - panelIndex * panelSpan;
+    if (panelLocalX < 0 || panelLocalX > targetWidth) return null;
+
+    const imageData = panels[panelIndex];
+    if (!imageData || !Array.isArray(imageData.values)) return null;
 
     const { width, height, values } = imageData;
+    const pixelX = Math.floor((panelLocalX / targetWidth) * width);
+    const pixelY = Math.floor((canvasY / targetHeight) * height);
 
-    // Map screen coordinates to image pixels
-    // Use clientWidth/clientHeight (displayed size) not canvas.width/height (internal resolution)
-    const pixelX = Math.floor((screenX / canvas.clientWidth) * width);
-    const pixelY = Math.floor((screenY / canvas.clientHeight) * height);
-
-    // Clamp to valid range
     const x = Math.max(0, Math.min(width - 1, pixelX));
     const y = Math.max(0, Math.min(height - 1, pixelY));
-
     const index = y * width + x;
     const pixelValue = values[index];
-
-    // console.log(`[2D Click] Screen (${screenX.toFixed(0)}, ${screenY.toFixed(0)}) -> Image pixel [${x}, ${y}], value=${pixelValue.toFixed(4)}`);
 
     return {
       pixelX: x,
       pixelY: y,
-      value: pixelValue
+      value: pixelValue,
+      panelIndex,
+      frameIndex: imageData.frame_index
     };
   }
 
@@ -260,11 +329,11 @@ initCurrentSliders();
   function handleCanvas2DClick(mouseX, mouseY) {
     console.log(`[CLICK] 2D canvas click at (${mouseX.toFixed(0)}, ${mouseY.toFixed(0)})`);
 
-    const pixelHit = getPixelFromImage2DClick(mouseX, mouseY, canvas2D, currentImageData);
+    const pixelHit = getPixelFromImage2DClick(mouseX, mouseY, canvas2D, currentImageHistory);
     if (pixelHit) {
       updateStatus('selectedPoint', `[${pixelHit.pixelX}, ${pixelHit.pixelY}]`);
       updateStatus('pointValue', `${(pixelHit.value * 255).toFixed(0)} / 255`);
-      console.log(`✓ Selected pixel [${pixelHit.pixelX}, ${pixelHit.pixelY}], value=${pixelHit.value.toFixed(4)}`);
+      console.log(`✓ Selected pixel [${pixelHit.pixelX}, ${pixelHit.pixelY}] on panel ${pixelHit.panelIndex + 1}, value=${pixelHit.value.toFixed(4)}, frame=${pixelHit.frameIndex}`);
       
       // Send pixel coordinates to C++ server
       postPixelCoordinatesToServer(pixelHit.pixelX, pixelHit.pixelY);
@@ -461,11 +530,88 @@ initCurrentSliders();
 
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
 
+      // Keep cumulative MRI homogeneous transform in sync with this action.
+      await postSlicePoseTransformDeltaToServer(direction, 0, 0, 0);
+
       updateStatus('debug', `Sent slice translation ${direction > 0 ? '+1' : '-1'}`);
     } catch (error) {
       console.error('Error posting slice translation:', error);
       updateStatus('debug', `✗ Failed to post slice translation: ${error.message}`);
     }
+  }
+
+  // POST slice thickness command [1..15] to file_slice_thickness endpoint
+  async function postSliceThicknessToServer(thickness) {
+    if (!Number.isFinite(thickness) || thickness < 1 || thickness > 15) {
+      return;
+    }
+
+    try {
+      const payload = {
+        client_id: clientId,
+        sent_at: Date.now(),
+        values: [thickness]
+      };
+
+      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/13`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+      updateStatus('debug', `Sent slice thickness ${thickness}`);
+    } catch (error) {
+      console.error('Error posting slice thickness:', error);
+      updateStatus('debug', `✗ Failed to post slice thickness: ${error.message}`);
+    }
+  }
+
+  // POST cumulative slice pose transform deltas:
+  // [translation_z_delta, rot_x_deg_delta, rot_y_deg_delta, rot_z_deg_delta]
+  async function postSlicePoseTransformDeltaToServer(translationDelta, rotXDelta, rotYDelta, rotZDelta) {
+    if (![translationDelta, rotXDelta, rotYDelta, rotZDelta].every(Number.isFinite)) {
+      return;
+    }
+
+    try {
+      const payload = {
+        client_id: clientId,
+        sent_at: Date.now(),
+        values: [translationDelta, rotXDelta, rotYDelta, rotZDelta]
+      };
+
+      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/12`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    } catch (error) {
+      console.error('Error posting cumulative slice pose transform:', error);
+    }
+  }
+
+  async function postRotationDeltaToPoseTransform(axis, degrees) {
+    if (!Number.isFinite(degrees) || degrees < -180 || degrees > 180 || degrees === 0) {
+      return;
+    }
+
+    const deltas = {
+      x: [0, degrees, 0, 0],
+      y: [0, 0, degrees, 0],
+      z: [0, 0, 0, degrees],
+    };
+
+    const [tz, dx, dy, dz] = deltas[axis] || [0, 0, 0, 0];
+    await postSlicePoseTransformDeltaToServer(tz, dx, dy, dz);
+    updateStatus('debug', `Applied ${axis.toUpperCase()} rotation delta ${degrees} deg`);
   }
 
   // Fetch 2D image from server
@@ -486,8 +632,10 @@ initCurrentSliders();
         
         if (data.values && Array.isArray(data.values)) {
           currentImageData = data;
+          currentImageHistory.unshift(data);
+          currentImageHistory = currentImageHistory.slice(0, 3);
           postWillRender2DImageToServer(data);
-          render2DImage(gl2d, data);
+          render2DImage(gl2d, currentImageHistory);
           postRendered2DImageToServer(data);
           
           // Extract metadata and update renderer
@@ -498,7 +646,7 @@ initCurrentSliders();
           };
           image2DRenderer.updateImage(data.values, data.width, data.height, metadata);
           
-          updateStatus('status2d', `✓ ${data.width}x${data.height}`);
+          updateStatus('status2d', `✓ last ${Math.min(currentImageHistory.length, 3)} slices (${data.width}x${data.height})`);
           return true;
         }
       }
@@ -688,6 +836,106 @@ initCurrentSliders();
     gl.depthMask(true);
     gl.disable(gl.BLEND);
     gl.enable(gl.CULL_FACE);
+  }
+
+  // Render only the latest 2D slice as a textured plane in the 3D canvas.
+  function renderLatest2DSliceIn3D(gl, programInfo, imageData) {
+    if (!imageData || !Array.isArray(imageData.values)) return;
+
+    const { width, height, values, position, orientation, pixelSize } = imageData;
+    const fieldOfView = (45 * Math.PI) / 180;
+    const aspect = gl.canvas.clientWidth / gl.canvas.clientHeight;
+    const projectionMatrix = glMatrix.mat4.create();
+    glMatrix.mat4.perspective(projectionMatrix, fieldOfView, aspect, 0.1, 100.0);
+
+    const getOrientationMatrix = (ori) => {
+      if (!ori) return null;
+
+      // Object form: { m00, m01, ..., m22 }
+      if (Number.isFinite(ori.m00) && Number.isFinite(ori.m01) && Number.isFinite(ori.m02) &&
+          Number.isFinite(ori.m10) && Number.isFinite(ori.m11) && Number.isFinite(ori.m12) &&
+          Number.isFinite(ori.m20) && Number.isFinite(ori.m21) && Number.isFinite(ori.m22)) {
+        return [
+          ori.m00, ori.m01, ori.m02,
+          ori.m10, ori.m11, ori.m12,
+          ori.m20, ori.m21, ori.m22,
+        ];
+      }
+
+      // Flat array form: [m00, m01, ..., m22]
+      if (Array.isArray(ori) && ori.length === 9 && ori.every(Number.isFinite)) {
+        return ori;
+      }
+
+      // Nested array form: [[m00,m01,m02], [m10,m11,m12], [m20,m21,m22]]
+      if (Array.isArray(ori) && ori.length === 3 && ori.every(row => Array.isArray(row) && row.length === 3)) {
+        const flat = [ori[0][0], ori[0][1], ori[0][2], ori[1][0], ori[1][1], ori[1][2], ori[2][0], ori[2][1], ori[2][2]];
+        if (flat.every(Number.isFinite)) return flat;
+      }
+
+      return null;
+    };
+
+    const getPosition = (pos) => {
+      if (!pos) return null;
+      if (Array.isArray(pos) && pos.length === 3 && pos.every(Number.isFinite)) {
+        return [pos[0], pos[1], pos[2]];
+      }
+      if (Number.isFinite(pos.x) && Number.isFinite(pos.y) && Number.isFinite(pos.z)) {
+        return [pos.x, pos.y, pos.z];
+      }
+      return null;
+    };
+
+    const getPixelSize = (ps) => {
+      if (!ps) return null;
+      if (Array.isArray(ps) && ps.length === 2 && Number.isFinite(ps[0]) && Number.isFinite(ps[1])) {
+        return [ps[0], ps[1]];
+      }
+      if (Number.isFinite(ps.x) && Number.isFinite(ps.y)) {
+        return [ps.x, ps.y];
+      }
+      return null;
+    };
+
+    const pos = getPosition(position);
+    const ori = getOrientationMatrix(orientation);
+    const px = getPixelSize(pixelSize);
+
+    const modelViewMatrix = glMatrix.mat4.create();
+    glMatrix.mat4.translate(modelViewMatrix, modelViewMatrix, [0.0, 0.0, -6.0]);
+    glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, mouseRotationX, [1, 0, 0]);
+    glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, mouseRotationY, [0, 1, 0]);
+    glMatrix.mat4.rotate(modelViewMatrix, modelViewMatrix, mouseRotationZ, [0, 0, 1]);
+
+    if (!(pos && ori && px && width > 0 && height > 0)) {
+      // Strict mode: no metadata means no 3D slice-plane render.
+      return;
+    }
+
+    // Pose matrix from metadata orientation and position.
+    const poseMatrix = glMatrix.mat4.fromValues(
+      ori[0], ori[3], ori[6], 0,
+      ori[1], ori[4], ori[7], 0,
+      ori[2], ori[5], ori[8], 0,
+      pos[0], pos[1], pos[2], 1
+    );
+
+    // Quad is [-1,1] in each axis, so scale by half extents in world units.
+    const halfWidthWorld = 0.5 * width * px[0];
+    const halfHeightWorld = 0.5 * height * px[1];
+    const scaleMatrix = glMatrix.mat4.create();
+    glMatrix.mat4.scale(scaleMatrix, scaleMatrix, [halfWidthWorld, halfHeightWorld, 1.0]);
+
+    const planeModel = glMatrix.mat4.create();
+    glMatrix.mat4.multiply(planeModel, poseMatrix, scaleMatrix);
+
+    const combined = glMatrix.mat4.create();
+    glMatrix.mat4.multiply(combined, modelViewMatrix, planeModel);
+    glMatrix.mat4.copy(modelViewMatrix, combined);
+
+    const sliceTexture = createTextureFromMatrix(gl, values, width, height);
+    renderQuad(gl, programInfo, sliceTexture, projectionMatrix, modelViewMatrix);
   }
 
   // =========================================================================
@@ -1140,6 +1388,14 @@ initCurrentSliders();
 
   const slicePlusBtn = document.getElementById('slicePlusBtn');
   const sliceMinusBtn = document.getElementById('sliceMinusBtn');
+  const rotXSlider = document.getElementById('sliderRotX');
+  const rotYSlider = document.getElementById('sliderRotY');
+  const rotZSlider = document.getElementById('sliderRotZ');
+  const sliceThicknessSlider = document.getElementById('sliderSliceThickness');
+  const rotXVal = document.getElementById('valRotX');
+  const rotYVal = document.getElementById('valRotY');
+  const rotZVal = document.getElementById('valRotZ');
+  const sliceThicknessVal = document.getElementById('valSliceThickness');
 
   if (slicePlusBtn) {
     slicePlusBtn.addEventListener('click', () => {
@@ -1150,6 +1406,55 @@ initCurrentSliders();
   if (sliceMinusBtn) {
     sliceMinusBtn.addEventListener('click', () => {
       postSliceTranslationToServer(-1);
+    });
+  }
+
+  if (sliceThicknessSlider && sliceThicknessVal) {
+    sliceThicknessVal.textContent = sliceThicknessSlider.value;
+
+    sliceThicknessSlider.addEventListener('input', () => {
+      sliceThicknessVal.textContent = sliceThicknessSlider.value;
+    });
+
+    sliceThicknessSlider.addEventListener('change', () => {
+      const thickness = parseInt(sliceThicknessSlider.value, 10);
+      postSliceThicknessToServer(thickness);
+    });
+  }
+
+  if (rotXSlider) {
+    rotXSlider.addEventListener('change', async () => {
+      const deg = parseInt(rotXSlider.value, 10);
+      await postRotationDeltaToPoseTransform('x', deg);
+      if (Number.isFinite(deg) && rotXVal) {
+        rotXVal.dataset.lastApplied = String(deg);
+        rotXVal.textContent = `0 (last ${deg})`;
+      }
+      rotXSlider.value = '0';
+    });
+  }
+
+  if (rotYSlider) {
+    rotYSlider.addEventListener('change', async () => {
+      const deg = parseInt(rotYSlider.value, 10);
+      await postRotationDeltaToPoseTransform('y', deg);
+      if (Number.isFinite(deg) && rotYVal) {
+        rotYVal.dataset.lastApplied = String(deg);
+        rotYVal.textContent = `0 (last ${deg})`;
+      }
+      rotYSlider.value = '0';
+    });
+  }
+
+  if (rotZSlider) {
+    rotZSlider.addEventListener('change', async () => {
+      const deg = parseInt(rotZSlider.value, 10);
+      await postRotationDeltaToPoseTransform('z', deg);
+      if (Number.isFinite(deg) && rotZVal) {
+        rotZVal.dataset.lastApplied = String(deg);
+        rotZVal.textContent = `0 (last ${deg})`;
+      }
+      rotZSlider.value = '0';
     });
   }
 
@@ -1285,7 +1590,8 @@ initCurrentSliders();
     gl.depthFunc(gl.LEQUAL);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    renderVolumeCube(gl, programInfo, volumeSlices);
+    // renderVolumeCube(gl, programInfo, volumeSlices);
+    renderLatest2DSliceIn3D(gl, programInfo, currentImageData);
     renderMesh(gl, meshProgramInfo, meshBuffers);
 
     // Render FK control points on the separate canvas

@@ -47,8 +47,8 @@
         border: 2px solid #00ff00;
         background-color: black;
         cursor: crosshair;
-        width: 512px;
-        height: 512px;
+        width: 960px;
+        height: 320px;
       }
       
       #info {
@@ -166,6 +166,10 @@
         color: #00ccff;
       }
 
+      .slice-thickness-control {
+        margin-top: 8px;
+      }
+
       .slice-translation-buttons {
         display: flex;
         gap: 10px;
@@ -188,6 +192,23 @@
 
       #sliceMinusBtn {
         background-color: #ff8787;
+      }
+
+      .rotation-controls {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-top: 10px;
+        padding: 10px;
+        background-color: #2a2a2a;
+        border: 1px solid #444;
+        border-radius: 6px;
+      }
+
+      .rotation-controls h3 {
+        margin: 0;
+        font-size: 28px;
+        color: #00ccff;
       }
     </style>
     <script src="gl-matrix-min.js"></script>
@@ -255,6 +276,32 @@
           <div class="slice-translation-buttons">
             <button id="sliceMinusBtn" type="button">-</button>
             <button id="slicePlusBtn" type="button">+</button>
+          </div>
+          <div class="slice-thickness-control">
+            <h3>Slice Thickness</h3>
+            <div class="slider-row">
+              <label>T</label>
+              <input type="range" id="sliderSliceThickness" min="1" max="15" step="1" value="1">
+              <span class="slider-value" id="valSliceThickness">1</span>
+            </div>
+          </div>
+        </div>
+        <div class="rotation-controls">
+          <h3>Slice Rotation (deg)</h3>
+          <div class="slider-row">
+            <label>X</label>
+            <input type="range" id="sliderRotX" min="-180" max="180" step="1" value="0">
+            <span class="slider-value" id="valRotX">0</span>
+          </div>
+          <div class="slider-row">
+            <label>Y</label>
+            <input type="range" id="sliderRotY" min="-180" max="180" step="1" value="0">
+            <span class="slider-value" id="valRotY">0</span>
+          </div>
+          <div class="slider-row">
+            <label>Z</label>
+            <input type="range" id="sliderRotZ" min="-180" max="180" step="1" value="0">
+            <span class="slider-value" id="valRotZ">0</span>
           </div>
         </div>
       </div>
