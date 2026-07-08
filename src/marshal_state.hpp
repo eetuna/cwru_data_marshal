@@ -146,6 +146,11 @@ struct MarshalState {
     std::mutex slice_target_mtx;
     std::string latest_slice_target_json;
 
+    // Latest relative slice move (translation + rotation deltas) from the
+    // UI. See POST /write/slice_delta.
+    std::mutex slice_delta_mtx;
+    std::string latest_slice_delta_json;
+
     // Slice geometry observed in image headers (position + orientation per
     // slice index), updated on every IMAGE from either lane, cleared at each
     // scan start (METADATA_XML). Embedded in the slice-translation TEXT

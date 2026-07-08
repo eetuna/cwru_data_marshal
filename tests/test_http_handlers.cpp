@@ -369,6 +369,60 @@ TEST_CASE("Slice target: absolute prescription pushback", "[http][slice]") {
     }
 }
 
+TEST_CASE("Slice delta: relative move pushback", "[http][slice]") {
+    MarshalState state; init_state(state);
+    std::vector<std::pair<uint16_t, std::vector<uint8_t>>> pushed;
+    state.mrd_push_message = [&](uint16_t tag, const void* d, size_t l) {
+        const auto* p = static_cast<const uint8_t*>(d);
+        pushed.emplace_back(tag, std::vector<uint8_t>(p, p + l));
+        return true;
+    };
+    auto post_delta = [&](json body) {
+        http::request<http::string_body> req{http::verb::post, "/write/slice_delta", 11};
+        req.body() = body.dump();
+        req.prepare_payload();
+        return dispatch(req, state);
+    };
+
+    SECTION("translation + rotation pushed with defaults filled") {
+        auto res = post_delta({{"translation_mm", {1.5, 0.0, -2.0}},
+                               {"rotation_rad", {0.0, 0.1, 0.0}}});
+        REQUIRE(res.result() == http::status::ok);
+        CHECK(json::parse(res.body())["delivered"] == true);
+        REQUIRE(pushed.size() == 1);
+        auto payload = json::parse(std::string(
+            pushed[0].second.begin() + sizeof(uint32_t), pushed[0].second.end() - 1));
+        CHECK(payload["type"] == "slice_delta");
+        CHECK(payload["translation_mm"][2] == Catch::Approx(-2.0));
+        CHECK(payload["rotation_rad"][1] == Catch::Approx(0.1));
+        CHECK(payload["slice_geometry"].is_null());
+    }
+
+    SECTION("translation only: rotation defaults to zeros") {
+        post_delta({{"translation_mm", {0.0, 0.0, 5.0}}});
+        REQUIRE(pushed.size() == 1);
+        auto payload = json::parse(std::string(
+            pushed[0].second.begin() + sizeof(uint32_t), pushed[0].second.end() - 1));
+        CHECK(payload["rotation_rad"][0] == Catch::Approx(0.0));
+    }
+
+    SECTION("rejections: neither field, wrong shape") {
+        CHECK(post_delta(json::object()).result() == http::status::bad_request);
+        CHECK(post_delta({{"translation_mm", {1.0, 2.0}}}).result() == http::status::bad_request);
+        CHECK(pushed.empty());
+    }
+
+    SECTION("cache readable at GET /read/slice_delta") {
+        http::request<http::string_body> pre{http::verb::get, "/read/slice_delta", 11};
+        REQUIRE(dispatch(pre, state).result() == http::status::no_content);
+        post_delta({{"translation_mm", {1.0, 0.0, 0.0}}});
+        http::request<http::string_body> post{http::verb::get, "/read/slice_delta", 11};
+        auto res = dispatch(post, state);
+        REQUIRE(res.result() == http::status::ok);
+        CHECK(json::parse(res.body())["translation_mm"][0] == Catch::Approx(1.0));
+    }
+}
+
 TEST_CASE("GET /image/latest returns 204 before first image", "[http]") {
     MarshalState state; init_state(state);
     http::request<http::string_body> req{http::verb::get, "/image/latest", 11};

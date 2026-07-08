@@ -515,6 +515,104 @@ static auto handle_get_slice_target(const http::request<Body>& req, MarshalState
     }
 }
 
+// ---------------------------------------------------------------------------
+// POST /write/slice_delta and GET /read/slice_delta
+//
+// Relative slice move from the UI: "shift by this much, rotate by this much"
+// — the command style used by incremental front-end buttons. Body (JSON),
+// at least one field required, the other defaults to zero:
+//   { "translation_mm": [dx, dy, dz],       // scanner-frame mm
+//     "rotation_rad":   [rx, ry, rz] }      // about read/phase/slice axes
+// Pushed to the scanner as MRD TEXT {"type":"slice_delta",...} with the
+// current slice geometry attached (so the scanner knows the base it moves
+// from). Exact rotation convention to be pinned to the scanner-side slice
+// control API when available.
+// ---------------------------------------------------------------------------
+template <class Body>
+static auto handle_post_slice_delta(const http::request<Body>& req, MarshalState& state)
+    -> http::response<http::string_body>
+{
+    nlohmann::json body;
+    try {
+        body = nlohmann::json::parse(req.body());
+    } catch (const std::exception& e) {
+        return json_response(req, http::status::bad_request,
+                             {{"error", std::string("bad JSON: ") + e.what()}});
+    }
+
+    const bool has_t = body.contains("translation_mm");
+    const bool has_r = body.contains("rotation_rad");
+    if (!has_t && !has_r) {
+        return json_response(req, http::status::bad_request,
+            {{"error", "need translation_mm and/or rotation_rad"}});
+    }
+    double t[3] = {0, 0, 0}, r[3] = {0, 0, 0};
+    std::string err;
+    if (has_t && !parse_vec3(body, "translation_mm", t, err))
+        return json_response(req, http::status::bad_request, {{"error", err}});
+    if (has_r && !parse_vec3(body, "rotation_rad", r, err))
+        return json_response(req, http::status::bad_request, {{"error", err}});
+
+    const std::string ts = mrd::iso8601_now_ms();
+    nlohmann::json payload;
+    payload["type"] = "slice_delta";
+    payload["translation_mm"] = {t[0], t[1], t[2]};
+    payload["rotation_rad"] = {r[0], r[1], r[2]};
+    payload["ts"] = ts;
+    {
+        // Attach the current geometry as the base of the move (null if no
+        // image seen yet this scan) — same context the ±1 nudge carries.
+        nlohmann::json geom;
+        std::lock_guard<std::mutex> lk(state.slice_geom_mtx);
+        if (state.latest_slice >= 0) {
+            auto it = state.slice_geom.find(
+                static_cast<uint16_t>(state.latest_slice));
+            if (it != state.slice_geom.end()) {
+                const auto& g = it->second;
+                geom = {
+                    {"slice", g.slice},
+                    {"position", {g.position[0], g.position[1], g.position[2]}},
+                    {"read_dir", {g.read_dir[0], g.read_dir[1], g.read_dir[2]}},
+                    {"phase_dir", {g.phase_dir[0], g.phase_dir[1], g.phase_dir[2]}},
+                    {"slice_dir", {g.slice_dir[0], g.slice_dir[1], g.slice_dir[2]}},
+                };
+            }
+        }
+        payload["slice_geometry"] = std::move(geom);
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(state.slice_delta_mtx);
+        state.latest_slice_delta_json = payload.dump();
+    }
+    const bool delivered = push_text_to_scanner(state, payload);
+    return json_response(req, http::status::ok,
+                         {{"file", "slice_delta"}, {"delivered", delivered}});
+}
+
+template <class Body>
+static auto handle_get_slice_delta(const http::request<Body>& req, MarshalState& state)
+    -> http::response<http::string_body>
+{
+    std::string cached;
+    {
+        std::lock_guard<std::mutex> lk(state.slice_delta_mtx);
+        cached = state.latest_slice_delta_json;
+    }
+    if (cached.empty()) {
+        http::response<http::string_body> res{http::status::no_content, req.version()};
+        res.keep_alive(req.keep_alive());
+        res.prepare_payload();
+        return res;
+    }
+    try {
+        return json_response(req, http::status::ok, nlohmann::json::parse(cached));
+    } catch (...) {
+        return json_response(req, http::status::internal_server_error,
+                             {{"error", "failed to parse slice delta cache"}});
+    }
+}
+
 template <class Body>
 static auto handle_get_slice_translation(const http::request<Body>& req, MarshalState& state)
     -> http::response<http::string_body>
@@ -837,6 +935,14 @@ void handle_http_request(http::request<Body>&& req, MarshalState& state, Send&& 
     }
     if (method == http::verb::get && target == "/read/slice_target") {
         send(handle_get_slice_target(req, state));
+        return;
+    }
+    if (method == http::verb::post && target == "/write/slice_delta") {
+        send(handle_post_slice_delta(req, state));
+        return;
+    }
+    if (method == http::verb::get && target == "/read/slice_delta") {
+        send(handle_get_slice_delta(req, state));
         return;
     }
     if (method == http::verb::post && target == "/pose") {
