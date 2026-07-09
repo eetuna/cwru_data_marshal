@@ -42,3 +42,7 @@ __pycache__/
 
 # mrd_bench generated wire frames
 scripts/bench*/
+# Andrew's scanner-side reference code, dropped in locally — not ours to version
+dynamic-slice-position-main/
+# temp build worktrees
+.tmp-*/
