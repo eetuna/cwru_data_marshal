@@ -24,11 +24,14 @@ RUN g++ -std=c++17 /opt/robot/server.cpp -o /opt/robot/server -lpthread
 WORKDIR /opt/robot
 
 # Initialize all data files with seed data (required for robot clients to work)
-# The server reads from /files/ directory - each file needs valid JSON
+# The server reads from /files/ directory - each file needs valid JSON.
+# saved_transform_* slots seed EMPTY ({}) — the UI treats a non-empty slot as
+# a saved prescription, so the generic seed would read as "saved zeros"
+# (matches the robot repo's own Dockerfile.server seeds).
 RUN python3 -c "import json, os; \
     seed = {'client_id': 'seed', 'sent_at': 1, 'values': [0.0, 0.0, 0.0]}; \
     files = json.load(open('files.json')); \
-    [open(f'/files/{f}', 'w').write(json.dumps(seed)) for f in files]"
+    [open(f'/files/{f}', 'w').write('{}' if f.startswith('saved_transform') else json.dumps(seed)) for f in files]"
 
 # Session data volume mount point (bind-mounted by docker-compose to SESSION_DATA_DIR)
 VOLUME ["/session-data"]
