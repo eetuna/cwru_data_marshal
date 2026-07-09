@@ -90,8 +90,12 @@ docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:l
 Flags: `--mode kspace|image` · `--fps` rate · `--frames 0` = forever · `--matrix` size · `--slices` N.
 The orbiting bright dot makes each frame visibly different (each slice has its own phase).
 `--mode kspace` lands in `from_reconstruction`, `--mode image` in `from_scanner`.
-Expected rates (Python test-tool caps, not marshal): single-slice k-space ~10 fps,
-5-slice k-space ~3-4 volumes/s, image mode ~16 fps at 192×8.
+Expected rates on a quiet machine (ceiling = the single-core test recon, not
+the marshal — measured 2026-07-06, see
+`docs/reviews/2026-07-06-end-to-end-performance-audit.md`): single-slice
+128² k-space 13–18 recon images/s; anything else on the machine eating CPU
+lowers this one-for-one. Judge pipeline speed by recon images/s
+(`/debug/perf` recv.recon_images), not the sender's fps heartbeat.
 
 **Verify multislice while streaming** (snapshot = exactly one volume; 3D read = all slices):
 ```bash
@@ -198,6 +202,37 @@ curl -s -X POST localhost:8080/write/slice_target \
 ```
 
 `./scripts/test-modes.sh` runs these checks automatically as test [5].
+
+## Record & replay
+
+Dump-mode recordings (`session-data/dump/from_scanner/scan_*.h5`) replay
+through the live stack with `scripts/replay_scan.py` — the marshal sees an
+ordinary scanner connection. Verified: a 30-frame k-space stream recorded at
+10 fps replayed in 3.4 s paced (`--fps 10`) and 0.6 s `--full-speed`, and the
+recon reconstructed the replayed data normally.
+
+```bash
+# recorded pace (falls back to --fallback-fps 10 when the recording has no
+# scanner timestamps — test-tool recordings don't):
+docker run --rm --network cwru-demo-net \
+  -v "$PWD/session-data:/data" -v "$PWD/scripts:/scripts" fire-python:latest \
+  python3 /scripts/replay_scan.py /data/dump/from_scanner/scan_<ts>.h5 --preload
+
+# fixed rate / full speed:
+#   ... replay_scan.py <file> --fps 20 --preload
+#   ... replay_scan.py <file> --full-speed
+```
+
+Notes and limits:
+- **`--preload`** reads+serializes the whole file into RAM before connecting,
+  so the send pacing is exact and the scan session never idles on the wire.
+  Without it, frames stream straight from the file — fine for image archives
+  and slow k-space, but HDF5 per-record reads cap streaming at ~60 acqs/s.
+- **Original timing** uses `acquisition_time_stamp` (Siemens ticks,
+  `--tick-ms`, default 2.5). Real scanner recordings have these; test-tool
+  recordings have zeros and use the fps fallback.
+- K-space frame boundary = repetition change; waveforms (ECG) in the
+  recording are not replayed (v1 limitation).
 
 ## Back to live / teardown
 ```bash

@@ -282,6 +282,36 @@ curl http://<marshal-host>:8080/image/latest.h5 -o latest.h5    # the actual ima
 
 ---
 
+## Record & replay
+
+Record an experiment, then replay it later as if a scanner were sending it —
+the stack cannot tell the difference.
+
+**Record** — run the stack in dump mode (Step 2c/2d) and scan; everything the
+scanner sends (k-space included) lands in `session-data/dump/from_scanner/scan_<ts>.h5`.
+
+**Replay at the recorded pace** (default; uses the recording's timestamps —
+if the recording has none, it paces at `--fallback-fps`, default 10):
+```bash
+docker run --rm --network cwru-demo-net \
+  -v "$PWD/session-data:/data" -v "$PWD/scripts:/scripts" fire-python:latest \
+  python3 /scripts/replay_scan.py /data/dump/from_scanner/scan_<ts>.h5 --preload
+```
+> You get: the recorded scan plays back through marshal → recon → viewer at
+> its original rate. `--preload` reads the file into RAM first (slow HDF5
+> read paid up front) so the pacing is exact.
+
+**Replay as fast as possible** (correctness check, not realistic timing):
+```bash
+docker run --rm --network cwru-demo-net \
+  -v "$PWD/session-data:/data" -v "$PWD/scripts:/scripts" fire-python:latest \
+  python3 /scripts/replay_scan.py /data/dump/from_scanner/scan_<ts>.h5 --full-speed --preload
+```
+
+Force a specific rate instead: `--fps N`. Details and limits: [TESTING.md](TESTING.md).
+
+---
+
 ## Step 7 — Stop
 
 ```bash
