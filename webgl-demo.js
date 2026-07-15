@@ -175,6 +175,10 @@ async function main() {
   let currentVolumeData = null;
   let currentImageData = null;
   let currentImageHistory = [];
+  let currentSnapshotSlices = [];
+  let currentDisplayedSlices = [];
+  let sliceDisplayCursor = 0;
+  let lastSliceCount = 0;
   let lastTimestamp = -1;
   let lastVolumeTimestamp = -1;
   let lastTipTimestamp = -1;
@@ -366,11 +370,11 @@ initRotationSliders();
   }
 
   // Render the latest 3 slices side-by-side on the 2D canvas.
-  function render2DImage(ctx, imageHistory) {
-    if (!Array.isArray(imageHistory) || imageHistory.length === 0) return;
+  function render2DImage(ctx, imagePanels) {
+    if (!Array.isArray(imagePanels) || imagePanels.length === 0) return;
 
     const maxPanels = 3;
-    const panels = imageHistory.slice(0, maxPanels);
+    const panels = imagePanels.slice(0, maxPanels);
     const targetWidth = Math.max(...panels.map(img => img?.width || 1));
     const targetHeight = Math.max(...panels.map(img => img?.height || 1));
     const gap = 8;
@@ -380,6 +384,20 @@ initRotationSliders();
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     ctx.font = '12px sans-serif';
     ctx.textBaseline = 'top';
+
+    const fitTextToWidth = (text, maxWidthPx) => {
+      if (ctx.measureText(text).width <= maxWidthPx) return text;
+      const suffix = '...';
+      let end = text.length;
+      while (end > 0) {
+        const candidate = text.slice(0, end) + suffix;
+        if (ctx.measureText(candidate).width <= maxWidthPx) {
+          return candidate;
+        }
+        end -= 1;
+      }
+      return suffix;
+    };
 
     for (let panelIdx = 0; panelIdx < maxPanels; panelIdx++) {
       const offsetX = panelIdx * (targetWidth + gap);
@@ -429,19 +447,50 @@ initRotationSliders();
 
       ctx.strokeStyle = '#333';
       ctx.strokeRect(offsetX + 0.5, 0.5, targetWidth - 1, targetHeight - 1);
-      ctx.fillStyle = '#0ff';
+
       const frame = Number.isFinite(imageData.frame_index) ? imageData.frame_index : '-';
-      ctx.fillText(`#${panelIdx + 1} frame ${frame}`, offsetX + 8, 8);
+      const sliceLabel = Number.isFinite(imageData.slice) ? imageData.slice : (Number.isFinite(imageData.slice_index) ? imageData.slice_index : '-');
+      const annotationLines = [`#${panelIdx + 1} f ${frame} s ${sliceLabel}`];
+      if (Array.isArray(imageData.position) && imageData.position.length === 3) {
+        const p = imageData.position;
+        annotationLines.push(`pos [${p[0].toFixed(1)}, ${p[1].toFixed(1)}, ${p[2].toFixed(1)}]`);
+      }
+
+      const padding = 8;
+      const fontSize = Math.max(10, Math.min(14, Math.floor(Math.min(targetWidth / 22, targetHeight / 10))));
+      const lineHeight = fontSize + 4;
+      const maxLines = Math.max(1, Math.floor((targetHeight - padding * 2) / lineHeight));
+      const drawCount = Math.min(annotationLines.length, maxLines);
+      const maxTextWidth = Math.max(24, targetWidth - padding * 2 - 4);
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(offsetX + 1, 1, targetWidth - 2, targetHeight - 2);
+      ctx.clip();
+      ctx.font = `${fontSize}px sans-serif`;
+
+      for (let lineIdx = 0; lineIdx < drawCount; lineIdx++) {
+        const y = padding + lineIdx * lineHeight;
+        const rawText = annotationLines[lineIdx];
+        const lineText = fitTextToWidth(rawText, maxTextWidth);
+        const measured = Math.min(maxTextWidth, ctx.measureText(lineText).width);
+
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+        ctx.fillRect(offsetX + padding - 2, y - 1, measured + 8, lineHeight - 1);
+        ctx.fillStyle = lineIdx === 0 ? '#0ff' : '#ffd43b';
+        ctx.fillText(lineText, offsetX + padding, y);
+      }
+      ctx.restore();
     }
   }
 
   // Get pixel from 2D image click
-  function getPixelFromImage2DClick(screenX, screenY, canvas, imageHistory) {
-    if (!Array.isArray(imageHistory) || imageHistory.length === 0) return null;
+  function getPixelFromImage2DClick(screenX, screenY, canvas, imagePanels) {
+    if (!Array.isArray(imagePanels) || imagePanels.length === 0) return null;
 
     const maxPanels = 3;
     const gap = 8;
-    const panels = imageHistory.slice(0, maxPanels);
+    const panels = imagePanels.slice(0, maxPanels);
     const targetWidth = Math.max(...panels.map(img => img?.width || 1));
     const targetHeight = Math.max(...panels.map(img => img?.height || 1));
     const panelSpan = targetWidth + gap;
@@ -480,7 +529,7 @@ initRotationSliders();
   function handleCanvas2DClick(mouseX, mouseY) {
     console.log(`[CLICK] 2D canvas click at (${mouseX.toFixed(0)}, ${mouseY.toFixed(0)})`);
 
-    const pixelHit = getPixelFromImage2DClick(mouseX, mouseY, canvas2D, currentImageHistory);
+    const pixelHit = getPixelFromImage2DClick(mouseX, mouseY, canvas2D, currentDisplayedSlices);
     if (pixelHit) {
       updateStatus('selectedPoint', `[${pixelHit.pixelX}, ${pixelHit.pixelY}]`);
       updateStatus('pointValue', `${(pixelHit.value * 255).toFixed(0)} / 255`);
@@ -856,6 +905,9 @@ initRotationSliders();
     const pos = Array.isArray(data?.position) && data.position.length === 3 ? data.position : null;
     const ori = data?.orientation || null;
     const px = Array.isArray(data?.pixelSize) && data.pixelSize.length >= 2 ? data.pixelSize : null;
+    const sliceIdx = Number.isFinite(data?.slice)
+      ? data.slice
+      : (Number.isFinite(data?.slice_index) ? data.slice_index : null);
 
     const readDir = (ori && Number.isFinite(ori.m00) && Number.isFinite(ori.m10) && Number.isFinite(ori.m20))
       ? [ori.m00, ori.m10, ori.m20] : null;
@@ -872,8 +924,54 @@ initRotationSliders();
     const readStr = `read=(${readDir[0].toFixed(3)}, ${readDir[1].toFixed(3)}, ${readDir[2].toFixed(3)})`;
     const phaseStr = `phase=(${phaseDir[0].toFixed(3)}, ${phaseDir[1].toFixed(3)}, ${phaseDir[2].toFixed(3)})`;
     const sliceStr = `slice=(${sliceDir[0].toFixed(3)}, ${sliceDir[1].toFixed(3)}, ${sliceDir[2].toFixed(3)})`;
+    const sliceIdxStr = sliceIdx !== null ? ` slice_idx=${sliceIdx}` : '';
     const pxStr = px ? ` px=(${px[0].toFixed(3)}, ${px[1].toFixed(3)})` : '';
-    return `frame ${data?.frame_index ?? '-'} ${posStr} ${readStr} ${phaseStr} ${sliceStr}${pxStr}`;
+    return `frame ${data?.frame_index ?? '-'}${sliceIdxStr} ${posStr} ${readStr} ${phaseStr} ${sliceStr}${pxStr}`;
+  }
+
+  function formatDisplayedSliceIndicesForDebug(slices) {
+    if (!Array.isArray(slices) || slices.length === 0) return 'displayed=[]';
+    const labels = slices.map((s) => {
+      if (!s) return '-';
+      if (Number.isFinite(s.slice)) return s.slice;
+      if (Number.isFinite(s.slice_index)) return s.slice_index;
+      return '-';
+    });
+    return `displayed=[${labels.join(',')}]`;
+  }
+
+  function isRenderableSliceRecord(slice) {
+    return !!(
+      slice &&
+      Array.isArray(slice.values) &&
+      Number.isFinite(slice.width) &&
+      Number.isFinite(slice.height) &&
+      slice.width > 0 &&
+      slice.height > 0 &&
+      slice.geometry_valid !== false
+    );
+  }
+
+  function getSequentialDisplayPanels(slices, maxPanels = 3) {
+    if (!Array.isArray(slices) || slices.length === 0) return [];
+    if (slices.length <= maxPanels) {
+      sliceDisplayCursor = 0;
+      return slices.slice();
+    }
+
+    if (sliceDisplayCursor >= slices.length) {
+      sliceDisplayCursor = 0;
+    }
+
+    const panels = [];
+    for (let i = 0; i < maxPanels; i++) {
+      const idx = (sliceDisplayCursor + i) % slices.length;
+      panels.push(slices[idx]);
+    }
+
+    // Keep panel cycling behavior analogous to existing frame history shifting.
+    sliceDisplayCursor = (sliceDisplayCursor + 1) % slices.length;
+    return panels;
   }
 
   async function updateTextureFromServer() {
@@ -891,32 +989,76 @@ initRotationSliders();
       if (data.timestamp && data.timestamp !== lastTimestamp) {
         lastTimestamp = data.timestamp;
         
-        if (data.values && Array.isArray(data.values)) {
-          currentImageData = data;
-          currentImageHistory.unshift(data);
-          currentImageHistory = currentImageHistory.slice(0, 3);
-          postWillRender2DImageToServer(data);
-          render2DImage(gl2d, currentImageHistory);
-          postRendered2DImageToServer(data);
+        // New payload path: one snapshot can carry multiple per-slice records.
+        const payloadSlices = Array.isArray(data.slices) ? data.slices : [];
+        const renderableSlices = payloadSlices
+          .filter(isRenderableSliceRecord)
+          .map((slice, idx) => ({
+            ...slice,
+            frame_index: data.frame_index,
+            timestamp: data.timestamp,
+            slice_index: Number.isFinite(slice.slice_index) ? slice.slice_index : idx,
+          }));
+
+        // Backward-compatible single-slice path.
+        const fallbackSingle = (data.values && Array.isArray(data.values)) ? [{
+          ...data,
+          slice_index: 0,
+          geometry_valid: data.geometry_valid !== false,
+        }] : [];
+
+        const usingCompatibilityFallback = renderableSlices.length === 0 && fallbackSingle.length > 0;
+        const activeSlices = renderableSlices.length ? renderableSlices : fallbackSingle;
+
+        if (activeSlices.length > 0) {
+          currentSnapshotSlices = activeSlices;
+          if (lastSliceCount !== currentSnapshotSlices.length) {
+            sliceDisplayCursor = 0;
+            lastSliceCount = currentSnapshotSlices.length;
+          }
+
+          currentDisplayedSlices = getSequentialDisplayPanels(currentSnapshotSlices, 3);
+          currentImageHistory = currentDisplayedSlices.slice();
+
+          const preferredSelected = Number.isFinite(data.selected_slice_index)
+            ? currentSnapshotSlices.find((s) => s.slice_index === data.selected_slice_index || s.source_index === data.selected_slice_index)
+            : null;
+          currentImageData = preferredSelected || currentDisplayedSlices[0] || currentSnapshotSlices[0];
+
+          postWillRender2DImageToServer(currentImageData);
+          render2DImage(gl2d, currentDisplayedSlices);
+          postRendered2DImageToServer(currentImageData);
           
           // Extract metadata and update renderer
           const metadata = {
-            position: data.position,
-            orientation: data.orientation,
-            pixelSize: data.pixelSize
+            position: currentImageData.position,
+            orientation: currentImageData.orientation,
+            pixelSize: currentImageData.pixelSize
           };
-          image2DRenderer.updateImage(data.values, data.width, data.height, metadata);
+          image2DRenderer.updateImage(currentImageData.values, currentImageData.width, currentImageData.height, metadata);
 
-          // Surface the image-header pose in the UI debug line for live verification.
-          updateStatus('debug', formatHeaderPoseForDebug(data));
+          // Surface the currently shown panel slice(s) in debug to avoid confusion when selected_slice_index is fixed.
+          const debugSlice = currentDisplayedSlices[0] || currentImageData;
+          const selectedStr = Number.isFinite(data.selected_slice_index)
+            ? ` selected=${data.selected_slice_index}`
+            : '';
+          const fallbackDebugPrefix = usingCompatibilityFallback
+            ? '!!! BACKWARD-COMPATIBILITY FALLBACK ACTIVE: using legacy single-slice fields (no valid slices[]) !!! '
+            : '';
+          updateStatus('debug', `${fallbackDebugPrefix}${formatHeaderPoseForDebug(debugSlice)} ${formatDisplayedSliceIndicesForDebug(currentDisplayedSlices)}${selectedStr}`);
+          updateStatus('debugFallback', usingCompatibilityFallback
+            ? 'UNIQUE_FALLBACK_DEBUG: ACTIVE (legacy single-slice fields in use)'
+            : 'UNIQUE_FALLBACK_DEBUG: NOT_USED (per-slice slices[] path active)');
           
-          updateStatus('status2d', `✓ last ${Math.min(currentImageHistory.length, 3)} slices (${data.width}x${data.height})`);
+          const skippedCount = payloadSlices.length - renderableSlices.length;
+          updateStatus('status2d', `✓ showing ${currentDisplayedSlices.length}/${currentSnapshotSlices.length} slices (${currentImageData.width}x${currentImageData.height})${skippedCount > 0 ? `; skipped ${skippedCount} invalid-geometry` : ''}`);
           return true;
         }
       }
     } catch (error) {
       console.error('Error loading 2D image:', error);
       updateStatus('status2d', `✗ ${error.message}`);
+      updateStatus('debugFallback', 'UNIQUE_FALLBACK_DEBUG: UNKNOWN (2D fetch error)');
     }
     return false;
   }

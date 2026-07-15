@@ -24,6 +24,10 @@ os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 import h5py
 
 
+ORTHO_TOL = 1e-3
+UNIT_TOL = 1e-3
+
+
 def _as_float_list(value, expected_len=None):
     """Best-effort conversion of an HDF5 field/ndarray to a float list."""
     try:
@@ -40,6 +44,54 @@ def _as_float_list(value, expected_len=None):
     except Exception:
         return None
     return None
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _norm(a):
+    return (_dot(a, a)) ** 0.5
+
+
+def _cross(a, b):
+    return [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+
+
+def _validate_geometry_vectors(read_dir, phase_dir, slice_dir):
+    if not (read_dir and phase_dir and slice_dir):
+        return False, "missing read_dir/phase_dir/slice_dir"
+
+    nr = _norm(read_dir)
+    np = _norm(phase_dir)
+    ns = _norm(slice_dir)
+    if abs(nr - 1.0) > UNIT_TOL:
+        return False, f"read_dir not unit length ({nr:.6f})"
+    if abs(np - 1.0) > UNIT_TOL:
+        return False, f"phase_dir not unit length ({np:.6f})"
+    if abs(ns - 1.0) > UNIT_TOL:
+        return False, f"slice_dir not unit length ({ns:.6f})"
+
+    rp = _dot(read_dir, phase_dir)
+    rs = _dot(read_dir, slice_dir)
+    ps = _dot(phase_dir, slice_dir)
+    if abs(rp) > ORTHO_TOL:
+        return False, f"read_dir·phase_dir not orthogonal ({rp:.6f})"
+    if abs(rs) > ORTHO_TOL:
+        return False, f"read_dir·slice_dir not orthogonal ({rs:.6f})"
+    if abs(ps) > ORTHO_TOL:
+        return False, f"phase_dir·slice_dir not orthogonal ({ps:.6f})"
+
+    handed = _cross(read_dir, phase_dir)
+    align = _dot(handed, slice_dir)
+    if align < 0.0:
+        return False, f"left-handed basis (cross(read,phase)·slice={align:.6f})"
+
+    return True, None
 
 
 def _extract_geometry_from_header_row(row, nx, ny):
@@ -71,6 +123,8 @@ def _extract_geometry_from_header_row(row, nx, ny):
             "m20": read_dir[2], "m21": phase_dir[2], "m22": slice_dir[2],
         }
 
+    geom_valid, geom_error = _validate_geometry_vectors(read_dir, phase_dir, slice_dir)
+
     out = {}
     if position:
         out["position"] = position
@@ -78,7 +132,35 @@ def _extract_geometry_from_header_row(row, nx, ny):
         out["orientation"] = orientation
     if pixel_size:
         out["pixelSize"] = pixel_size
+    if read_dir:
+        out["read_dir"] = read_dir
+    if phase_dir:
+        out["phase_dir"] = phase_dir
+    if slice_dir:
+        out["slice_dir"] = slice_dir
+    out["geometry_valid"] = geom_valid
+    if not geom_valid:
+        out["geometry_error"] = geom_error
     return out
+
+
+def _build_slice_record(values_2d, nx, ny, header_row, source_index, display_index):
+    rec = {
+        "slice_index": int(display_index),
+        "source_index": int(source_index),
+        "width": int(nx),
+        "height": int(ny),
+        "values": values_2d.flatten().tolist(),
+    }
+    rec.update(_extract_geometry_from_header_row(header_row, nx, ny))
+
+    names = getattr(getattr(header_row, "dtype", None), "names", None) or ()
+    if "slice" in names:
+        try:
+            rec["slice"] = int(header_row["slice"])
+        except Exception:
+            pass
+    return rec
 
 
 def find_image_dataset(f):
@@ -160,27 +242,87 @@ def read_frame(fpath, frame_index, mode):
                 hdr_rows = None
 
         if mode == "2d":
-            header_idx = fi
-            if slice_order is not None:
-                mid = slice_order[len(slice_order) // 2]
-                header_idx = mid
-                values = data[mid, 0, 0, :, :].flatten().tolist()   # middle slice
+            slices = []
+            selected_idx = 0
+
+            if slice_order is not None and hdr_rows is not None:
+                for disp_idx, src_idx in enumerate(slice_order):
+                    if src_idx >= len(hdr_rows):
+                        continue
+                    values_2d = data[src_idx, 0, 0, :, :]
+                    slices.append(_build_slice_record(values_2d, nx, ny, hdr_rows[src_idx], src_idx, disp_idx))
+                selected_idx = len(slices) // 2 if slices else 0
             else:
-                values = data[fi, 0, nz // 2, :, :].flatten().tolist()
-            result = {"width": int(nx), "height": int(ny), "values": values}
-            if hdr_rows is not None and len(hdr_rows) > header_idx:
-                result.update(_extract_geometry_from_header_row(hdr_rows[header_idx], nx, ny))
+                # Fallback path: preserve previous behavior by selecting a single
+                # displayed slice when full per-slice header mapping is unavailable.
+                header_idx = fi
+                values_2d = data[fi, 0, nz // 2, :, :]
+                if hdr_rows is not None and len(hdr_rows) > header_idx:
+                    slices.append(_build_slice_record(values_2d, nx, ny, hdr_rows[header_idx], header_idx, 0))
+                else:
+                    slices.append({
+                        "slice_index": 0,
+                        "source_index": int(fi),
+                        "width": int(nx),
+                        "height": int(ny),
+                        "values": values_2d.flatten().tolist(),
+                        "geometry_valid": False,
+                        "geometry_error": "header_unavailable",
+                    })
+
+            selected = slices[selected_idx] if slices else {
+                "width": int(nx),
+                "height": int(ny),
+                "values": [],
+                "geometry_valid": False,
+                "geometry_error": "no_slice_records",
+            }
+
+            # Backward-compatible fields + new per-slice payload.
+            result = {
+                "width": int(selected.get("width", nx)),
+                "height": int(selected.get("height", ny)),
+                "values": selected.get("values", []),
+                "slice_count": int(len(slices)),
+                "selected_slice_index": int(selected_idx),
+                "slices": slices,
+            }
+            for key in (
+                "position", "orientation", "pixelSize",
+                "read_dir", "phase_dir", "slice_dir",
+                "geometry_valid", "geometry_error", "slice"
+            ):
+                if key in selected:
+                    result[key] = selected[key]
             return result
         elif mode == "3d":
             if slice_order is not None:
                 values = []
+                slice_geometries = []
                 for i in slice_order:
                     values.extend(data[i, 0, 0, :, :].flatten().tolist())
+                    if hdr_rows is not None and i < len(hdr_rows):
+                        entry = {"source_index": int(i)}
+                        entry.update(_extract_geometry_from_header_row(hdr_rows[i], nx, ny))
+                        names = getattr(getattr(hdr_rows[i], "dtype", None), "names", None) or ()
+                        if "slice" in names:
+                            try:
+                                entry["slice"] = int(hdr_rows[i]["slice"])
+                            except Exception:
+                                pass
+                        slice_geometries.append(entry)
                 depth = len(slice_order)
             else:
                 values = data[fi, 0, :, :, :].flatten().tolist()
                 depth = nz
-            result = {"width": int(nx), "height": int(ny), "depth": int(depth), "values": values}
+                slice_geometries = []
+            result = {
+                "width": int(nx),
+                "height": int(ny),
+                "depth": int(depth),
+                "values": values,
+                "slice_geometries": slice_geometries,
+            }
             if hdr_rows is not None and len(hdr_rows) > fi:
                 result.update(_extract_geometry_from_header_row(hdr_rows[fi], nx, ny))
             return result
