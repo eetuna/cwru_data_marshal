@@ -37,12 +37,15 @@ The CWRU Data Marshal is a persistent intermediary between the MRI scanner and t
 
 **Marshal → Recon:** MRD TCP to `--recon-host:--recon-port`. The marshal opens a TCP connection to the recon service and forwards scanner messages using the same framing. Recon sends return messages back on this connection.
 
-**Marshal → Scanner (return path):** Recon return messages are pushed back to the scanner on the SAME TCP socket the scanner connected on. This satisfies the requirement: "Marshall needs to push, and it must come over the existing connection that was established for the scan."
+**Marshal → Scanner (return path):** Recon return messages are pushed back to the scanner on the SAME TCP socket the scanner connected on. This satisfies the requirement: "Marshall needs to push, and it must come over the existing connection that was established for the scan." The same socket also carries **UI slice commands**: a POST to `/write/file_slice_translation`, `/write/slice_delta`, or `/write/slice_target` is pushed to the scanner as an `MRD_MESSAGE_TEXT (5)` JSON frame (`"type"`-tagged, current slice geometry from the image headers attached). See [SLICE_CONTROL_HANDOFF.md](SLICE_CONTROL_HANDOFF.md).
 
 **Query/Control clients → Marshal:** HTTP on `--http` (default 0.0.0.0:8080). The
-webgl-client and any external consumer use it: `GET /image/latest`,
-`GET/PUT /transform`, `POST/GET /pose`, `GET /health`, `GET /dump/scanner`,
-`GET /dump/recon`, and `/debug/*` diagnostics.
+webgl-client and any external consumer use it: `GET /status`, `GET /image/latest`,
+`GET /image/latest.h5`, the slice-command endpoints
+(`/write|read/file_slice_translation`, `/write|read/slice_delta`,
+`/write|read/slice_target`, `GET /read/slice_geometry`), `GET/PUT /transform`,
+`POST/GET /pose`, `GET /health`, `GET /dump/scanner`, `GET /dump/recon`, and
+`/debug/*` diagnostics. Authoritative list: [API_REFERENCE.md](API_REFERENCE.md).
 
 **Image client (webgl-client):** Polls `GET /image/latest` over HTTP, receives
 `{path, error}` pointing at a closed companion HDF5 file, and opens it with default
@@ -134,7 +137,9 @@ recon.
 ## Docker Compose Topology
 
 There is a single `docker-compose.yml`. Env knobs: `MARSHAL_DUMP` (`""` = live,
-`--dump` = dump/archival), `RECON_HOST`/`RECON_PORT` (recon target, default
+`--dump` = dump/archival), `MARSHAL_LATEST` (default `--latest-dir /latest` = RAM
+snapshot on host `/dev/shm/cwru-latest`; set empty for the legacy on-disk snapshot
+under `session-data/live/`), `RECON_HOST`/`RECON_PORT` (recon target, default
 `recon:9002`), `SESSION_DATA_DIR` (data path), and the exposed ports
 (`HTTP_PORT`/`MRD_PORT`/`ROBOT_PORT`/`UI_PORT`/`WRITE_PORT`). The bundled test recon is
 off by default and enabled with `--profile test-recon`. The scanner is **not** a
@@ -176,13 +181,10 @@ ${dump_dir}/                          session-data umbrella (--dump-dir flag)
 ├── live/                             ONLY in live mode (no --dump)
 │   ├── from_scanner/
 │   │   ├── scan_<ts>.h5.spool        raw MRD wire frames, written during scan
-│   │   ├── scan_<ts>.h5              ISMRMRD HDF5, produced by converter on CLOSE
-│   │   └── latest_image.h5           closed companion, atomic-rename per IMAGE
+│   │   └── scan_<ts>.h5              ISMRMRD HDF5, produced by converter on CLOSE
 │   └── from_reconstruction/
 │       ├── scan_<ts>.h5.spool
-│       ├── scan_<ts>.h5
-│       ├── latest_image.h5
-│       └── latest_error.png          single overwritten recon-failure indicator
+│       └── scan_<ts>.h5
 │
 └── dump/                             ONLY in dump mode (--dump)
     ├── from_scanner/
@@ -191,6 +193,17 @@ ${dump_dir}/                          session-data umbrella (--dump-dir flag)
     └── from_reconstruction/
         ├── scan_<ts>.h5.spool
         └── scan_<ts>.h5
+
+${latest_dir}/                        snapshot root (--latest-dir; compose default
+│                                     /latest = RAM-backed /dev/shm/cwru-latest.
+│                                     With MARSHAL_LATEST= unset-to-empty, these
+│                                     files live under ${dump_dir}/live/ instead.)
+└── live/
+    ├── from_scanner/
+    │   └── latest_image.h5           closed companion, atomic-rename per IMAGE
+    └── from_reconstruction/
+        ├── latest_image.h5
+        └── latest_error.png          single overwritten recon-failure indicator
 ```
 
 - `<ts>` is shared between scanner and recon lanes within the active mode.

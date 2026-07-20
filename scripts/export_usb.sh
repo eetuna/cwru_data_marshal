@@ -37,6 +37,12 @@ IMAGES=(
 )
 
 echo "[1/4] Checking images are built..."
+echo "  NOTE: this script does NOT build. It packages the images as they are."
+echo "  If code changed since the last build, run ./scripts/build-client-images.sh first."
+for img in "${IMAGES[@]}"; do
+    created=$(docker inspect --format '{{.Created}}' "$img" 2>/dev/null | cut -dT -f1)
+    [ -n "$created" ] && echo "  $img  (built $created)"
+done
 for img in "${IMAGES[@]}"; do
     docker image inspect "$img" >/dev/null 2>&1 \
         || { echo "  ✗ missing: $img  (build it first)"; exit 1; }
@@ -60,17 +66,34 @@ cat > "$OUT_DIR/README.md" <<'EOF'
     docker load -i cwru-images.tar
     docker images | grep -E "cwru|fire-python"
 
-## 2. Run
+## 2. Run — PICK ONE (a recon must come from somewhere; none runs by default)
+
     mkdir -p session-data
-    docker compose up -d                       # live mode
-    # MARSHAL_DUMP=--dump docker compose up -d   # dump/archival mode
+
+    # (a) REAL recon on another machine:
+    RECON_HOST=<recon-ip> RECON_PORT=<its-port> docker compose up -d
+
+    # (b) REAL recon as a docker container on THIS machine:
+    RECON_HOST=<recon-container-name> RECON_PORT=<its-port> docker compose up -d
+    docker network connect cwru-demo-net <recon-container-name>
+
+    # (c) bundled TEST recon (demo only):
+    docker compose --profile test-recon up -d
+
+    # Recording session (add in front of any of the above; viewer stays blank,
+    # everything the scanner sends is archived raw and replayable):
+    # MARSHAL_DUMP=--dump ...
+
     docker compose ps                          # wait until healthy
+    curl localhost:8080/status                 # mode + recon configured?
+    # prove the recon is reachable BEFORE scanning (must print "Connected"):
+    docker exec cwru-mri-marshal curl -v telnet://<recon-host-or-name>:<port>
 
 - WebGL UI:  http://<host>:3000
-- MRI HTTP:  http://<host>:8080   (/image/latest, /health)
+- MRI HTTP:  http://<host>:8080   (/status, /image/latest, /image/latest.h5)
 - MRD TCP:   <host>:9100   <-- point the scanner here
-- Recon:     python-ismrmrd-server (invertcontrast); used only for k-space.
-             Scanner-sent images pass straight through to webgl.
+- k-space goes to the recon you configured; scanner-sent images pass
+  straight through to webgl.
 
 ## 3. Feed data without a real scanner (optional)
     docker run --rm -v "$PWD/session-data:/data" fire-python:latest \
@@ -82,9 +105,16 @@ cat > "$OUT_DIR/README.md" <<'EOF'
 
 ## Requirements
 - amd64 Linux host, Docker Engine 20.10+ / Compose v2.
-- Ports 3000, 3001, 8080, 8081, 9100 free.
+- Ports 3000, 3001, 8080, 8081, 9100 free (remap with UI_PORT/HTTP_PORT/
+  ROBOT_PORT/MRD_PORT env vars in front of the compose command).
+
+## Results
+- Live mode: every scan archived to session-data/live/from_reconstruction/
+  scan_*.h5 (full images incl. position/orientation headers).
+- Dump mode: raw stream in session-data/dump/from_scanner/ (replayable).
 
 ## Teardown
+    docker network disconnect cwru-demo-net <recon-container-name>  # if (b)
     docker compose down
 EOF
 

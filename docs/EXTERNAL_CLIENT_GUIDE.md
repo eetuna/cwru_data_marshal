@@ -57,6 +57,9 @@ Prefix either start command with `MARSHAL_DUMP=--dump` for dump/archival mode.
   active); `--dump` = archival-only mode (canonical ISMRMRD H5 written at scan
   close, no live snapshot). The two modes are mutually exclusive.
 - `RECON_HOST` / `RECON_PORT` — recon target (default `recon:9002`).
+- `MARSHAL_LATEST` — RAM snapshot toggle. Default on (`--latest-dir /latest`,
+  host `/dev/shm/cwru-latest`); set empty (`MARSHAL_LATEST=`) to put the
+  snapshot back on disk under `session-data/live/`.
 - `SESSION_DATA_DIR` — host path for the session-data volume.
 - `HTTP_PORT` / `MRD_PORT` / `ROBOT_PORT` / `UI_PORT` / `WRITE_PORT` — exposed
   host ports.
@@ -143,15 +146,29 @@ In **live mode**, poll `GET /image/latest`. It returns a pointer to a stable,
 closed HDF5 snapshot that the marshal atomically renames on each new image:
 
 ```json
-{ "path": "/session-data/live/from_reconstruction/latest_image.h5", "error": false }
+{ "path": "/latest/live/from_reconstruction/latest_image.h5",
+  "error": false, "generation": 42 }
 ```
 
-- `path` — closed HDF5 file; image data lives under group `image_0`.
+- `path` — closed HDF5 file; image data lives under group `image_0`. With the
+  default stack the snapshot lives on the RAM-backed `/latest` volume (host
+  `/dev/shm/cwru-latest`); with `MARSHAL_LATEST=` (disk mode) it is under
+  `session-data/live/...` instead.
+- `generation` — increments per published image; poll cheaply by comparing it.
 - `error` — `true` if reconstruction is currently failing (`path` then points to
   a `latest_error.png`).
 - **`204 No Content`** — no live image published yet this scan.
 - **`404 Not Found`** — dump mode: archival-only. Read the per-scan
   `dump/from_reconstruction/scan_*.h5` after the scan ends.
+
+**Reader on another machine (or no shared volume)?** Skip the path entirely and
+fetch the bytes over HTTP — `GET /image/latest.h5` returns the snapshot file
+itself (supports `ETag`/`If-None-Match` keyed on `generation`):
+
+```python
+r = requests.get(f"{MRI}/image/latest.h5")
+open("latest.h5", "wb").write(r.content)
+```
 
 ```python
 import time, requests, h5py
@@ -171,9 +188,11 @@ while True:
     time.sleep(0.05)
 ```
 
-The image path lives on the `session-data` volume, so a container reader should
-mount it read-only (see webgl-client in `docker-compose.yml`); a host reader uses
-`./session-data/...` directly. See [HDF5 notes](#hdf5-reading-notes) below.
+A container reader that follows the `path` must mount the **`/latest` volume**
+read-only (host `/dev/shm/cwru-latest` — see webgl-client in
+`docker-compose.yml`, which mounts both `/latest:ro` and `/session-data:ro`);
+per-scan archives stay on `session-data`. Readers without volume access use
+`GET /image/latest.h5` instead. See [HDF5 notes](#hdf5-reading-notes) below.
 
 ---
 

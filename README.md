@@ -18,10 +18,14 @@ Add `MARSHAL_DUMP=--dump` in front for dump/archival mode. Then open the viewer 
 **http://localhost:3000**. Drive data in with a real scanner or `python-ismrmrd-server`
 `client.py` against `mri-marshal:9100` (see [QUICK_START](docs/QUICK_START.md)).
 
-Knobs (env on `docker compose up`): `MARSHAL_DUMP` (live/dump), `RECON_HOST`/`RECON_PORT`
-(recon target), `SESSION_DATA_DIR` (data path), `HTTP_PORT`/`MRD_PORT`/`ROBOT_PORT`/`UI_PORT`/`WRITE_PORT`
+Knobs (env on `docker compose up`): `MARSHAL_DUMP` (live/dump), `MARSHAL_LATEST`
+(RAM snapshot — default on at `/dev/shm/cwru-latest`; set empty for on-disk),
+`RECON_HOST`/`RECON_PORT` (recon target), `SESSION_DATA_DIR` (data path),
+`HTTP_PORT`/`MRD_PORT`/`ROBOT_PORT`/`UI_PORT`/`WRITE_PORT`
 (exposed ports). The marshal routes automatically: k-space → recon; scanner-sent images →
-straight to the viewer (no per-scan choice).
+straight to the viewer (no per-scan choice). UI slice commands (translate/rotate/set
+position+orientation) are relayed to the scanner over the live MRD connection — see
+[SLICE_CONTROL_HANDOFF.md](docs/SLICE_CONTROL_HANDOFF.md).
 
 ## What runs
 
