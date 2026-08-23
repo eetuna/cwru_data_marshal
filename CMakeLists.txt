@@ -214,6 +214,20 @@ if(BUILD_TESTING)
     nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target} CURL::libcurl)
   add_test(NAME test_recon_group_header COMMAND test_recon_group_header)
 
+  # 2026-08-18 scanner-test regressions: per-publish generation counter,
+  # repeat-slice group flush, EOF flush of pending partial groups.
+  add_executable(test_publish_semantics
+    tests/test_publish_semantics.cpp
+    src/mrd_sink.cpp
+    src/dump_recorder.cpp
+    src/live_image_recorder.cpp
+    src/latest_image_writer.cpp
+  )
+  target_link_libraries(test_publish_semantics PRIVATE
+    Catch2::Catch2WithMain Boost::system Threads::Threads
+    nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target} CURL::libcurl)
+  add_test(NAME test_publish_semantics COMMAND test_publish_semantics)
+
   # HIGH #8 regression: second concurrent scanner must be rejected.
   add_executable(test_scanner_race
     tests/test_scanner_race.cpp
