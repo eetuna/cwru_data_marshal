@@ -953,16 +953,19 @@ private:
             const uint64_t epoch_at_eof = state_.scan_epoch.load();
 
             // Scanner died abnormally with a recon session engaged: end the
-            // recon session NOW rather than leaving it dangling until the
-            // next scan's begin_session() (the python server would sit
-            // blocked in recv with its savedata file open). Send CLOSE so
-            // recon finalizes its own side; the wait is short and fixed —
-            // the scanner is gone, so recon's tail images have nowhere to
-            // go and there is no one waiting on a longer flush.
+            // recon session rather than leaving it dangling until the next
+            // scan's begin_session() (the python server would sit blocked
+            // in recv with its savedata file open). Send CLOSE so recon
+            // finalizes its own side, and give it the same configurable
+            // flush window as the normal-CLOSE path: even with the scanner
+            // gone, recon tail images still land in the recon-lane archive
+            // and the /image/latest snapshot, so cutting a slow recon (e.g.
+            // GRAPPA on a remote VM) off at a fixed 2 s lost the tail.
             if (recon_was_active && forwarder_) {
                 if (forwarder_->is_connected()) {
                     forwarder_->post_close();
-                    forwarder_->wait_for_close(std::chrono::milliseconds(2000));
+                    forwarder_->wait_for_close(
+                        std::chrono::milliseconds(state_.recon_close_timeout_ms));
                 }
                 forwarder_->end_session();
             }
