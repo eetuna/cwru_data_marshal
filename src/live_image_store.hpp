@@ -141,15 +141,24 @@ namespace mrd
         }
 
         auto dest = lane_latest_path(state, lane);
-        const auto generation = state.latest_image_generation.load();
-        auto on_complete = [&state, generation](const std::filesystem::path &path)
+        // Stale-publish guard: capture the scan epoch at enqueue time. If a
+        // new scan's METADATA arrives while this publish is still in the
+        // writer queue, reset_live_outputs_for_new_scan has already deleted
+        // the snapshot the publish would advertise — discard it instead of
+        // resurrecting a dead scan's path.
+        const auto epoch = state.scan_epoch.load();
+        auto on_complete = [&state, epoch](const std::filesystem::path &path)
         {
-            if (state.latest_image_generation.load() != generation)
+            if (state.scan_epoch.load() != epoch)
                 return;
             state.last_publish_ms.store(static_cast<int64_t>(now_ms_epoch()));
             std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
             state.latest_image_path = path.string();
             state.latest_image_error = false;
+            // Path and generation move together under latest_image_mtx so
+            // /image/latest readers never see a new generation with a stale
+            // path (or vice versa).
+            state.latest_image_generation.fetch_add(1);
         };
 
         if (state.latest_writer)
@@ -167,6 +176,25 @@ namespace mrd
         {
             LOG_WARN("Latest H5 write failed for " << lane_name(lane) << ": " << e.what());
         }
+    }
+
+    // Publish a pending, non-empty recon group and reset it. Caller holds
+    // scan_mtx. Used when a recon stream ends (normal EOF or abnormal-EOF
+    // finalize): a group still buffering at that point will never complete,
+    // so surface the partial result on /image/latest instead of silently
+    // dropping it. publish_latest_snapshot only enqueues to the async writer
+    // (no lock conflict), and its scan_epoch guard discards the publish if a
+    // new scan has already taken over.
+    inline void flush_pending_recon_group_locked(MarshalState &state)
+    {
+        auto &group = state.recon_latest_group;
+        if (group.active && !group.published && !group.images.empty())
+        {
+            publish_latest_snapshot(state, LiveLane::Recon,
+                                    state.current_xml_header,
+                                    std::move(group.images));
+        }
+        group.reset();
     }
 
     inline bool recon_group_is_complete(const MarshalState &state,
@@ -240,6 +268,28 @@ namespace mrd
                 auto &recon_group = state.recon_latest_group;
                 if (recon_group.active && recon_group.image_series_index != parsed.header.image_series_index)
                 {
+                    if (!recon_group.published && !recon_group.images.empty())
+                    {
+                        publish_images = recon_group.images;
+                    }
+                    recon_group.reset();
+                }
+                else if (recon_group.active &&
+                         std::find(recon_group.seen_slices.begin(),
+                                   recon_group.seen_slices.end(),
+                                   parsed.header.slice) != recon_group.seen_slices.end())
+                {
+                    // Repeat of a slice already in the buffered group: the
+                    // recon has started a new pass over the same prescription
+                    // without bumping the series index. Flush the buffered
+                    // group so it reaches /image/latest instead of buffering
+                    // forever (the "frozen during scan, burst after" failure
+                    // when same-orientation slices repeat), and start a new
+                    // group with this image. Cannot collide with the
+                    // group-complete publish below: with expected slices
+                    // <= 1 every image completes instantly and no group ever
+                    // buffers, and with expected > 1 the single image pushed
+                    // after this reset cannot complete the fresh group.
                     if (!recon_group.published && !recon_group.images.empty())
                     {
                         publish_images = recon_group.images;
@@ -332,7 +382,7 @@ namespace mrd
         }
         if (lane == LiveLane::Recon)
         {
-            state.recon_latest_group.reset();
+            flush_pending_recon_group_locked(state);
         }
     }
 
@@ -363,7 +413,7 @@ namespace mrd
         }
         if (lane == LiveLane::Recon)
         {
-            state.recon_latest_group.reset();
+            flush_pending_recon_group_locked(state);
         }
     }
 
@@ -377,7 +427,7 @@ namespace mrd
         else
         {
             state.recon_lane_finalized = true;
-            state.recon_latest_group.reset();
+            flush_pending_recon_group_locked(state);
         }
 
         if (state.scanner_lane_finalized && state.recon_lane_finalized)

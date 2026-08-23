@@ -140,8 +140,9 @@ static auto handle_get_image_latest(const http::request<Body>& req, MarshalState
     nlohmann::json j;
     j["path"] = state.latest_image_path;
     j["error"] = state.latest_image_error;
-    // Monotonic per-scan publish generation. Clients remember the last value
-    // and skip re-reading the snapshot when it hasn't changed.
+    // Monotonic publish generation, bumped on every successful snapshot
+    // publish. Clients remember the last value and skip re-reading the
+    // snapshot when it hasn't changed.
     j["generation"] = state.latest_image_generation.load();
     return json_response(req, http::status::ok, j);
 }
