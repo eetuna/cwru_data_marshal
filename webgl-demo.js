@@ -365,8 +365,15 @@ initRotationSliders();
     const idxBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuffer);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(quadIndices), gl.STATIC_DRAW);
-    
+
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+
+    // Free per-call buffers: renderQuad runs several times per animation
+    // frame, and undeleted buffer objects accumulate just like the texture
+    // leak fixed alongside this (same context-lost failure class).
+    gl.deleteBuffer(posBuffer);
+    gl.deleteBuffer(texBuffer);
+    gl.deleteBuffer(idxBuffer);
   }
 
   // Render the latest 3 slices side-by-side on the 2D canvas.
@@ -1703,6 +1710,10 @@ initRotationSliders();
       gl.uniform1f(programInfo.uniformLocations.pointSize, 1.0);
       gl.lineWidth(2.0);
       gl.drawArrays(gl.LINE_STRIP, 0, linePoints.length);
+
+      // Free per-frame buffers (see renderQuad note).
+      gl.deleteBuffer(splinePosBuffer);
+      gl.deleteBuffer(splineColBuffer);
     }
 
     // Draw marker points on top of the curve — all points, no subsampling.
@@ -1740,6 +1751,12 @@ initRotationSliders();
 
     gl.uniform1f(programInfo.uniformLocations.pointSize, 1.0);
     gl.drawArrays(gl.LINES, 0, 6);
+
+    // Free per-frame buffers (see renderQuad note).
+    gl.deleteBuffer(posBuffer);
+    gl.deleteBuffer(colBuffer);
+    gl.deleteBuffer(axisPosBuffer);
+    gl.deleteBuffer(axisColBuffer);
   }
 
   // Render OFF surface mesh overlaid on the 3D volume canvas

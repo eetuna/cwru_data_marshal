@@ -77,20 +77,45 @@ async function fetchMriLatest() {
 
 // The `timestamp` the browser uses to decide whether to re-render
 // (webgl-demo.js gates on `data.timestamp !== lastTimestamp`). With a
-// generation-aware marshal this is the generation itself — stable between
-// publishes, so idle polls stop triggering re-renders (the post-scan
-// infinite-rerender / plane-jitter bug). Older marshals without a
-// generation fall back to the old wall-clock behavior.
+// generation-aware marshal this is derived from the generation — stable
+// between publishes, so idle polls stop triggering re-renders (the
+// post-scan infinite-rerender / plane-jitter bug). Older marshals without
+// a generation fall back to the old wall-clock behavior.
+//
+// Restart safety: the marshal's generation restarts at 0 when the marshal
+// restarts, and the snapshot path is constant, so a bare generation could
+// repeat values a long-lived viewer has already seen (stale cache hits,
+// silently skipped frames). Detect a restart as a generation decrease and
+// fold a nonce into the token so post-restart values never collide with
+// pre-restart ones.
+let maxGenerationSeen = -1;
+let marshalRestartNonce = 0;
+
+function noteGeneration(meta) {
+  if (meta.generation === null) return;
+  if (meta.generation < maxGenerationSeen) {
+    marshalRestartNonce += 1;
+    mriReadCache['2d'] = null;
+    mriReadCache['3d'] = null;
+    console.log(`[mri] marshal restart detected (generation ${meta.generation} < ${maxGenerationSeen}); caches cleared`);
+  }
+  maxGenerationSeen = meta.generation;
+}
+
 function changeToken(meta) {
-  return meta.generation ? meta.generation : meta.timestamp;
+  return meta.generation
+    ? `${marshalRestartNonce}:${meta.generation}`
+    : meta.timestamp;
 }
 
 // Last successfully served body per mode, keyed by (generation, path). On a
 // cache hit the snapshot is unchanged since the last read — return the same
-// body without spawning an h5py read.
+// body without spawning an h5py read. noteGeneration() clears both caches
+// on a detected marshal restart.
 const mriReadCache = { '2d': null, '3d': null };
 
 function cachedMriBody(mode, meta) {
+  noteGeneration(meta);
   const c = mriReadCache[mode];
   if (c && meta.generation !== null &&
       c.generation === meta.generation && c.path === meta.path) {
