@@ -1236,6 +1236,10 @@ initRotationSliders();
       
       const sliceTexture = createTextureFromMatrix(gl, slice.data, slice.width, slice.height);
       renderQuad(gl, programInfo, sliceTexture, projectionMatrix, modelViewMatrix);
+      // Free per-frame textures: this runs every animation frame, and
+      // undeleted textures accumulate until the browser kills the WebGL
+      // context (dead zoom/pan, "context lost" errors).
+      gl.deleteTexture(sliceTexture);
     });
     
     gl.enable(gl.DEPTH_TEST);
@@ -1342,6 +1346,9 @@ initRotationSliders();
 
     const sliceTexture = createTextureFromMatrix(gl, values, width, height);
     renderQuad(gl, programInfo, sliceTexture, projectionMatrix, modelViewMatrix);
+    // Free per-frame textures (see renderVolumeCube note): leak here killed
+    // the WebGL context during the 2026-08-18 scanner test.
+    gl.deleteTexture(sliceTexture);
   }
 
   // Render the latest 3 slices as planes in 3D, using each image header's
@@ -1451,6 +1458,8 @@ initRotationSliders();
 
       const sliceTexture = createTextureFromMatrix(gl, s.values, s.width, s.height);
       renderQuad(gl, programInfo, sliceTexture, projectionMatrix, modelViewMatrix);
+      // Free per-frame textures (see renderVolumeCube note).
+      gl.deleteTexture(sliceTexture);
     }
 
     gl.disable(gl.BLEND);
