@@ -68,8 +68,35 @@ async function fetchMriLatest() {
     // v2 /image/latest exposes a single latest image and no frame_index/dims.
     frame_index: meta.frame_index ?? 0,
     dims: meta.dims || {},
+    // Publish generation: the marshal bumps this on every snapshot publish,
+    // so it is the "has anything changed?" signal. Null on older marshals.
+    generation: meta.generation ?? null,
     timestamp: meta.ts || meta.timestamp || Date.now(),
   };
+}
+
+// The `timestamp` the browser uses to decide whether to re-render
+// (webgl-demo.js gates on `data.timestamp !== lastTimestamp`). With a
+// generation-aware marshal this is the generation itself — stable between
+// publishes, so idle polls stop triggering re-renders (the post-scan
+// infinite-rerender / plane-jitter bug). Older marshals without a
+// generation fall back to the old wall-clock behavior.
+function changeToken(meta) {
+  return meta.generation ? meta.generation : meta.timestamp;
+}
+
+// Last successfully served body per mode, keyed by (generation, path). On a
+// cache hit the snapshot is unchanged since the last read — return the same
+// body without spawning an h5py read.
+const mriReadCache = { '2d': null, '3d': null };
+
+function cachedMriBody(mode, meta) {
+  const c = mriReadCache[mode];
+  if (c && meta.generation !== null &&
+      c.generation === meta.generation && c.path === meta.path) {
+    return c.body;
+  }
+  return null;
 }
 
 /**
@@ -204,12 +231,17 @@ app.get('/api/read/:clientId/:fileKey', async (req, res) => {
         if (!meta.path) {
           return res.status(503).json({ error: 'No MRI data available yet' });
         }
+        const cached2d = cachedMriBody('2d', meta);
+        if (cached2d) {
+          return res.json(cached2d);
+        }
         const hdf5ReadStartedAtMs = Date.now();
         const sliceData = await readHdf5Frame(meta.path, meta.frame_index, '2d');
         const readEndedAtMs = Date.now();
         const metadataDurationMs = hdf5ReadStartedAtMs - readStartedAtMs;
         const hdf5ReadDurationMs = readEndedAtMs - hdf5ReadStartedAtMs;
-        sliceData.timestamp = meta.timestamp;
+        sliceData.timestamp = changeToken(meta);
+        sliceData.generation = meta.generation;
         sliceData.frame_index = meta.frame_index;
         sliceData.sent_from_serverjs = Date.now();
         sliceData.metadata_duration_ms = metadataDurationMs;
@@ -226,6 +258,7 @@ app.get('/api/read/:clientId/:fileKey', async (req, res) => {
           hdf5_read_duration_ms: hdf5ReadDurationMs,
           total_duration_ms: readEndedAtMs - readStartedAtMs
         });
+        mriReadCache['2d'] = { generation: meta.generation, path: meta.path, body: sliceData };
         return res.json(sliceData);
       } catch (err) {
         console.error(`[2D] MRI read error: ${err.message}`);
@@ -242,9 +275,15 @@ app.get('/api/read/:clientId/:fileKey', async (req, res) => {
         if (!meta.path) {
           return res.status(503).json({ error: 'No MRI data available yet' });
         }
+        const cached3d = cachedMriBody('3d', meta);
+        if (cached3d) {
+          return res.json(cached3d);
+        }
         const volumeData = await readHdf5Frame(meta.path, meta.frame_index, '3d');
-        volumeData.timestamp = meta.timestamp;
+        volumeData.timestamp = changeToken(meta);
+        volumeData.generation = meta.generation;
         console.log(`[3D] frame ${meta.frame_index} -> ${volumeData.width}x${volumeData.height}x${volumeData.depth} from ${path.basename(meta.path)}`);
+        mriReadCache['3d'] = { generation: meta.generation, path: meta.path, body: volumeData };
         return res.json(volumeData);
       } catch (err) {
         console.error(`[3D] MRI read error: ${err.message}`);
