@@ -187,6 +187,30 @@ TEST_CASE("EOF flush publishes a pending partial group instead of dropping it",
     CHECK(state.latest_image_generation.load() == 1);
 }
 
+TEST_CASE("recon-failure error marker survives a queued publish",
+          "[live_image_store][generation][error]") {
+    MarshalState state;
+    init_state(state, 1);
+
+    // Simulate the on_failure path having set the error marker while a
+    // publish sat in the writer queue: the publish must NOT overwrite the
+    // marker with a healthy-looking image, and must not bump generation.
+    {
+        std::lock_guard<std::mutex> lk(state.latest_image_mtx);
+        state.latest_image_path = "/tmp/latest_error.png";
+        state.latest_image_error = true;
+    }
+    const auto gen_before = state.latest_image_generation.load();
+
+    auto wire = make_wire_image(1, 0);
+    mrd::append_live_image(state, mrd::LiveLane::Scanner, wire.data(), wire.size());
+
+    CHECK(state.latest_image_generation.load() == gen_before);
+    std::lock_guard<std::mutex> lk(state.latest_image_mtx);
+    CHECK(state.latest_image_error);
+    CHECK(state.latest_image_path == "/tmp/latest_error.png");
+}
+
 TEST_CASE("finalize-after-EOF also publishes a pending partial group",
           "[live_image_store][group][eof]") {
     MarshalState state;

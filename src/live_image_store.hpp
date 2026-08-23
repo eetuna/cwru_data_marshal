@@ -149,12 +149,22 @@ namespace mrd
         const auto epoch = state.scan_epoch.load();
         auto on_complete = [&state, epoch](const std::filesystem::path &path)
         {
+            std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
+            // Epoch check under latest_image_mtx: the scan reset clears the
+            // path under this same mutex strictly after bumping the epoch,
+            // so checking here closes the window where a reset lands between
+            // the check and the path write (which would advertise a snapshot
+            // the reset just deleted).
             if (state.scan_epoch.load() != epoch)
                 return;
+            // A recon-failure marker set while this publish sat in the
+            // writer queue must win: the viewer needs "reconstruction
+            // failing", not a partial volume presented as healthy. The
+            // marker clears at the next scan reset.
+            if (state.latest_image_error)
+                return;
             state.last_publish_ms.store(static_cast<int64_t>(now_ms_epoch()));
-            std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
             state.latest_image_path = path.string();
-            state.latest_image_error = false;
             // Path and generation move together under latest_image_mtx so
             // /image/latest readers never see a new generation with a stale
             // path (or vice versa).
@@ -285,11 +295,13 @@ namespace mrd
                     // group so it reaches /image/latest instead of buffering
                     // forever (the "frozen during scan, burst after" failure
                     // when same-orientation slices repeat), and start a new
-                    // group with this image. Cannot collide with the
-                    // group-complete publish below: with expected slices
-                    // <= 1 every image completes instantly and no group ever
-                    // buffers, and with expected > 1 the single image pushed
-                    // after this reset cannot complete the fresh group.
+                    // group with this image. One edge overlaps the
+                    // group-complete publish below: images that arrived
+                    // BEFORE the XML header buffer under an unknown slice
+                    // count, and if the header then declares <= 1 slice the
+                    // fresh group completes instantly and its assignment
+                    // overwrites this flush. That is deliberate latest-wins:
+                    // the newest volume supersedes the pre-header partial.
                     if (!recon_group.published && !recon_group.images.empty())
                     {
                         publish_images = recon_group.images;
@@ -466,8 +478,6 @@ namespace mrd
 
     inline void reset_live_outputs_for_new_scan(MarshalState &state)
     {
-        state.latest_image_generation.fetch_add(1);
-
         {
             std::lock_guard<std::mutex> lk(state.scan_mtx);
             state.scanner_live.close();
@@ -488,6 +498,9 @@ namespace mrd
         std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
         state.latest_image_path.clear();
         state.latest_image_error = false;
+        // Bump under the same mutex as the path clear so readers never see
+        // the new generation paired with the dead scan's path.
+        state.latest_image_generation.fetch_add(1);
     }
 
 } // namespace mrd

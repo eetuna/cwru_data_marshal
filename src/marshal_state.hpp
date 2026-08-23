@@ -174,11 +174,14 @@ struct MarshalState {
     std::mutex latest_image_mtx;
     std::string latest_image_path;
     bool latest_image_error{false};
-    // Incremented on every successful snapshot publish (and once per scan
-    // reset). /image/latest exposes it and the /image/latest.h5 ETag is
-    // built from it, so pollers can detect "a new image exists" without
-    // re-reading the snapshot. Publishes from a dead scan are discarded by
-    // the scan_epoch guard in publish_latest_snapshot, not by this counter.
+    // Incremented on every successful snapshot publish, on the
+    // recon-failure error transition, and once per scan reset — each is a
+    // state change /image/latest pollers must notice. The /image/latest.h5
+    // ETag is built from it, so pollers can detect "something changed"
+    // without re-reading the snapshot. Publishes from a dead scan are
+    // discarded by the scan_epoch guard in publish_latest_snapshot, not by
+    // this counter; once latest_image_error is set, queued publishes from
+    // the failed scan are dropped so the error marker sticks until reset.
     std::atomic<uint64_t> latest_image_generation{0};
     std::atomic<bool> recon_failure_reported{false};
     std::unique_ptr<mrd::LatestImageWriter> latest_writer;

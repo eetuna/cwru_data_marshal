@@ -430,6 +430,10 @@ int main(int argc, char** argv)
                 std::lock_guard<std::mutex> lk(state.latest_image_mtx);
                 state.latest_image_path = png_path.string();
                 state.latest_image_error = true;
+                // The error transition is a publish too: bump so
+                // generation-gated pollers (and the latest.h5 ETag) see a
+                // change and re-read instead of sitting on the last image.
+                state.latest_image_generation.fetch_add(1);
             }
 
             if (state.recon_failure_reported.exchange(true) == false) {

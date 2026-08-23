@@ -952,29 +952,12 @@ private:
         if (!normal_close_seen) {
             const uint64_t epoch_at_eof = state_.scan_epoch.load();
 
-            // Scanner died abnormally with a recon session engaged: end the
-            // recon session rather than leaving it dangling until the next
-            // scan's begin_session() (the python server would sit blocked
-            // in recv with its savedata file open). Send CLOSE so recon
-            // finalizes its own side, and give it the same configurable
-            // flush window as the normal-CLOSE path: even with the scanner
-            // gone, recon tail images still land in the recon-lane archive
-            // and the /image/latest snapshot, so cutting a slow recon (e.g.
-            // GRAPPA on a remote VM) off at a fixed 2 s lost the tail.
-            if (recon_was_active && forwarder_) {
-                if (forwarder_->is_connected()) {
-                    forwarder_->post_close();
-                    forwarder_->wait_for_close(
-                        std::chrono::milliseconds(state_.recon_close_timeout_ms));
-                }
-                forwarder_->end_session();
-            }
-
             // Non-blocking finalize (live mode): release the scanner slot
-            // BEFORE lane finalization. Spool->HDF5 conversion can take
-            // 10-30 s for long scans, and holding the slot through it
-            // rejected every scanner reconnect in that window (the measured
-            // ~35 s lockout). The epoch-guarded helpers below make the
+            // BEFORE the recon flush wait and lane finalization. Spool->HDF5
+            // conversion can take 10-30 s for long scans, and holding the
+            // slot through it rejected every scanner reconnect in that
+            // window (the measured ~35 s lockout) — the recon flush wait
+            // below would do the same. The epoch-guarded helpers make the
             // overlap safe: if a new scan's METADATA arrives first, its
             // reset_live_outputs_for_new_scan already closed/converted the
             // dead scan's spool and this finalizer stands down instead of
@@ -985,6 +968,33 @@ private:
             if (!state_.dump_enabled) {
                 std::lock_guard<std::mutex> lk(scanner_mtx_);
                 if (scanner_socket_ == sock) scanner_socket_.reset();
+            }
+
+            // Scanner died abnormally with a recon session engaged: end the
+            // recon session rather than leaving it dangling until the next
+            // scan's begin_session() (the python server would sit blocked
+            // in recv with its savedata file open). Send CLOSE so recon
+            // finalizes its own side. In live mode, give it the same
+            // configurable flush window as the normal-CLOSE path: even with
+            // the scanner gone, recon tail images still land in the
+            // recon-lane archive and the /image/latest snapshot, and the
+            // scanner slot was released above so the wait cannot block a
+            // reconnect. Dump mode still holds the slot here, so keep its
+            // wait short. If a new scan preempts us during the wait, its
+            // begin_session() already tore this session down — end_session()
+            // then would kill the NEW scan's recon connection, so only end
+            // the session if we still own the epoch.
+            if (recon_was_active && forwarder_) {
+                if (forwarder_->is_connected()) {
+                    const uint32_t flush_ms = state_.dump_enabled
+                        ? 2000u : state_.recon_close_timeout_ms;
+                    forwarder_->post_close();
+                    forwarder_->wait_for_close(
+                        std::chrono::milliseconds(flush_ms));
+                }
+                if (state_.scan_epoch.load() == epoch_at_eof) {
+                    forwarder_->end_session();
+                }
             }
 
             LOG_INFO("Finalizing scanner lane after scanner socket ended");
