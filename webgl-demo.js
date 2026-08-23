@@ -177,8 +177,15 @@ async function main() {
   let currentImageHistory = [];
   let currentSnapshotSlices = [];
   let currentDisplayedSlices = [];
-  let sliceDisplayCursor = 0;
-  let lastSliceCount = 0;
+  // Persistent "last 3 distinct slice locations" history. A slice location
+  // is its plane in space (orientation + position). Re-acquiring a location
+  // refreshes its slot; a new location enters at the front and evicts the
+  // oldest beyond 3. Lives in browser memory, so it survives scan
+  // boundaries: three orthogonal acquisitions fill three slots (latest
+  // transverse + sagittal + coronal, regardless of which scan produced
+  // them), a 3-slice parallel stack fills all three with the stack, and a
+  // repeatedly re-acquired slice just refreshes its own slot.
+  let sliceLocationHistory = [];
   let lastTimestamp = -1;
   let lastVolumeTimestamp = -1;
   let lastTipTimestamp = -1;
@@ -959,26 +966,49 @@ initRotationSliders();
     );
   }
 
-  function getSequentialDisplayPanels(slices, maxPanels = 3) {
-    if (!Array.isArray(slices) || slices.length === 0) return [];
-    if (slices.length <= maxPanels) {
-      sliceDisplayCursor = 0;
-      return slices.slice();
+  // Identity of a slice's plane FAMILY: its orientation (slice normal),
+  // deliberately ignoring position. A repositioned slice (robot-driven
+  // slice tracking moves it every update) must REFRESH its orientation's
+  // slot, not evict the other orientations as a "new" plane. The normal is
+  // rounded so acquisition jitter maps to the same key and its sign is
+  // canonicalized (n and -n describe the same plane). Slices without
+  // geometry fall back to their slice index.
+  function sliceOrientationKey(s) {
+    const ori = s.orientation;
+    const sd = Array.isArray(s.slice_dir) ? s.slice_dir
+      : (ori && [ori.m02, ori.m12, ori.m22].every(Number.isFinite)
+          ? [ori.m02, ori.m12, ori.m22] : null);
+    if (!sd || sd.length !== 3) {
+      return `idx:${Number.isFinite(s.slice) ? s.slice : (s.slice_index ?? 0)}`;
     }
-
-    if (sliceDisplayCursor >= slices.length) {
-      sliceDisplayCursor = 0;
+    let n = sd;
+    for (const c of sd) {
+      if (Math.abs(c) > 1e-6) { if (c < 0) n = sd.map((v) => -v); break; }
     }
+    const rOri = (v) => Math.round(v * 1000) / 1000;   // ~0.06° tolerance
+    return n.map(rOri).join(',');
+  }
 
-    const panels = [];
-    for (let i = 0; i < maxPanels; i++) {
-      const idx = (sliceDisplayCursor + i) % slices.length;
-      panels.push(slices[idx]);
+  // Fold one snapshot's slices into the history. Slices are grouped by
+  // orientation; each group REPLACES that orientation's previous entries
+  // and enters at the front. A parallel same-orientation stack published
+  // together therefore keeps all its slices (up to maxSlots), while a
+  // single re-acquired/repositioned slice refreshes exactly its own
+  // orientation slot and leaves the other orientations' slices standing.
+  function upsertSliceHistory(slices, maxSlots = 3) {
+    const groups = new Map();
+    for (const s of slices) {
+      const key = sliceOrientationKey(s);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(s);
     }
-
-    // Keep panel cycling behavior analogous to existing frame history shifting.
-    sliceDisplayCursor = (sliceDisplayCursor + 1) % slices.length;
-    return panels;
+    for (const [key, group] of groups) {
+      sliceLocationHistory = sliceLocationHistory.filter((e) => e.key !== key);
+      for (let i = group.length - 1; i >= 0; i--) {
+        sliceLocationHistory.unshift({ key, slice: group[i] });
+      }
+    }
+    sliceLocationHistory = sliceLocationHistory.slice(0, maxSlots);
   }
 
   async function updateTextureFromServer() {
@@ -1019,12 +1049,11 @@ initRotationSliders();
 
         if (activeSlices.length > 0) {
           currentSnapshotSlices = activeSlices;
-          if (lastSliceCount !== currentSnapshotSlices.length) {
-            sliceDisplayCursor = 0;
-            lastSliceCount = currentSnapshotSlices.length;
-          }
-
-          currentDisplayedSlices = getSequentialDisplayPanels(currentSnapshotSlices, 3);
+          // Fold this snapshot's slices into the persistent per-location
+          // history; the panels show the last 3 distinct slice locations
+          // (across scans), newest first.
+          upsertSliceHistory(activeSlices, 3);
+          currentDisplayedSlices = sliceLocationHistory.map((e) => e.slice);
           currentImageHistory = currentDisplayedSlices.slice();
 
           const preferredSelected = Number.isFinite(data.selected_slice_index)
