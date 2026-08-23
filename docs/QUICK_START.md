@@ -126,13 +126,16 @@ RECON_HOST=10.0.0.5 RECON_PORT=9002 docker compose up -d
 Rule: bundled recon = keep `--profile test-recon`, don't set `RECON_HOST`.
 Real recon = set `RECON_HOST`, drop the profile. Never both.
 
-> **Never set `RECON_HOST` to an empty value** (`RECON_HOST= docker compose up`).
-> The shell drops the empty value and the marshal's `--recon-host` flag swallows
-> the next flag as its hostname — the marshal then dials a recon literally named
-> `--recon-port`. Leave the variable unset to get the default. (Setting
-> `MARSHAL_LATEST=` empty is fine — there the flag and value travel together.)
-> There is no recon-less mode: with no reachable recon the marshal keeps working
-> but logs `Failed to connect to recon` per scan and pushes a failure image.
+> **Never pass `RECON_HOST` through as an empty value.** The stock compose file
+> guards against it (`${RECON_HOST:-recon}` substitutes the default even for a
+> set-but-empty variable), but a hand-edited compose file, `docker run -e
+> RECON_HOST=`, or a direct `marshal --recon-host` with a missing value makes
+> the flag swallow the next flag as its hostname — the marshal detects this and
+> refuses to start with a clear error naming the cause. Leave the variable
+> unset to get the default. (Setting `MARSHAL_LATEST=` empty is fine — there
+> the flag and value travel together inside the variable.) There is no
+> recon-less mode: with no reachable recon the marshal keeps working but logs
+> `Failed to connect to recon` per scan and pushes a failure image.
 
 ---
 

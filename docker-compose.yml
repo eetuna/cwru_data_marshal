@@ -5,7 +5,7 @@
 #   MARSHAL_DUMP=--dump ... docker compose up ...            # dump/archival mode
 #   docker compose ps / down                                 # health / teardown
 #
-# Knobs (env): MARSHAL_DUMP (live|--dump), RECON_HOST/RECON_PORT (recon target,
+# Knobs (env): MARSHAL_DUMP (unset = live | --dump), RECON_HOST/RECON_PORT (recon target,
 # default recon:9002), SESSION_DATA_DIR (data path). Marshal routes automatically:
 # k-space -> recon; scanner-sent images -> straight to webgl.
 #

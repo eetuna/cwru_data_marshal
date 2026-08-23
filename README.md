@@ -18,7 +18,7 @@ Add `MARSHAL_DUMP=--dump` in front for dump/archival mode. Then open the viewer 
 **http://localhost:3000**. Drive data in with a real scanner or `python-ismrmrd-server`
 `client.py` against `mri-marshal:9100` (see [QUICK_START](docs/QUICK_START.md)).
 
-Knobs (env on `docker compose up`): `MARSHAL_DUMP` (live/dump), `MARSHAL_LATEST`
+Knobs (env on `docker compose up`): `MARSHAL_DUMP` (unset = live, `--dump` = dump), `MARSHAL_LATEST`
 (RAM snapshot — default on at `/dev/shm/cwru-latest`; set empty for on-disk),
 `RECON_HOST`/`RECON_PORT` (recon target), `SESSION_DATA_DIR` (data path),
 `HTTP_PORT`/`MRD_PORT`/`ROBOT_PORT`/`UI_PORT`/`WRITE_PORT`

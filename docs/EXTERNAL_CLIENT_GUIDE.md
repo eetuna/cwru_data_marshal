@@ -57,9 +57,10 @@ Prefix either start command with `MARSHAL_DUMP=--dump` for dump/archival mode.
   active); `--dump` = archival-only mode (canonical ISMRMRD H5 written at scan
   close, no live snapshot). The two modes are mutually exclusive.
 - `RECON_HOST` / `RECON_PORT` — recon target (default `recon:9002`). Set to the
-  real recon's IP in production. Never set `RECON_HOST` to an *empty* string —
-  the marshal's command line misparses and it dials a bogus hostname; leave it
-  unset to get the default.
+  real recon's IP in production; leave unset to get the default. Never pass an
+  *empty* `RECON_HOST` through to the marshal command line (possible with a
+  hand-edited compose file or `docker run -e RECON_HOST=`) — the marshal
+  detects the resulting misparse and refuses to start.
 - `MARSHAL_LATEST` — RAM snapshot toggle. Default on (`--latest-dir /latest`,
   host `/dev/shm/cwru-latest`); set empty (`MARSHAL_LATEST=`) to put the
   snapshot back on disk under `session-data/live/`.
