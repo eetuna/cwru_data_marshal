@@ -6,7 +6,7 @@ One command runs the whole matrix:
 ./scripts/test-modes.sh
 ```
 
-Or step by step (WSL, repo root). Images must be built once (`./scripts/build-client-images.sh`).
+Or step by step (WSL, repo root). Images must be built first — and rebuilt after code updates — with `./scripts/build-client-images.sh` (it refreshes the code branches and prints the commit each image is built from).
 
 ```bash
 # start (live + bundled test recon)

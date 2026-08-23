@@ -73,22 +73,75 @@ check_worktree() {
 check_worktree "$MRI_WORKTREE" "$MRI_BRANCH"
 check_worktree "$ROBOT_WORKTREE" "$ROBOT_BRANCH"
 
-if [ ! -d "$MRI_WORKTREE" ]; then
-    echo "Creating MRI worktree at $MRI_WORKTREE..."
-    git worktree add "$MRI_WORKTREE" "$MRI_BRANCH"
-fi
+# Refresh a build worktree to the remote branch tip. Without this, a rerun
+# of the script silently rebuilt whatever the worktree held from the LAST
+# build — `git pull` on main does not move the code branches, so users
+# rebuilt stale code and reported "no new features in the images". If the
+# remote is unreachable, build the current local state and say so.
+refresh_worktree() {
+    local wt="$1"
+    local branch="$2"
+    if git -C "$wt" pull --ff-only 2>/dev/null; then
+        return 0
+    fi
+    if git -C "$wt" fetch "$UPSTREAM_REPO" "$branch" 2>/dev/null; then
+        if ! git -C "$wt" merge --ff-only FETCH_HEAD 2>/dev/null; then
+            echo "  ! $wt has local commits/divergence; building its current state."
+        fi
+    else
+        echo "  ! Remote unreachable; building current local state of $wt."
+    fi
+}
 
-if [ ! -d "$ROBOT_WORKTREE" ]; then
-    echo "Creating robot worktree at $ROBOT_WORKTREE..."
-    git worktree add "$ROBOT_WORKTREE" "$ROBOT_BRANCH"
-fi
+# Resolve the directory to build a branch from. Normal case: the .worktrees/
+# checkout (created on demand). Dev-machine case: the branch is already
+# checked out in some other worktree — `git worktree add` would refuse, so
+# build from that checkout IF it is clean; a dirty tree would bake
+# uncommitted code into an image, which is exactly the staleness/confusion
+# this script tries to prevent, so abort instead.
+resolve_build_dir() {
+    local wt="$1"
+    local branch="$2"
+    if [ -d "$wt" ]; then
+        refresh_worktree "$wt" "$branch" >&2
+        echo "$wt"
+        return 0
+    fi
+    if git worktree add "$wt" "$branch" >&2 2>/dev/null; then
+        echo "$wt"
+        return 0
+    fi
+    local existing
+    existing="$(git worktree list --porcelain | awk -v b="refs/heads/$branch" '
+        $1 == "worktree" { wt = $2 } $1 == "branch" && $2 == b { print wt }')"
+    if [ -n "$existing" ]; then
+        if [ -n "$(git -C "$existing" status --porcelain)" ]; then
+            echo "  ✗ ERROR: branch '$branch' is checked out at $existing with uncommitted" >&2
+            echo "           changes. Commit/stash them, or free the branch, then rerun." >&2
+            exit 1
+        fi
+        echo "  ! Branch '$branch' already checked out at $existing (clean) — building from there." >&2
+        echo "$existing"
+        return 0
+    fi
+    echo "  ✗ ERROR: could not create a worktree for '$branch' and found no existing checkout." >&2
+    exit 1
+}
+
+MRI_BUILD_DIR="$(resolve_build_dir "$MRI_WORKTREE" "$MRI_BRANCH")"
+ROBOT_BUILD_DIR="$(resolve_build_dir "$ROBOT_WORKTREE" "$ROBOT_BRANCH")"
+
+echo ""
+echo "Building from:"
+echo "  $MRI_BRANCH @ $(git -C "$MRI_BUILD_DIR" log --oneline -1)"
+echo "  $ROBOT_BRANCH @ $(git -C "$ROBOT_BUILD_DIR" log --oneline -1)"
 
 echo "[1/3] Building MRI marshal + recon..."
 echo "  - cwru/mri-marshal"
 echo "  - fire-python (python-ismrmrd-server recon)"
 echo ""
 
-cd "$MRI_WORKTREE"
+cd "$MRI_BUILD_DIR"
 
 # Build MRI Marshal
 echo "Building cwru/mri-marshal..."
@@ -97,8 +150,8 @@ docker build -f "$PROJECT_ROOT/docker/Dockerfile.mri" -t cwru/mri-marshal:latest
 # Build recon = python-ismrmrd-server. Build context is the server root (its
 # Dockerfile COPYs the whole source tree); -f points at docker/Dockerfile inside it.
 echo "Building fire-python (python-ismrmrd-server recon)..."
-docker build -f "$MRI_WORKTREE/third_party/python-ismrmrd-server/docker/Dockerfile" \
-  -t fire-python:latest "$MRI_WORKTREE/third_party/python-ismrmrd-server"
+docker build -f "$MRI_BUILD_DIR/third_party/python-ismrmrd-server/docker/Dockerfile" \
+  -t fire-python:latest "$MRI_BUILD_DIR/third_party/python-ismrmrd-server"
 
 echo ""
 echo "[2/3] Building Robot Marshal and Clients..."
@@ -107,7 +160,7 @@ echo "  - cwru/robot-clients"
 echo "  - cwru/webgl-client"
 echo ""
 
-cd "$ROBOT_WORKTREE"
+cd "$ROBOT_BUILD_DIR"
 
 # Build Robot Marshal
 echo "Building cwru/robot-marshal..."

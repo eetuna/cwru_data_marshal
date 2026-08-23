@@ -57,10 +57,13 @@ robot clients <──HTTP :8081──> robot-marshal ──> webgl-client
 ## Build & package
 
 ```bash
-./scripts/build-client-images.sh                 # build the cwru/* images
+./scripts/build-client-images.sh                 # build (or rebuild) the cwru/* images
 ./scripts/export_usb.sh /path/to/usb             # docker save + compose file for offline transfer
 ```
 
 Source lives in git worktrees under `.worktrees/` (built into the images):
 `mri_data_marshal` (MRI marshal + recon) and `robot_data_marshal` (robot marshal,
-clients, webgl).
+clients, webgl). The build script fast-forwards these from GitHub on every run
+and prints the commit each image is built from — `git pull` alone does NOT
+update them (code lives on the code branches, not `main`). After rebuilding,
+restart with `docker compose up -d --force-recreate`.

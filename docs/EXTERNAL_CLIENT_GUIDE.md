@@ -310,6 +310,15 @@ docker logs cwru-robot-marshal
 # RECON_HOST points at nothing reachable.
 docker logs cwru-mri-marshal | grep -i recon
 
+# Rebuilt the images but new features are missing? The build script prints
+# "Building from: <branch> @ <commit>" — compare against GitHub. Stale build
+# worktrees are the usual cause (git pull only updates main, not the code
+# branches); rerunning ./scripts/build-client-images.sh refreshes them. Then
+# recreate containers — plain `up -d` keeps old containers on old images:
+git -C .worktrees/mri_data_marshal log --oneline -1
+git -C .worktrees/robot_data_marshal log --oneline -1
+docker compose up -d --force-recreate
+
 # Ports listening?
 netstat -tlnp | grep -E '8080|8081|9100|3000'
 

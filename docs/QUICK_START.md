@@ -9,7 +9,7 @@ copy-paste command — pick the one that matches what you want.
 
 ---
 
-## Step 1 — Build the images (once)
+## Step 1 — Build / rebuild the images
 
 ```bash
 ./scripts/build-client-images.sh
@@ -19,6 +19,15 @@ Builds the 5 images the stack runs: `cwru/mri-marshal`, `fire-python`
 (test recon + test clients), `cwru/robot-marshal`, `cwru/robot-clients`,
 `cwru/webgl-client`. First build takes ~10–20 min (downloads + compiles);
 rebuilds are fast. Success ends with `Build complete! All 5 images ready.`
+
+> **Getting code updates:** rerun this script — it fast-forwards its build
+> worktrees from GitHub and prints the exact commit each image is built from
+> (check that line if a feature seems missing). Note that `git pull` alone
+> does NOT update the code: `main` carries only docs/compose, the code lives
+> on the `mri-data-marshal` and robot branches, which this script refreshes
+> for you. After rebuilding, restart the stack with
+> `docker compose up -d --force-recreate` — a plain `up -d` keeps the old
+> containers running on the old images.
 
 ---
 
