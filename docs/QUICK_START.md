@@ -126,6 +126,14 @@ RECON_HOST=10.0.0.5 RECON_PORT=9002 docker compose up -d
 Rule: bundled recon = keep `--profile test-recon`, don't set `RECON_HOST`.
 Real recon = set `RECON_HOST`, drop the profile. Never both.
 
+> **Never set `RECON_HOST` to an empty value** (`RECON_HOST= docker compose up`).
+> The shell drops the empty value and the marshal's `--recon-host` flag swallows
+> the next flag as its hostname — the marshal then dials a recon literally named
+> `--recon-port`. Leave the variable unset to get the default. (Setting
+> `MARSHAL_LATEST=` empty is fine — there the flag and value travel together.)
+> There is no recon-less mode: with no reachable recon the marshal keeps working
+> but logs `Failed to connect to recon` per scan and pushes a failure image.
+
 ---
 
 ## Step 3 — Verify it's up
@@ -331,5 +339,10 @@ would be left behind holding the network. Data in `session-data/` survives —
   The viewer's current-frame snapshot is internal plumbing — not user data.
 - Auto-routing: k-space → recon; scanner-sent images → straight to the UI.
 - ISMRMRD headers 340/198/40 must match scanner/marshal/recon.
+- Recon looks dead (no recon images; viewer shows only scanner-sent data)?
+  `docker logs cwru-mri-marshal | grep -i recon` — a
+  `Failed to connect to recon at <host>:<port>` line means `RECON_HOST` points
+  at nothing reachable (the 2026-08-18 scanner-test failure mode). Check the
+  env you launched compose with, and that the recon machine's port is open.
 - Full test matrix, performance checks, troubleshooting: [TESTING.md](TESTING.md).
 - Every endpoint and flag: [API_REFERENCE.md](API_REFERENCE.md).

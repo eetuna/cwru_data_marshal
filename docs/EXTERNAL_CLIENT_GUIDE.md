@@ -56,7 +56,10 @@ Prefix either start command with `MARSHAL_DUMP=--dump` for dump/archival mode.
 - `MARSHAL_DUMP` — unset = live mode (mid-scan `/image/latest` snapshot pipeline
   active); `--dump` = archival-only mode (canonical ISMRMRD H5 written at scan
   close, no live snapshot). The two modes are mutually exclusive.
-- `RECON_HOST` / `RECON_PORT` — recon target (default `recon:9002`).
+- `RECON_HOST` / `RECON_PORT` — recon target (default `recon:9002`). Set to the
+  real recon's IP in production. Never set `RECON_HOST` to an *empty* string —
+  the marshal's command line misparses and it dials a bogus hostname; leave it
+  unset to get the default.
 - `MARSHAL_LATEST` — RAM snapshot toggle. Default on (`--latest-dir /latest`,
   host `/dev/shm/cwru-latest`); set empty (`MARSHAL_LATEST=`) to put the
   snapshot back on disk under `session-data/live/`.
@@ -300,6 +303,11 @@ with a TLS reverse proxy or VPN as needed.
 docker compose ps
 docker logs cwru-mri-marshal
 docker logs cwru-robot-marshal
+
+# Recon "does nothing" (no recon images, viewer shows only scanner data)?
+# A per-scan "Failed to connect to recon at <host>:<port>" line means
+# RECON_HOST points at nothing reachable.
+docker logs cwru-mri-marshal | grep -i recon
 
 # Ports listening?
 netstat -tlnp | grep -E '8080|8081|9100|3000'

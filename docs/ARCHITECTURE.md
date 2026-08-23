@@ -224,7 +224,7 @@ The marshal stays running regardless of recon failure:
 - `latest_error.png` is written so the webgl-client visually shows "reconstruction failed"
 - T4 test: kill recon mid-scan, assert marshal still accepts MRD TCP connections and GET /health returns 200
 
-If `--recon-host`/`--recon-port` are not set, the marshal has no reconstruction target. With `--dump`, scanner data is archived but never forwarded.
+If `--recon-host` is not set, the marshal has no reconstruction target: scanner data is still accepted — and archived when `--dump` is on — but never forwarded. When a recon target is configured, forwarding behaves the same in live and dump modes; `--dump` changes what is archived, not whether data reaches the recon.
 
 ## WebSocket (Optional)
 
