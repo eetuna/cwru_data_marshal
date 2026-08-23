@@ -313,9 +313,19 @@ int main(int argc, char** argv)
                 LOG_ERROR("--mrd-port: invalid value '" << argv[i] << "'");
                 return 1;
             }
-        } else if (a == "--recon-host" && i + 1 < argc)
+        } else if (a == "--recon-host" && i + 1 < argc) {
             recon_host = argv[++i];
-        else if (a == "--recon-port" && i + 1 < argc) {
+            // A flag-like value means the intended value was dropped by the
+            // shell (classic cause: RECON_HOST set to an empty string in the
+            // compose environment) and this flag swallowed the NEXT flag.
+            if (recon_host.rfind("--", 0) == 0) {
+                LOG_ERROR("--recon-host: got '" << recon_host
+                          << "', which looks like a flag, not a hostname. "
+                             "If RECON_HOST was set to an empty string, unset "
+                             "it instead to use the default.");
+                return 1;
+            }
+        } else if (a == "--recon-port" && i + 1 < argc) {
             if (!checked_parse_uint16(argv[++i], recon_port)) {
                 LOG_ERROR("--recon-port: invalid value '" << argv[i] << "'");
                 return 1;
@@ -343,6 +353,14 @@ int main(int argc, char** argv)
                 LOG_ERROR("--recon-connect-timeout-ms: invalid value '" << argv[i] << "'");
                 return 1;
             }
+        }
+        else {
+            // Unknown argument, or a known value-taking flag given as the
+            // last argument with its value missing. Silently ignoring these
+            // let misconfigurations (e.g. an empty RECON_HOST shifting every
+            // later argument) start a marshal that dials bogus targets.
+            LOG_ERROR("Unknown or incomplete argument '" << a << "'");
+            return 1;
         }
     }
 
