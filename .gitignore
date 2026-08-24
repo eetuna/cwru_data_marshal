@@ -46,3 +46,6 @@ scripts/bench*/
 dynamic-slice-position-main/
 # temp build worktrees
 .tmp-*/
+
+# Local sequence-development folder (not part of the marshal repo)
+sequence_real_time_cardiac_imaging_2d-DynamicSlicePos/
