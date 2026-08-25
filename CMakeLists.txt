@@ -241,6 +241,16 @@ if(BUILD_TESTING)
     nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target} CURL::libcurl)
   add_test(NAME test_scanner_race COMMAND test_scanner_race)
 
+  # Slice command channel: geometry math + slice_agent TCP client.
+  add_executable(test_slice_math tests/test_slice_math.cpp)
+  target_link_libraries(test_slice_math PRIVATE Catch2::Catch2WithMain)
+  add_test(NAME test_slice_math COMMAND test_slice_math)
+
+  add_executable(test_slice_agent_client tests/test_slice_agent_client.cpp)
+  target_link_libraries(test_slice_agent_client PRIVATE
+    Catch2::Catch2WithMain Boost::system Threads::Threads)
+  add_test(NAME test_slice_agent_client COMMAND test_slice_agent_client)
+
   # HIGH #4 regression: scanner pushback must not block the recon reader.
   add_executable(test_scanner_pushback
     tests/test_scanner_pushback.cpp

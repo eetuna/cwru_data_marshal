@@ -61,8 +61,36 @@ TEST_CASE("GET /health returns ok", "[http]") {
     CHECK(j.contains("uptime_s"));
 }
 
+// Install an axial slice at a known position as the "latest image header".
+static void seed_header_geometry(MarshalState& state, uint16_t slice = 3,
+                                 float x = 10.5f, float y = -20.f, float z = 30.f) {
+    ISMRMRD::ImageHeader hdr{};
+    hdr.slice = slice;
+    hdr.position[0] = x; hdr.position[1] = y; hdr.position[2] = z;
+    hdr.read_dir[0] = 1.f; hdr.phase_dir[1] = 1.f; hdr.slice_dir[2] = 1.f;
+    std::vector<uint8_t> wire(mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t), 0);
+    std::memcpy(wire.data(), &hdr, sizeof(hdr));
+    mrd::update_slice_geometry(state, wire.data(), wire.size());
+}
+
+// Capture commands handed to the (stubbed) slice agent.
+struct AgentStub {
+    std::vector<slice_math::WireCommand> sent;
+    bool deliver{true};
+    bool connected{true};
+    void install(MarshalState& state, bool enabled = true) {
+        state.slice_agent_cfg.enabled = enabled;
+        state.slice_agent_send = [this](const slice_math::WireCommand& c) {
+            sent.push_back(c);
+            return deliver;
+        };
+        state.slice_agent_connected = [this] { return connected; };
+    }
+};
+
 TEST_CASE("HTTP Handler: Slice Translation", "[http]") {
     MarshalState state; init_state(state);
+    AgentStub agent; agent.install(state);
 
     SECTION("GET before any POST returns no content") {
         http::request<http::string_body> req{http::verb::get, "/read/file_slice_translation", 11};
@@ -70,7 +98,22 @@ TEST_CASE("HTTP Handler: Slice Translation", "[http]") {
         REQUIRE(res.result() == http::status::no_content);
     }
 
-    SECTION("POST valid +1 then GET round-trips") {
+    SECTION("POST +1 before any image: 409 no base, cache still written") {
+        json payload = {{"client_id", "client-webgl"}, {"values", {1}}};
+        http::request<http::string_body> req{http::verb::post, "/write/file_slice_translation", 11};
+        req.body() = payload.dump();
+        req.prepare_payload();
+        auto res = dispatch(req, state);
+        REQUIRE(res.result() == http::status::conflict);
+        CHECK(json::parse(res.body())["delivered"] == false);
+        CHECK(agent.sent.empty());
+
+        http::request<http::string_body> get_req{http::verb::get, "/read/file_slice_translation", 11};
+        REQUIRE(dispatch(get_req, state).result() == http::status::ok);
+    }
+
+    SECTION("POST valid +1 then GET round-trips; +1 = 1 mm along the slice normal") {
+        seed_header_geometry(state);   // axial at (10.5, -20, 30)
         json payload = {{"client_id", "client-webgl"}, {"sent_at", 1700000000000LL}, {"values", {1}}};
         http::request<http::string_body> req{http::verb::post, "/write/file_slice_translation", 11};
         req.body() = payload.dump();
@@ -81,6 +124,13 @@ TEST_CASE("HTTP Handler: Slice Translation", "[http]") {
         auto body = json::parse(res.body());
         CHECK(body["file"] == "file_slice_translation");
         CHECK(body["direction"] == 1.0);
+        CHECK(body["delivered"] == true);
+        CHECK(body["base"] == "image_header");
+        REQUIRE(agent.sent.size() == 1);
+        CHECK(agent.sent[0].tx == Catch::Approx(10.5));
+        CHECK(agent.sent[0].ty == Catch::Approx(-20.0));
+        CHECK(agent.sent[0].tz == Catch::Approx(31.0));
+        CHECK(agent.sent[0].rx == Catch::Approx(0.0).margin(1e-9));
 
         http::request<http::string_body> get_req{http::verb::get, "/read/file_slice_translation", 11};
         auto get_res = dispatch(get_req, state);
@@ -90,15 +140,26 @@ TEST_CASE("HTTP Handler: Slice Translation", "[http]") {
         CHECK(get_body.contains("ts"));
     }
 
-    SECTION("POST valid -1") {
-        json payload = {{"client_id", "client-webgl"}, {"values", {-1}}};
-        http::request<http::string_body> req{http::verb::post, "/write/file_slice_translation", 11};
-        req.body() = payload.dump();
-        req.prepare_payload();
-
-        auto res = dispatch(req, state);
-        REQUIRE(res.result() == http::status::ok);
-        CHECK(json::parse(res.body())["direction"] == -1.0);
+    SECTION("POST valid -1 twice accumulates from the commanded base") {
+        seed_header_geometry(state);
+        for (int i = 0; i < 2; ++i) {
+            json payload = {{"client_id", "client-webgl"}, {"values", {-1}}};
+            http::request<http::string_body> req{http::verb::post, "/write/file_slice_translation", 11};
+            req.body() = payload.dump();
+            req.prepare_payload();
+            auto res = dispatch(req, state);
+            REQUIRE(res.result() == http::status::ok);
+            CHECK(json::parse(res.body())["direction"] == -1.0);
+        }
+        REQUIRE(agent.sent.size() == 2);
+        CHECK(agent.sent[1].tz == Catch::Approx(28.0));
+        http::request<http::string_body> cmd_req{http::verb::get, "/read/slice_commanded", 11};
+        auto cmd_res = dispatch(cmd_req, state);
+        REQUIRE(cmd_res.result() == http::status::ok);
+        auto cmd_body = json::parse(cmd_res.body());
+        CHECK(cmd_body["count"] == 2);
+        CHECK(cmd_body["position"][2] == Catch::Approx(28.0));
+        CHECK(cmd_body["agent"]["connected"] == true);
     }
 
     SECTION("POST invalid direction is rejected") {
@@ -190,17 +251,13 @@ static uint16_t latest_image_matrix_z(const fs::path& path) {
     return image.getHead().matrix_size[2];
 }
 
-TEST_CASE("Slice command pushback + geometry", "[http][slice]") {
+TEST_CASE("Slice commands go to the slice agent, never to the scanner socket", "[http][slice]") {
     MarshalState state; init_state(state);
+    AgentStub agent; agent.install(state);
 
-    // Capture frames pushed to the (stubbed) scanner connection.
-    std::vector<std::pair<uint16_t, std::vector<uint8_t>>> pushed;
-    bool push_ok = true;
-    state.mrd_push_message = [&](uint16_t tag, const void* d, size_t l) {
-        const auto* p = static_cast<const uint8_t*>(d);
-        pushed.emplace_back(tag, std::vector<uint8_t>(p, p + l));
-        return push_ok;
-    };
+    // The old JSON-text relay on the scanner socket must be gone.
+    int scanner_pushes = 0;
+    state.mrd_push_message = [&](uint16_t, const void*, size_t) { ++scanner_pushes; return true; };
 
     auto post_nudge = [&](double dir) {
         json payload = {{"client_id", "client-webgl"}, {"values", {dir}}};
@@ -216,35 +273,8 @@ TEST_CASE("Slice command pushback + geometry", "[http][slice]") {
         REQUIRE(res.result() == http::status::no_content);
     }
 
-    SECTION("no geometry yet: pushed TEXT has null slice_geometry, delivered=true") {
-        auto res = post_nudge(1);
-        REQUIRE(res.result() == http::status::ok);
-        CHECK(json::parse(res.body())["delivered"] == true);
-        REQUIRE(pushed.size() == 1);
-        CHECK(pushed[0].first == mrd::MRD_MESSAGE_TEXT);
-
-        const auto& bytes = pushed[0].second;
-        REQUIRE(bytes.size() > sizeof(uint32_t));
-        uint32_t wire_len = 0;
-        std::memcpy(&wire_len, bytes.data(), sizeof(uint32_t));
-        REQUIRE(bytes.size() == sizeof(uint32_t) + wire_len);
-        REQUIRE(bytes.back() == '\0');   // NUL-terminated, per connection.py
-
-        auto payload = json::parse(std::string(
-            bytes.begin() + sizeof(uint32_t), bytes.end() - 1));
-        CHECK(payload["type"] == "slice_translation");
-        CHECK(payload["direction"] == 1.0);
-        CHECK(payload["slice_geometry"].is_null());
-    }
-
-    SECTION("geometry from image header flows into endpoint and pushed command") {
-        ISMRMRD::ImageHeader hdr{};
-        hdr.slice = 3;
-        hdr.position[0] = 10.5f; hdr.position[1] = -20.f; hdr.position[2] = 30.f;
-        hdr.read_dir[0] = 1.f; hdr.phase_dir[1] = 1.f; hdr.slice_dir[2] = 1.f;
-        std::vector<uint8_t> wire(mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t), 0);
-        std::memcpy(wire.data(), &hdr, sizeof(hdr));
-        mrd::update_slice_geometry(state, wire.data(), wire.size());
+    SECTION("geometry from image header is served and used as the first base") {
+        seed_header_geometry(state);
 
         http::request<http::string_body> req{http::verb::get, "/read/slice_geometry", 11};
         auto res = dispatch(req, state);
@@ -257,48 +287,58 @@ TEST_CASE("Slice command pushback + geometry", "[http][slice]") {
 
         auto post_res = post_nudge(-1);
         REQUIRE(post_res.result() == http::status::ok);
-        REQUIRE(pushed.size() == 1);
-        const auto& bytes = pushed[0].second;
-        auto payload = json::parse(std::string(
-            bytes.begin() + sizeof(uint32_t), bytes.end() - 1));
-        CHECK(payload["direction"] == -1.0);
-        CHECK(payload["slice_geometry"]["slice"] == 3);
-        CHECK(payload["slice_geometry"]["position"][1] == Catch::Approx(-20.0));
+        REQUIRE(agent.sent.size() == 1);
+        CHECK(agent.sent[0].tz == Catch::Approx(29.0));
+        CHECK(scanner_pushes == 0);
 
-        // New scan clears the geometry (same reset the METADATA_XML handler runs)
+        // New scan clears header geometry AND the commanded base (same
+        // reset the METADATA_XML handler runs).
         {
             std::lock_guard<std::mutex> lk(state.slice_geom_mtx);
             state.slice_geom.clear();
             state.latest_slice = -1;
         }
+        {
+            std::lock_guard<std::mutex> lk(state.commanded_geom_mtx);
+            state.commanded_geom.reset();
+        }
         http::request<http::string_body> req2{http::verb::get, "/read/slice_geometry", 11};
-        auto res2 = dispatch(req2, state);
-        REQUIRE(res2.result() == http::status::no_content);
+        REQUIRE(dispatch(req2, state).result() == http::status::no_content);
+        http::request<http::string_body> req3{http::verb::get, "/read/slice_commanded", 11};
+        REQUIRE(dispatch(req3, state).result() == http::status::no_content);
+        CHECK(post_nudge(1).result() == http::status::conflict);
     }
 
-    SECTION("no scanner connected: delivered=false, cache still written") {
-        push_ok = false;
+    SECTION("agent not connected: delivered=false, command still recorded as base") {
+        seed_header_geometry(state);
+        agent.deliver = false;
+        agent.connected = false;
         auto res = post_nudge(1);
         REQUIRE(res.result() == http::status::ok);
-        CHECK(json::parse(res.body())["delivered"] == false);
+        auto body = json::parse(res.body());
+        CHECK(body["delivered"] == false);
+        CHECK(body["agent_connected"] == false);
+        CHECK(body["enabled"] == true);
+        // The next nudge builds on the recorded (undelivered) geometry.
+        post_nudge(1);
+        REQUIRE(agent.sent.size() == 2);
+        CHECK(agent.sent[1].tz == Catch::Approx(32.0));
+    }
 
-        http::request<http::string_body> get_req{http::verb::get, "/read/file_slice_translation", 11};
-        auto get_res = dispatch(get_req, state);
-        REQUIRE(get_res.result() == http::status::ok);
-        CHECK(json::parse(get_res.body())["values"][0] == 1);
+    SECTION("channel disabled: enabled=false, delivered=false") {
+        seed_header_geometry(state);
+        agent.install(state, /*enabled=*/false);
+        state.slice_agent_send = [](const slice_math::WireCommand&) { return false; };
+        auto res = post_nudge(1);
+        REQUIRE(res.result() == http::status::ok);
+        CHECK(json::parse(res.body())["enabled"] == false);
+        CHECK(json::parse(res.body())["delivered"] == false);
     }
 }
 
-TEST_CASE("Slice target: absolute prescription pushback", "[http][slice]") {
+TEST_CASE("Slice target: absolute prescription to the agent", "[http][slice]") {
     MarshalState state; init_state(state);
-
-    std::vector<std::pair<uint16_t, std::vector<uint8_t>>> pushed;
-    bool push_ok = true;
-    state.mrd_push_message = [&](uint16_t tag, const void* d, size_t l) {
-        const auto* p = static_cast<const uint8_t*>(d);
-        pushed.emplace_back(tag, std::vector<uint8_t>(p, p + l));
-        return push_ok;
-    };
+    AgentStub agent; agent.install(state);
 
     auto post_target = [&](json body) {
         http::request<http::string_body> req{http::verb::post, "/write/slice_target", 11};
@@ -318,32 +358,50 @@ TEST_CASE("Slice target: absolute prescription pushback", "[http][slice]") {
         REQUIRE(dispatch(req, state).result() == http::status::no_content);
     }
 
-    SECTION("valid prescription: pushed as TEXT, cached, delivered=true") {
+    SECTION("valid prescription: sent as absolute command, cached, delivered=true") {
         auto res = post_target(valid);
         REQUIRE(res.result() == http::status::ok);
-        CHECK(json::parse(res.body())["delivered"] == true);
+        auto body = json::parse(res.body());
+        CHECK(body["delivered"] == true);
+        CHECK(body["command"]["tx"] == Catch::Approx(12.5));
+        CHECK(body["command"]["rz_deg"] == Catch::Approx(0.0).margin(1e-9));
 
-        REQUIRE(pushed.size() == 1);
-        CHECK(pushed[0].first == mrd::MRD_MESSAGE_TEXT);
-        const auto& bytes = pushed[0].second;
-        uint32_t wire_len = 0;
-        std::memcpy(&wire_len, bytes.data(), sizeof(uint32_t));
-        REQUIRE(bytes.size() == sizeof(uint32_t) + wire_len);
-        REQUIRE(bytes.back() == '\0');
-        auto payload = json::parse(std::string(
-            bytes.begin() + sizeof(uint32_t), bytes.end() - 1));
-        CHECK(payload["type"] == "slice_target");
-        CHECK(payload["position"][0] == Catch::Approx(12.5));
-        CHECK(payload["slice_dir"][2] == Catch::Approx(1.0));
-        CHECK(payload.contains("ts"));
+        REQUIRE(agent.sent.size() == 1);
+        CHECK(agent.sent[0].tx == Catch::Approx(12.5));
+        CHECK(agent.sent[0].ty == Catch::Approx(-3.0));
+        CHECK(agent.sent[0].tz == Catch::Approx(40.0));
+        CHECK(agent.sent[0].flags == slice_math::kFlagUpdate);
 
         http::request<http::string_body> get_req{http::verb::get, "/read/slice_target", 11};
         auto get_res = dispatch(get_req, state);
         REQUIRE(get_res.result() == http::status::ok);
         CHECK(json::parse(get_res.body())["position"][1] == Catch::Approx(-3.0));
+
+        http::request<http::string_body> cmd_req{http::verb::get, "/read/slice_commanded", 11};
+        auto cmd_res = dispatch(cmd_req, state);
+        REQUIRE(cmd_res.result() == http::status::ok);
+        CHECK(json::parse(cmd_res.body())["position"][2] == Catch::Approx(40.0));
     }
 
-    SECTION("rejections: missing field, non-unit, non-orthogonal") {
+    SECTION("tilted prescription: Euler angles reproduce the direction rows") {
+        const auto R = slice_math::rot_from_euler_zyx(0.4, -0.2, 0.9);
+        json tilted = {
+            {"position", {1.0, 2.0, 3.0}},
+            {"read_dir", {R[0][0], R[0][1], R[0][2]}},
+            {"phase_dir", {R[1][0], R[1][1], R[1][2]}},
+            {"slice_dir", {R[2][0], R[2][1], R[2][2]}},
+        };
+        REQUIRE(post_target(tilted).result() == http::status::ok);
+        REQUIRE(agent.sent.size() == 1);
+        const auto& c = agent.sent[0];
+        const auto back = slice_math::rot_from_euler_zyx(
+            c.rx * slice_math::kDeg2Rad, c.ry * slice_math::kDeg2Rad, c.rz * slice_math::kDeg2Rad);
+        for (int r = 0; r < 3; ++r)
+            for (int k = 0; k < 3; ++k)
+                CHECK(back[r][k] == Catch::Approx(R[r][k]).margin(1e-6));
+    }
+
+    SECTION("rejections: missing field, non-unit, non-orthogonal, left-handed, too far") {
         json missing = valid; missing.erase("phase_dir");
         CHECK(post_target(missing).result() == http::status::bad_request);
 
@@ -356,11 +414,19 @@ TEST_CASE("Slice target: absolute prescription pushback", "[http][slice]") {
         json bad_shape = valid; bad_shape["position"] = {1.0, 2.0};
         CHECK(post_target(bad_shape).result() == http::status::bad_request);
 
-        CHECK(pushed.empty());   // nothing invalid reaches the scanner
+        json left = valid; left["slice_dir"] = {0.0, 0.0, -1.0};
+        auto lres = post_target(left);
+        CHECK(lres.result() == http::status::bad_request);
+        CHECK(json::parse(lres.body())["error"].get<std::string>().find("left-handed") != std::string::npos);
+
+        json far = valid; far["position"] = {0.0, 0.0, 1000.0};
+        CHECK(post_target(far).result() == http::status::bad_request);
+
+        CHECK(agent.sent.empty());   // nothing invalid reaches the agent
     }
 
-    SECTION("no scanner: delivered=false, still cached") {
-        push_ok = false;
+    SECTION("agent not connected: delivered=false, still cached") {
+        agent.deliver = false;
         auto res = post_target(valid);
         REQUIRE(res.result() == http::status::ok);
         CHECK(json::parse(res.body())["delivered"] == false);
@@ -369,50 +435,101 @@ TEST_CASE("Slice target: absolute prescription pushback", "[http][slice]") {
     }
 }
 
-TEST_CASE("Slice delta: relative move pushback", "[http][slice]") {
+TEST_CASE("Slice delta: relative move in the slice frame", "[http][slice]") {
     MarshalState state; init_state(state);
-    std::vector<std::pair<uint16_t, std::vector<uint8_t>>> pushed;
-    state.mrd_push_message = [&](uint16_t tag, const void* d, size_t l) {
-        const auto* p = static_cast<const uint8_t*>(d);
-        pushed.emplace_back(tag, std::vector<uint8_t>(p, p + l));
-        return true;
-    };
+    AgentStub agent; agent.install(state);
     auto post_delta = [&](json body) {
         http::request<http::string_body> req{http::verb::post, "/write/slice_delta", 11};
         req.body() = body.dump();
         req.prepare_payload();
         return dispatch(req, state);
     };
+    auto post_target = [&](json body) {
+        http::request<http::string_body> req{http::verb::post, "/write/slice_target", 11};
+        req.body() = body.dump();
+        req.prepare_payload();
+        return dispatch(req, state);
+    };
 
-    SECTION("translation + rotation pushed with defaults filled") {
+    SECTION("no base geometry: 409, nothing sent") {
+        auto res = post_delta({{"translation_mm", {1.5, 0.0, -2.0}}});
+        REQUIRE(res.result() == http::status::conflict);
+        CHECK(json::parse(res.body())["delivered"] == false);
+        CHECK(agent.sent.empty());
+    }
+
+    SECTION("translation in the slice frame from the header base") {
+        seed_header_geometry(state);   // axial at (10.5,-20,30): read=x, phase=y, normal=z
         auto res = post_delta({{"translation_mm", {1.5, 0.0, -2.0}},
-                               {"rotation_rad", {0.0, 0.1, 0.0}}});
+                               {"rotation_rad", {0.0, 0.0, 0.0}}});
         REQUIRE(res.result() == http::status::ok);
-        CHECK(json::parse(res.body())["delivered"] == true);
-        REQUIRE(pushed.size() == 1);
-        auto payload = json::parse(std::string(
-            pushed[0].second.begin() + sizeof(uint32_t), pushed[0].second.end() - 1));
-        CHECK(payload["type"] == "slice_delta");
-        CHECK(payload["translation_mm"][2] == Catch::Approx(-2.0));
-        CHECK(payload["rotation_rad"][1] == Catch::Approx(0.1));
-        CHECK(payload["slice_geometry"].is_null());
+        auto body = json::parse(res.body());
+        CHECK(body["delivered"] == true);
+        CHECK(body["base"] == "image_header");
+        REQUIRE(agent.sent.size() == 1);
+        CHECK(agent.sent[0].tx == Catch::Approx(12.0));
+        CHECK(agent.sent[0].ty == Catch::Approx(-20.0));
+        CHECK(agent.sent[0].tz == Catch::Approx(28.0));
     }
 
-    SECTION("translation only: rotation defaults to zeros") {
-        post_delta({{"translation_mm", {0.0, 0.0, 5.0}}});
-        REQUIRE(pushed.size() == 1);
-        auto payload = json::parse(std::string(
-            pushed[0].second.begin() + sizeof(uint32_t), pushed[0].second.end() - 1));
-        CHECK(payload["rotation_rad"][0] == Catch::Approx(0.0));
+    SECTION("through-plane +1 on a tilted commanded slice follows its normal") {
+        const auto R = slice_math::rot_from_euler_zyx(0.5, 0.3, -0.2);
+        json tilted = {
+            {"position", {0.0, 0.0, 0.0}},
+            {"read_dir", {R[0][0], R[0][1], R[0][2]}},
+            {"phase_dir", {R[1][0], R[1][1], R[1][2]}},
+            {"slice_dir", {R[2][0], R[2][1], R[2][2]}},
+        };
+        REQUIRE(post_target(tilted).result() == http::status::ok);
+        auto res = post_delta({{"translation_mm", {0.0, 0.0, 1.0}}});
+        REQUIRE(res.result() == http::status::ok);
+        CHECK(json::parse(res.body())["base"] == "commanded");
+        REQUIRE(agent.sent.size() == 2);
+        CHECK(agent.sent[1].tx == Catch::Approx(R[2][0]).margin(1e-6));
+        CHECK(agent.sent[1].ty == Catch::Approx(R[2][1]).margin(1e-6));
+        CHECK(agent.sent[1].tz == Catch::Approx(R[2][2]).margin(1e-6));
+        // orientation unchanged
+        CHECK(agent.sent[1].rx == Catch::Approx(agent.sent[0].rx).margin(1e-6));
+        CHECK(agent.sent[1].rz == Catch::Approx(agent.sent[0].rz).margin(1e-6));
     }
 
-    SECTION("rejections: neither field, wrong shape") {
+    SECTION("rotation about the slice normal: 90 deg in-plane") {
+        seed_header_geometry(state);
+        auto res = post_delta({{"rotation_rad", {0.0, 0.0, slice_math::kPi / 2}}});
+        REQUIRE(res.result() == http::status::bad_request);   // 90 > default 30 deg clamp
+        state.slice_agent_cfg.max_step_deg = 180.0;
+        res = post_delta({{"rotation_rad", {0.0, 0.0, slice_math::kPi / 2}}});
+        REQUIRE(res.result() == http::status::ok);
+        auto geom = json::parse(res.body())["geometry"];
+        CHECK(geom["read_dir"][1] == Catch::Approx(1.0).margin(1e-9));
+        CHECK(geom["slice_dir"][2] == Catch::Approx(1.0).margin(1e-9));
+        REQUIRE(agent.sent.size() == 1);
+        // Rows = axes convention (SliceXfm.h): the matrix whose ROWS are the
+        // +90-degree-rotated axes equals Rz(-90), so the wire angle is -90.
+        // (--slice-transpose would send +90.)
+        CHECK(agent.sent[0].rz == Catch::Approx(-90.0).margin(1e-6));
+    }
+
+    SECTION("--slice-transpose flips the wire angle sign for the same move") {
+        seed_header_geometry(state);
+        state.slice_agent_cfg.max_step_deg = 180.0;
+        state.slice_agent_cfg.axes.transpose = true;
+        REQUIRE(post_delta({{"rotation_rad", {0.0, 0.0, slice_math::kPi / 2}}}).result()
+                == http::status::ok);
+        REQUIRE(agent.sent.size() == 1);
+        CHECK(agent.sent[0].rz == Catch::Approx(90.0).margin(1e-6));
+    }
+
+    SECTION("rejections: neither field, wrong shape, over clamp") {
+        seed_header_geometry(state);
         CHECK(post_delta(json::object()).result() == http::status::bad_request);
         CHECK(post_delta({{"translation_mm", {1.0, 2.0}}}).result() == http::status::bad_request);
-        CHECK(pushed.empty());
+        CHECK(post_delta({{"translation_mm", {0.0, 0.0, 51.0}}}).result() == http::status::bad_request);
+        CHECK(agent.sent.empty());
     }
 
     SECTION("cache readable at GET /read/slice_delta") {
+        seed_header_geometry(state);
         http::request<http::string_body> pre{http::verb::get, "/read/slice_delta", 11};
         REQUIRE(dispatch(pre, state).result() == http::status::no_content);
         post_delta({{"translation_mm", {1.0, 0.0, 0.0}}});

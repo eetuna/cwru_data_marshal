@@ -4,7 +4,10 @@
  * Purpose: Main server binary — new API (v2)
  *
  * Flags: --http host:port, --ws-port N, --recon-host HOST, --recon-port N,
- *        --dump-dir PATH, --dump, --recon-close-timeout-ms N
+ *        --dump-dir PATH, --dump, --recon-close-timeout-ms N,
+ *        --slice-agent-host HOST (enables the slice command channel),
+ *        --slice-agent-port N, --slice-transpose, --slice-swap-read-phase,
+ *        --slice-axis-sign +,+,+, --slice-max-step-mm N, --slice-max-step-deg N
  */
 
 #undef LOG_COMPONENT
@@ -34,6 +37,13 @@
 #include "mrd_tcp_listener.hpp"
 #include "recon_forwarder.hpp"
 #include "session_registry.hpp"
+#include "slice_agent_client.hpp"
+#include "slice_math.hpp"
+
+// Every header above re-defines LOG_COMPONENT for its own log lines; restore
+// ours so main()'s messages are tagged correctly.
+#undef LOG_COMPONENT
+#define LOG_COMPONENT "marshal_main"
 
 namespace fs = std::filesystem;
 
@@ -233,6 +243,32 @@ bool parse_host_port(const std::string& input, std::string& host, uint16_t& port
     return checked_parse_uint16(input.substr(p + 1), port) && port != 0;
 }
 
+bool checked_parse_double(const std::string& s, double& out) {
+    try {
+        size_t pos = 0;
+        double v = std::stod(s, &pos);
+        if (pos != s.size()) return false;
+        if (!(v > 0.0)) return false;
+        out = v;
+        return true;
+    } catch (...) { return false; }
+}
+
+// "+,-,+" or "1,-1,1" -> per-axis signs.
+bool parse_axis_sign(const std::string& s, slice_math::Vec3& out) {
+    int idx = 0;
+    std::string tok;
+    std::istringstream in(s);
+    while (std::getline(in, tok, ',')) {
+        if (idx >= 3) return false;
+        if (tok == "+" || tok == "1" || tok == "+1") out[idx] = 1.0;
+        else if (tok == "-" || tok == "-1") out[idx] = -1.0;
+        else return false;
+        ++idx;
+    }
+    return idx == 3;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -297,6 +333,8 @@ int main(int argc, char** argv)
     std::size_t max_body_size = 128ULL * 1024ULL * 1024ULL;
     uint32_t recon_close_timeout_ms = 30000;
     uint32_t recon_connect_timeout_ms = 5000;
+    mrd::SliceAgentConfig slice_cfg;           // host empty = channel disabled
+    MarshalState::SliceAgentSettings slice_settings;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -351,6 +389,53 @@ int main(int argc, char** argv)
         else if (a == "--recon-connect-timeout-ms" && i + 1 < argc) {
             if (!checked_parse_uint32(argv[++i], recon_connect_timeout_ms)) {
                 LOG_ERROR("--recon-connect-timeout-ms: invalid value '" << argv[i] << "'");
+                return 1;
+            }
+        }
+        else if (a == "--slice-agent-host" && i + 1 < argc) {
+            slice_cfg.host = argv[++i];
+            // Same footgun as --recon-host: an empty SLICE_AGENT_HOST in the
+            // compose environment would make this flag swallow the next one.
+            if (slice_cfg.host.rfind("--", 0) == 0) {
+                LOG_ERROR("--slice-agent-host: got '" << slice_cfg.host
+                          << "', which looks like a flag, not a hostname. "
+                             "If SLICE_AGENT_HOST was set to an empty string, "
+                             "unset it instead (the channel is off by default).");
+                return 1;
+            }
+        }
+        else if (a == "--slice-agent-port" && i + 1 < argc) {
+            if (!checked_parse_uint16(argv[++i], slice_cfg.port) || slice_cfg.port == 0) {
+                LOG_ERROR("--slice-agent-port: invalid value '" << argv[i] << "'");
+                return 1;
+            }
+        }
+        else if (a == "--slice-transpose")
+            slice_settings.axes.transpose = true;
+        else if (a == "--slice-swap-read-phase")
+            slice_settings.axes.swap_read_phase = true;
+        else if (a == "--slice-axis-sign" && i + 1 < argc) {
+            if (!parse_axis_sign(argv[++i], slice_settings.axes.axis_sign)) {
+                LOG_ERROR("--slice-axis-sign: expected three of +/- separated by commas, got '"
+                          << argv[i] << "'");
+                return 1;
+            }
+        }
+        else if (a == "--slice-max-step-mm" && i + 1 < argc) {
+            if (!checked_parse_double(argv[++i], slice_settings.max_step_mm)) {
+                LOG_ERROR("--slice-max-step-mm: invalid value '" << argv[i] << "'");
+                return 1;
+            }
+        }
+        else if (a == "--slice-max-step-deg" && i + 1 < argc) {
+            if (!checked_parse_double(argv[++i], slice_settings.max_step_deg)) {
+                LOG_ERROR("--slice-max-step-deg: invalid value '" << argv[i] << "'");
+                return 1;
+            }
+        }
+        else if (a == "--slice-resend-ms" && i + 1 < argc) {
+            if (!checked_parse_uint32(argv[++i], slice_cfg.resend_window_ms)) {
+                LOG_ERROR("--slice-resend-ms: invalid value '" << argv[i] << "'");
                 return 1;
             }
         }
@@ -489,6 +574,23 @@ int main(int argc, char** argv)
         };
     }
 
+    // Slice agent client (optional): UI slice commands -> scanner-side
+    // slice_agent --listen. Lazy: no socket until the first command.
+    std::unique_ptr<mrd::SliceAgentClient> slice_agent;
+    slice_settings.enabled = !slice_cfg.host.empty();
+    state.slice_agent_cfg = slice_settings;
+    if (slice_settings.enabled) {
+        slice_agent = std::make_unique<mrd::SliceAgentClient>(slice_cfg);
+        slice_agent->start();
+        // Hooks are safe after stop(): submit() returns false once stopping.
+        state.slice_agent_send = [&slice_agent](const slice_math::WireCommand& c) {
+            return slice_agent && slice_agent->submit(c);
+        };
+        state.slice_agent_connected = [&slice_agent] {
+            return slice_agent && slice_agent->connected();
+        };
+    }
+
     // Log config
     {
         std::ostringstream cfg;
@@ -502,6 +604,17 @@ int main(int argc, char** argv)
                                      << " recon_connect_timeout_ms=" << recon_connect_timeout_ms;
         if (ws_port > 0) cfg << " ws-port=" << ws_port;
         if (mrd_port > 0) cfg << " mrd-port=" << mrd_port;
+        if (slice_settings.enabled) {
+            cfg << " slice-agent=" << slice_cfg.host << ":" << slice_cfg.port
+                << " slice_transpose=" << (slice_settings.axes.transpose ? "on" : "off")
+                << " slice_swap_read_phase=" << (slice_settings.axes.swap_read_phase ? "on" : "off")
+                << " slice_axis_sign=" << slice_settings.axes.axis_sign[0] << ","
+                << slice_settings.axes.axis_sign[1] << "," << slice_settings.axes.axis_sign[2]
+                << " slice_max_step=" << slice_settings.max_step_mm << "mm/"
+                << slice_settings.max_step_deg << "deg";
+        } else {
+            cfg << " slice-agent=off";
+        }
         LOG_INFO(cfg.str());
     }
 
@@ -570,6 +683,8 @@ int main(int argc, char** argv)
 
     // Graceful shutdown. Order matters:
     //   1. stop accepting new connections (HTTP + MRD)
+    //   1b. stop the slice-agent client (sends 0xDEAD while the network is
+    //       still up; later submit() calls return false harmlessly)
     //   2. cancel + join in-flight sessions so they stop touching MarshalState
     //   3. stop the recon forwarder (joins its reader thread)
     //   4. flush live lanes + close scan state
@@ -578,6 +693,7 @@ int main(int argc, char** argv)
     signals.async_wait([&](const boost::system::error_code&, int signum) {
         LOG_INFO("Received signal " << signum << ", shutting down...");
         acceptor.close();
+        if (slice_agent) slice_agent->stop();
         if (mrd_listener) mrd_listener->stop();
         http_sessions.shutdown_and_join();
         if (forwarder) forwarder->stop();
@@ -603,6 +719,7 @@ int main(int argc, char** argv)
 
     // In case ioc.run() returned without the signal handler firing (e.g.
     // acceptor error), still drain HTTP sessions before state destructs.
+    if (slice_agent) slice_agent->stop();
     http_sessions.shutdown_and_join();
     if (mrd_listener) mrd_listener->stop();
 

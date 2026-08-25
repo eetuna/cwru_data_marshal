@@ -667,6 +667,15 @@ private:
                         state_.slice_geom.clear();
                         state_.latest_slice = -1;
                     }
+                    {
+                        // Likewise the last commanded slice geometry: the
+                        // next relative move must start from the new scan's
+                        // prescription, not from where the previous scan's
+                        // slice was driven to.
+                        std::lock_guard<std::mutex> lk(state_.commanded_geom_mtx);
+                        state_.commanded_geom.reset();
+                        state_.commanded_geom_ts.clear();
+                    }
                     if (state_.dump_enabled && state_.dump_recorder) {
                         // Pass the raw wire body for byte-exact
                         // METADATA_XML preservation in the spool.

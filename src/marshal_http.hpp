@@ -23,6 +23,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <sstream>
 #include <vector>
@@ -39,6 +40,7 @@
 #include "mrd_io.hpp"
 #include "mrd_sink.hpp"
 #include "mrd_stream_tags.hpp"
+#include "slice_math.hpp"
 
 namespace beast = boost::beast;
 namespace http  = beast::http;
@@ -255,15 +257,22 @@ static auto handle_put_transform(const http::request<Body>& req, MarshalState& s
 }
 
 // ---------------------------------------------------------------------------
-// POST /write/file_slice_translation and GET /read/file_slice_translation
+// Slice command channel (UI -> marshal -> scanner-side slice_agent)
 //
-// Command channel: the WebGL client nudges the MRI imaging slice by ±1.
-// Body (JSON): { "client_id": "...", "sent_at": 123, "values": [ ±1 ] }
-// The latest command is cached in memory; GET returns it without clearing.
-// In addition, the command is pushed to the connected scanner as an MRD
-// TEXT (5) message over the live MRD TCP connection, carrying the current
-// slice geometry — see push_slice_command_to_scanner below. The HTTP
-// response reports delivery ("delivered": true|false).
+// Three UI-facing endpoints produce slice commands:
+//   POST /write/file_slice_translation  { "values": [ ±1 ] }   legacy ±1 mm nudge
+//   POST /write/slice_delta   { "translation_mm": [..], "rotation_rad": [..] }
+//   POST /write/slice_target  { "position": [..], "read_dir": [..], ... }
+// Each is converted to an ABSOLUTE slice geometry (relative moves are
+// applied to the last commanded geometry, or to the latest image-header
+// geometry before any command has been sent this scan), converted to the
+// agent's Euler-degree wire form (slice_math.hpp) and handed to the
+// SliceAgentClient via state.slice_agent_send. Responses report
+//   "delivered": command handed to a connected agent
+//   "agent_connected", "enabled": current channel status
+// The latest request of each kind is cached and readable at the matching
+// GET /read/... (204 until the first POST); GET /read/slice_commanded shows
+// the last absolute geometry actually sent.
 // ---------------------------------------------------------------------------
 
 // JSON snapshot of the geometry cache. {"latest_slice":-1,"slices":{}} when
@@ -288,55 +297,135 @@ inline nlohmann::json slice_geometry_json(MarshalState& state)
     return j;
 }
 
-// Push a JSON payload to the scanner as an MRD TEXT (5) frame. Wire format
-// matches python-ismrmrd-server's connection.py read_text(): uint32 LE
-// length, then that many bytes of null-terminated UTF-8 (length includes the
-// terminator). Returns true when the frame was written to a connected
-// scanner. Scanner-side consumers dispatch on the payload's "type" field.
-inline bool push_text_to_scanner(MarshalState& state, const nlohmann::json& payload)
+inline nlohmann::json geometry_to_json(const slice_math::Geometry& g)
 {
-    const std::string text = payload.dump();
-    const uint32_t wire_len = static_cast<uint32_t>(text.size() + 1); // + NUL
-    std::vector<uint8_t> frame(sizeof(uint32_t) + wire_len);
-    std::memcpy(frame.data(), &wire_len, sizeof(uint32_t));
-    std::memcpy(frame.data() + sizeof(uint32_t), text.data(), text.size());
-    frame[sizeof(uint32_t) + text.size()] = '\0';
-
-    return state.mrd_push_message(mrd::MRD_MESSAGE_TEXT,
-                                  frame.data(), frame.size());
+    return {
+        {"position", {g.position[0], g.position[1], g.position[2]}},
+        {"read_dir", {g.read_dir[0], g.read_dir[1], g.read_dir[2]}},
+        {"phase_dir", {g.phase_dir[0], g.phase_dir[1], g.phase_dir[2]}},
+        {"slice_dir", {g.slice_dir[0], g.slice_dir[1], g.slice_dir[2]}},
+    };
 }
 
-// Build the slice-translation (relative ±1 nudge) command payload and push it.
-inline bool push_slice_command_to_scanner(MarshalState& state, double direction,
-                                          const std::string& ts)
+// Geometry of the most recently seen image this scan, if any.
+inline std::optional<slice_math::Geometry> latest_header_geometry(MarshalState& state)
 {
-    nlohmann::json payload;
-    payload["type"] = "slice_translation";
-    payload["direction"] = direction;
-    payload["ts"] = ts;
-    {
-        // Geometry of the most recently seen slice, if any — turns the bare
-        // nudge into a real reposition instruction.
-        nlohmann::json geom;   // null when no image seen yet this scan
-        std::lock_guard<std::mutex> lk(state.slice_geom_mtx);
-        if (state.latest_slice >= 0) {
-            auto it = state.slice_geom.find(
-                static_cast<uint16_t>(state.latest_slice));
-            if (it != state.slice_geom.end()) {
-                const auto& g = it->second;
-                geom = {
-                    {"slice", g.slice},
-                    {"position", {g.position[0], g.position[1], g.position[2]}},
-                    {"read_dir", {g.read_dir[0], g.read_dir[1], g.read_dir[2]}},
-                    {"phase_dir", {g.phase_dir[0], g.phase_dir[1], g.phase_dir[2]}},
-                    {"slice_dir", {g.slice_dir[0], g.slice_dir[1], g.slice_dir[2]}},
-                };
-            }
-        }
-        payload["slice_geometry"] = std::move(geom);
+    std::lock_guard<std::mutex> lk(state.slice_geom_mtx);
+    if (state.latest_slice < 0) return std::nullopt;
+    auto it = state.slice_geom.find(static_cast<uint16_t>(state.latest_slice));
+    if (it == state.slice_geom.end()) return std::nullopt;
+    const auto& h = it->second;
+    slice_math::Geometry g;
+    for (int i = 0; i < 3; ++i) {
+        g.position[i]  = h.position[i];
+        g.read_dir[i]  = h.read_dir[i];
+        g.phase_dir[i] = h.phase_dir[i];
+        g.slice_dir[i] = h.slice_dir[i];
     }
+    return g;
+}
 
-    return push_text_to_scanner(state, payload);
+// Base for a relative move: the last commanded geometry, else the latest
+// image header geometry. Nullopt when neither exists yet.
+inline std::optional<slice_math::Geometry> slice_move_base(MarshalState& state,
+                                                           std::string& source)
+{
+    {
+        std::lock_guard<std::mutex> lk(state.commanded_geom_mtx);
+        if (state.commanded_geom) { source = "commanded"; return state.commanded_geom; }
+    }
+    auto g = latest_header_geometry(state);
+    if (g) source = "image_header";
+    return g;
+}
+
+struct SliceSendResult {
+    bool delivered{false};
+    bool agent_connected{false};
+    bool enabled{false};
+    slice_math::WireCommand cmd;
+};
+
+// Convert an absolute geometry to the agent's wire form, send it, and
+// remember it as the new commanded geometry (the base for the next delta).
+// Always records the geometry, even when not delivered, so a UI move made
+// before the agent connects is not lost — the client re-sends on connect.
+inline SliceSendResult send_slice_geometry(MarshalState& state,
+                                           const slice_math::Geometry& geom,
+                                           const std::string& ts)
+{
+    SliceSendResult r;
+    r.enabled = state.slice_agent_cfg.enabled;
+    r.cmd = slice_math::command_from_geometry(geom, state.slice_agent_cfg.axes);
+    {
+        std::lock_guard<std::mutex> lk(state.commanded_geom_mtx);
+        state.commanded_geom = geom;
+        state.commanded_geom_ts = ts;
+        ++state.commanded_count;
+    }
+    r.delivered = state.slice_agent_send(r.cmd);
+    r.agent_connected = state.slice_agent_connected();
+    return r;
+}
+
+inline nlohmann::json slice_send_status_json(const SliceSendResult& r)
+{
+    return {
+        {"delivered", r.delivered},
+        {"agent_connected", r.agent_connected},
+        {"enabled", r.enabled},
+        {"command", {{"tx", r.cmd.tx}, {"ty", r.cmd.ty}, {"tz", r.cmd.tz},
+                     {"rx_deg", r.cmd.rx}, {"ry_deg", r.cmd.ry}, {"rz_deg", r.cmd.rz}}},
+    };
+}
+
+// Validate a relative move against the configured per-command clamps.
+// Returns an error string, empty when OK.
+inline std::string check_delta_limits(const MarshalState& state,
+                                      const slice_math::Vec3& t_mm,
+                                      const slice_math::Vec3& r_rad)
+{
+    const double max_mm = state.slice_agent_cfg.max_step_mm;
+    const double max_rad = state.slice_agent_cfg.max_step_deg * slice_math::kDeg2Rad;
+    for (int i = 0; i < 3; ++i) {
+        if (!std::isfinite(t_mm[i]) || std::fabs(t_mm[i]) > max_mm)
+            return "translation_mm[" + std::to_string(i) + "] exceeds max step "
+                   + std::to_string(max_mm) + " mm";
+        if (!std::isfinite(r_rad[i]) || std::fabs(r_rad[i]) > max_rad)
+            return "rotation_rad[" + std::to_string(i) + "] exceeds max step "
+                   + std::to_string(state.slice_agent_cfg.max_step_deg) + " deg";
+    }
+    return {};
+}
+
+// Shared tail of every relative move: base -> apply -> send. Returns the
+// HTTP response.
+template <class Body>
+static auto apply_and_send_delta(const http::request<Body>& req, MarshalState& state,
+                                 const char* file,
+                                 const slice_math::Vec3& t_mm,
+                                 const slice_math::Vec3& r_rad,
+                                 const std::string& ts,
+                                 nlohmann::json extra)
+    -> http::response<http::string_body>
+{
+    std::string base_source;
+    auto base = slice_move_base(state, base_source);
+    if (!base) {
+        extra["file"] = file;
+        extra["delivered"] = false;
+        extra["error"] = "no base geometry: no image header seen this scan and "
+                         "no slice_target sent yet";
+        return json_response(req, http::status::conflict, extra);
+    }
+    const auto moved = slice_math::apply_delta(*base, t_mm, r_rad);
+    const auto sent = send_slice_geometry(state, moved, ts);
+    nlohmann::json out = slice_send_status_json(sent);
+    out["file"] = file;
+    out["base"] = base_source;
+    out["geometry"] = geometry_to_json(moved);
+    for (auto& [k, v] : extra.items()) out[k] = v;
+    return json_response(req, http::status::ok, out);
 }
 
 template <class Body>
@@ -373,15 +462,10 @@ static auto handle_post_slice_translation(const http::request<Body>& req, Marsha
         state.latest_slice_translation_json = body.dump();
     }
 
-    // Push to the scanner over the live MRD connection (best effort — the
-    // cache above is always written; "delivered" tells the UI whether a
-    // connected scanner actually received the command).
-    const bool delivered = push_slice_command_to_scanner(state, direction, ts);
-
-    return json_response(req, http::status::ok,
-                         {{"file", "file_slice_translation"},
-                          {"direction", direction},
-                          {"delivered", delivered}});
+    // Legacy ±1 = one millimetre along the slice normal (through-plane).
+    return apply_and_send_delta(req, state, "file_slice_translation",
+                                {0.0, 0.0, direction}, {0.0, 0.0, 0.0}, ts,
+                                {{"direction", direction}});
 }
 
 // GET /read/slice_geometry — position/orientation per slice as observed in
@@ -405,10 +489,9 @@ static auto handle_get_slice_geometry(const http::request<Body>& req, MarshalSta
 //
 // Absolute slice prescription from the UI: "put the slice exactly here,
 // facing this way". Body (JSON):
-//   { "position": [x,y,z],                       // slice center, mm
+//   { "position": [x,y,z],                       // slice center, mm (PCS)
 //     "read_dir": [..], "phase_dir": [..], "slice_dir": [..] }  // unit vectors
-// Pushed to the connected scanner as MRD TEXT {"type":"slice_target",...}
-// (same channel as the ±1 nudge; scanners dispatch on "type"). The latest
+// Sent to the scanner-side slice_agent as an absolute geometry. The latest
 // prescription is cached; GET returns it without clearing.
 // ---------------------------------------------------------------------------
 
@@ -473,24 +556,41 @@ static auto handle_post_slice_target(const http::request<Body>& req, MarshalStat
         }
     }
 
-    const std::string ts = mrd::iso8601_now_ms();
-    nlohmann::json payload;
-    payload["type"] = "slice_target";
-    payload["position"] = {pos[0], pos[1], pos[2]};
-    payload["read_dir"] = {rd[0], rd[1], rd[2]};
-    payload["phase_dir"] = {pd[0], pd[1], pd[2]};
-    payload["slice_dir"] = {sd[0], sd[1], sd[2]};
-    payload["ts"] = ts;
+    slice_math::Geometry geom;
+    for (int i = 0; i < 3; ++i) {
+        geom.position[i]  = pos[i];
+        geom.read_dir[i]  = rd[i];
+        geom.phase_dir[i] = pd[i];
+        geom.slice_dir[i] = sd[i];
+    }
+    // A left-handed frame has no rotation-matrix (hence no Euler)
+    // representation; sending it would silently mirror the slice.
+    if (!slice_math::is_right_handed(geom, kTol)) {
+        return json_response(req, http::status::bad_request,
+            {{"error", "left-handed geometry: read_dir x phase_dir must equal slice_dir"}});
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (!std::isfinite(pos[i]) || std::fabs(pos[i]) > state.slice_agent_cfg.max_abs_mm) {
+            return json_response(req, http::status::bad_request,
+                {{"error", "position[" + std::to_string(i) + "] exceeds max "
+                           + std::to_string(state.slice_agent_cfg.max_abs_mm) + " mm"}});
+        }
+    }
 
+    const std::string ts = mrd::iso8601_now_ms();
+    nlohmann::json payload = geometry_to_json(geom);
+    payload["type"] = "slice_target";
+    payload["ts"] = ts;
     {
         std::lock_guard<std::mutex> lk(state.slice_target_mtx);
         state.latest_slice_target_json = payload.dump();
     }
 
-    const bool delivered = push_text_to_scanner(state, payload);
-
-    return json_response(req, http::status::ok,
-                         {{"file", "slice_target"}, {"delivered", delivered}});
+    const auto sent = send_slice_geometry(state, geom, ts);
+    nlohmann::json out = slice_send_status_json(sent);
+    out["file"] = "slice_target";
+    out["geometry"] = geometry_to_json(geom);
+    return json_response(req, http::status::ok, out);
 }
 
 template <class Body>
@@ -522,12 +622,13 @@ static auto handle_get_slice_target(const http::request<Body>& req, MarshalState
 // Relative slice move from the UI: "shift by this much, rotate by this much"
 // — the command style used by incremental front-end buttons. Body (JSON),
 // at least one field required, the other defaults to zero:
-//   { "translation_mm": [dx, dy, dz],       // scanner-frame mm
-//     "rotation_rad":   [rx, ry, rz] }      // about read/phase/slice axes
-// Pushed to the scanner as MRD TEXT {"type":"slice_delta",...} with the
-// current slice geometry attached (so the scanner knows the base it moves
-// from). Exact rotation convention to be pinned to the scanner-side slice
-// control API when available.
+//   { "translation_mm": [dx, dy, dz],       // SLICE frame: along read, phase, normal
+//     "rotation_rad":   [rx, ry, rz] }      // about the slice's read, phase, normal
+// Both are in the slice's own frame (the convention of the WebGL ± button
+// — "+1 mm along the slice axis" — and of Andrew's slice_control tool).
+// The move is applied to the base geometry (last commanded, else latest
+// image header) and the resulting absolute geometry is sent to the agent.
+// Per-command magnitudes are clamped (--slice-max-step-mm/-deg): 400 above.
 // ---------------------------------------------------------------------------
 template <class Body>
 static auto handle_post_slice_delta(const http::request<Body>& req, MarshalState& state)
@@ -554,6 +655,12 @@ static auto handle_post_slice_delta(const http::request<Body>& req, MarshalState
     if (has_r && !parse_vec3(body, "rotation_rad", r, err))
         return json_response(req, http::status::bad_request, {{"error", err}});
 
+    const slice_math::Vec3 t_mm = {t[0], t[1], t[2]};
+    const slice_math::Vec3 r_rad = {r[0], r[1], r[2]};
+    if (auto lim = check_delta_limits(state, t_mm, r_rad); !lim.empty()) {
+        return json_response(req, http::status::bad_request, {{"error", lim}});
+    }
+
     const std::string ts = mrd::iso8601_now_ms();
     nlohmann::json payload;
     payload["type"] = "slice_delta";
@@ -561,34 +668,45 @@ static auto handle_post_slice_delta(const http::request<Body>& req, MarshalState
     payload["rotation_rad"] = {r[0], r[1], r[2]};
     payload["ts"] = ts;
     {
-        // Attach the current geometry as the base of the move (null if no
-        // image seen yet this scan) — same context the ±1 nudge carries.
-        nlohmann::json geom;
-        std::lock_guard<std::mutex> lk(state.slice_geom_mtx);
-        if (state.latest_slice >= 0) {
-            auto it = state.slice_geom.find(
-                static_cast<uint16_t>(state.latest_slice));
-            if (it != state.slice_geom.end()) {
-                const auto& g = it->second;
-                geom = {
-                    {"slice", g.slice},
-                    {"position", {g.position[0], g.position[1], g.position[2]}},
-                    {"read_dir", {g.read_dir[0], g.read_dir[1], g.read_dir[2]}},
-                    {"phase_dir", {g.phase_dir[0], g.phase_dir[1], g.phase_dir[2]}},
-                    {"slice_dir", {g.slice_dir[0], g.slice_dir[1], g.slice_dir[2]}},
-                };
-            }
-        }
-        payload["slice_geometry"] = std::move(geom);
-    }
-
-    {
         std::lock_guard<std::mutex> lk(state.slice_delta_mtx);
         state.latest_slice_delta_json = payload.dump();
     }
-    const bool delivered = push_text_to_scanner(state, payload);
-    return json_response(req, http::status::ok,
-                         {{"file", "slice_delta"}, {"delivered", delivered}});
+
+    return apply_and_send_delta(req, state, "slice_delta", t_mm, r_rad, ts,
+                                nlohmann::json::object());
+}
+
+// GET /read/slice_commanded — the last absolute geometry sent to the agent
+// (base of the next relative move) plus channel status. 204 until the first
+// command of the scan.
+template <class Body>
+static auto handle_get_slice_commanded(const http::request<Body>& req, MarshalState& state)
+    -> http::response<http::string_body>
+{
+    std::optional<slice_math::Geometry> g;
+    std::string ts;
+    uint64_t count = 0;
+    {
+        std::lock_guard<std::mutex> lk(state.commanded_geom_mtx);
+        g = state.commanded_geom;
+        ts = state.commanded_geom_ts;
+        count = state.commanded_count;
+    }
+    if (!g) {
+        http::response<http::string_body> res{http::status::no_content, req.version()};
+        res.keep_alive(req.keep_alive());
+        res.prepare_payload();
+        return res;
+    }
+    const auto cmd = slice_math::command_from_geometry(*g, state.slice_agent_cfg.axes);
+    nlohmann::json j = geometry_to_json(*g);
+    j["ts"] = ts;
+    j["count"] = count;
+    j["command"] = {{"tx", cmd.tx}, {"ty", cmd.ty}, {"tz", cmd.tz},
+                    {"rx_deg", cmd.rx}, {"ry_deg", cmd.ry}, {"rz_deg", cmd.rz}};
+    j["agent"] = {{"enabled", state.slice_agent_cfg.enabled},
+                  {"connected", state.slice_agent_connected()}};
+    return json_response(req, http::status::ok, j);
 }
 
 template <class Body>
@@ -747,6 +865,16 @@ static auto handle_get_status(const http::request<Body>& req, MarshalState& stat
     j["recon"]["configured"] = !state.recon_url.empty();
     j["recon"]["target"] = state.recon_url;
     j["recon"]["connected"] = state.recon_connected();
+
+    {
+        std::lock_guard<std::mutex> lk(state.commanded_geom_mtx);
+        j["slice_agent"] = {
+            {"enabled", state.slice_agent_cfg.enabled},
+            {"connected", state.slice_agent_connected()},
+            {"commands_sent", state.commanded_count},
+            {"commanded_geometry", state.commanded_geom.has_value()},
+        };
+    }
 
     {
         std::lock_guard<std::mutex> lk(state.scan_mtx);
@@ -944,6 +1072,10 @@ void handle_http_request(http::request<Body>&& req, MarshalState& state, Send&& 
     }
     if (method == http::verb::get && target == "/read/slice_delta") {
         send(handle_get_slice_delta(req, state));
+        return;
+    }
+    if (method == http::verb::get && target == "/read/slice_commanded") {
+        send(handle_get_slice_commanded(req, state));
         return;
     }
     if (method == http::verb::post && target == "/pose") {

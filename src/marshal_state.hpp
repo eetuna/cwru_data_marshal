@@ -18,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,7 @@
 #include "latest_image_writer.hpp"
 #include "live_image_recorder.hpp"
 #include "mrd_sink.hpp"
+#include "slice_math.hpp"
 
 struct LiveImageLaneState {
     std::unique_ptr<mrd::LiveImageRecorder> recorder;
@@ -153,8 +155,8 @@ struct MarshalState {
 
     // Slice geometry observed in image headers (position + orientation per
     // slice index), updated on every IMAGE from either lane, cleared at each
-    // scan start (METADATA_XML). Embedded in the slice-translation TEXT
-    // command pushed to the scanner and served at GET /read/slice_geometry.
+    // scan start (METADATA_XML). Served at GET /read/slice_geometry and used
+    // as the base of the first relative slice move of a scan.
     struct SliceGeometry {
         uint16_t slice{0};
         float position[3]{};
@@ -166,6 +168,34 @@ struct MarshalState {
     std::mutex slice_geom_mtx;
     std::map<uint16_t, SliceGeometry> slice_geom;
     int latest_slice{-1};   // slice index of the most recent image, -1 = none
+
+    // ------ Slice agent (scanner-side `slice_agent --listen`) ------
+    //
+    // Slice commands from the UI are converted to an absolute geometry and
+    // sent to the scanner-side agent as 56-byte SliceCommand packets (see
+    // slice_agent_client.hpp / slice_math.hpp). The last commanded geometry
+    // is the base for relative moves: the scanner sequence does not write
+    // the moved geometry back into image headers, so headers cannot serve
+    // as the base once a command has been sent. Cleared at scan start.
+    struct SliceAgentSettings {
+        bool enabled{false};
+        slice_math::AxisOptions axes;
+        double max_step_mm{50.0};    // per-command translation clamp
+        double max_step_deg{30.0};   // per-command rotation clamp
+        double max_abs_mm{300.0};    // absolute position clamp (|component|)
+    };
+    SliceAgentSettings slice_agent_cfg;
+
+    std::mutex commanded_geom_mtx;
+    std::optional<slice_math::Geometry> commanded_geom;
+    std::string commanded_geom_ts;   // ISO8601 of the last command
+    uint64_t commanded_count{0};
+
+    // Hooks set by main when the agent client is configured. Defaults:
+    // disabled / not connected / nothing sent.
+    std::function<bool(const slice_math::WireCommand&)> slice_agent_send =
+        [](const slice_math::WireCommand&) { return false; };
+    std::function<bool()> slice_agent_connected = [] { return false; };
 
     // Pose cache
     PoseStore poses;
