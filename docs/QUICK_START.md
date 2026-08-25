@@ -259,8 +259,15 @@ docker logs slice-agent-mock
 > his `slice_control` tool. A rotation slider adds degrees to `rx/ry/rz` the
 > same way (W/S, A/D, Q/E). Without a reachable agent the POST returns
 > `"delivered":false` (state kept, re-sent when the agent appears); with
-> `SLICE_AGENT_HOST` unset it returns `"enabled":false`. On the real scanner,
-> `SLICE_AGENT_HOST=<MARS ip>`.
+> `SLICE_AGENT_HOST` unset it returns `"enabled":false`.
+
+**On the real scanner** (instead of the mock):
+1. On the MARS: `./slice_agent --listen` (Andrew's program, same as with his keyboard tool).
+2. `SLICE_AGENT_HOST=<MARS ip> docker compose up -d`
+   (MARS ip: after any scan, `docker logs cwru-mri-marshal | grep "Scanner connected from"`).
+3. In the sequence, turn on the WIP toggle **"Dynamic Slice Control"**.
+
+Then the `+`/`−` buttons and rotation sliders in the browser move the slice.
 
 Knobs for 5b–5d: `--fps N` (pace) · `--frames N` (how many; 0 = until Ctrl-C)
 · `--matrix N` (image size) · `--slices N` (multislice) ·
