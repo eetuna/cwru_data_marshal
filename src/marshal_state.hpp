@@ -171,31 +171,35 @@ struct MarshalState {
 
     // ------ Slice agent (scanner-side `slice_agent --listen`) ------
     //
-    // Slice commands from the UI are converted to an absolute geometry and
-    // sent to the scanner-side agent as 56-byte SliceCommand packets (see
-    // slice_agent_client.hpp / slice_math.hpp). The last commanded geometry
-    // is the base for relative moves: the scanner sequence does not write
-    // the moved geometry back into image headers, so headers cannot serve
-    // as the base once a command has been sent. Cleared at scan start.
+    // The marshal behaves like Andrew's slice_control tool: six absolute
+    // numbers (tx ty tz mm, rx ry rz deg) starting at zero; UI moves add to
+    // them (slice_math::apply_step) and the totals are sent as 56-byte
+    // SliceCommand packets (slice_agent_client.hpp). Cleared at scan start
+    // so a new prescription never inherits the previous scan's slice.
     struct SliceAgentSettings {
         bool enabled{false};
-        slice_math::AxisOptions axes;
-        double max_step_mm{50.0};    // per-command translation clamp
-        double max_step_deg{30.0};   // per-command rotation clamp
-        double max_abs_mm{300.0};    // absolute position clamp (|component|)
+        double max_step_mm{50.0};    // per-command translation clamp (each component)
+        double max_step_deg{30.0};   // per-command rotation clamp (each component)
+        double max_abs_mm{300.0};    // clamp on the accumulated |tx|,|ty|,|tz|
+        double nudge_mm{1.0};        // legacy ±1 endpoint: one press = this many mm
     };
     SliceAgentSettings slice_agent_cfg;
 
-    std::mutex commanded_geom_mtx;
-    std::optional<slice_math::Geometry> commanded_geom;
-    std::string commanded_geom_ts;   // ISO8601 of the last command
-    uint64_t commanded_count{0};
+    // slice_state_mtx also serializes "accumulate + send" across HTTP
+    // threads so the agent always receives commands in the order the state
+    // was updated.
+    std::mutex slice_state_mtx;
+    std::optional<slice_math::SliceState> slice_state;   // nullopt = nothing sent this scan
+    std::string slice_state_ts;                          // ISO8601 of the last command
+    uint64_t slice_state_count{0};                       // commands this scan
 
     // Hooks set by main when the agent client is configured. Defaults:
     // disabled / not connected / nothing sent.
     std::function<bool(const slice_math::WireCommand&)> slice_agent_send =
         [](const slice_math::WireCommand&) { return false; };
     std::function<bool()> slice_agent_connected = [] { return false; };
+    std::function<void()> slice_agent_clear = [] {};          // scan start: forget last cmd
+    std::function<uint32_t()> slice_agent_reconnects = [] { return 0u; };
 
     // Pose cache
     PoseStore poses;

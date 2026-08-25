@@ -668,13 +668,15 @@ private:
                         state_.latest_slice = -1;
                     }
                     {
-                        // Likewise the last commanded slice geometry: the
-                        // next relative move must start from the new scan's
-                        // prescription, not from where the previous scan's
-                        // slice was driven to.
-                        std::lock_guard<std::mutex> lk(state_.commanded_geom_mtx);
-                        state_.commanded_geom.reset();
-                        state_.commanded_geom_ts.clear();
+                        // Likewise the slice-command state: a new scan starts
+                        // from zero (identity), never from where the previous
+                        // scan's slice was driven to. The client forgets its
+                        // last command too, so a reconnect cannot replay it.
+                        std::lock_guard<std::mutex> lk(state_.slice_state_mtx);
+                        state_.slice_state.reset();
+                        state_.slice_state_ts.clear();
+                        state_.slice_state_count = 0;
+                        state_.slice_agent_clear();
                     }
                     if (state_.dump_enabled && state_.dump_recorder) {
                         // Pass the raw wire body for byte-exact

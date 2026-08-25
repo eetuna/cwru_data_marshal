@@ -6,8 +6,8 @@
  * Flags: --http host:port, --ws-port N, --recon-host HOST, --recon-port N,
  *        --dump-dir PATH, --dump, --recon-close-timeout-ms N,
  *        --slice-agent-host HOST (enables the slice command channel),
- *        --slice-agent-port N, --slice-transpose, --slice-swap-read-phase,
- *        --slice-axis-sign +,+,+, --slice-max-step-mm N, --slice-max-step-deg N
+ *        --slice-agent-port N, --slice-max-step-mm N, --slice-max-step-deg N,
+ *        --slice-max-abs-mm N, --slice-nudge-mm N, --slice-resend-ms N
  */
 
 #undef LOG_COMPONENT
@@ -243,30 +243,16 @@ bool parse_host_port(const std::string& input, std::string& host, uint16_t& port
     return checked_parse_uint16(input.substr(p + 1), port) && port != 0;
 }
 
-bool checked_parse_double(const std::string& s, double& out) {
+// Positive finite double (all --slice-* magnitudes are strictly positive).
+bool checked_parse_positive_double(const std::string& s, double& out) {
     try {
         size_t pos = 0;
         double v = std::stod(s, &pos);
         if (pos != s.size()) return false;
-        if (!(v > 0.0)) return false;
+        if (!(v > 0.0) || !std::isfinite(v)) return false;
         out = v;
         return true;
     } catch (...) { return false; }
-}
-
-// "+,-,+" or "1,-1,1" -> per-axis signs.
-bool parse_axis_sign(const std::string& s, slice_math::Vec3& out) {
-    int idx = 0;
-    std::string tok;
-    std::istringstream in(s);
-    while (std::getline(in, tok, ',')) {
-        if (idx >= 3) return false;
-        if (tok == "+" || tok == "1" || tok == "+1") out[idx] = 1.0;
-        else if (tok == "-" || tok == "-1") out[idx] = -1.0;
-        else return false;
-        ++idx;
-    }
-    return idx == 3;
 }
 
 } // namespace
@@ -410,26 +396,27 @@ int main(int argc, char** argv)
                 return 1;
             }
         }
-        else if (a == "--slice-transpose")
-            slice_settings.axes.transpose = true;
-        else if (a == "--slice-swap-read-phase")
-            slice_settings.axes.swap_read_phase = true;
-        else if (a == "--slice-axis-sign" && i + 1 < argc) {
-            if (!parse_axis_sign(argv[++i], slice_settings.axes.axis_sign)) {
-                LOG_ERROR("--slice-axis-sign: expected three of +/- separated by commas, got '"
-                          << argv[i] << "'");
-                return 1;
-            }
-        }
         else if (a == "--slice-max-step-mm" && i + 1 < argc) {
-            if (!checked_parse_double(argv[++i], slice_settings.max_step_mm)) {
+            if (!checked_parse_positive_double(argv[++i], slice_settings.max_step_mm)) {
                 LOG_ERROR("--slice-max-step-mm: invalid value '" << argv[i] << "'");
                 return 1;
             }
         }
         else if (a == "--slice-max-step-deg" && i + 1 < argc) {
-            if (!checked_parse_double(argv[++i], slice_settings.max_step_deg)) {
+            if (!checked_parse_positive_double(argv[++i], slice_settings.max_step_deg)) {
                 LOG_ERROR("--slice-max-step-deg: invalid value '" << argv[i] << "'");
+                return 1;
+            }
+        }
+        else if (a == "--slice-max-abs-mm" && i + 1 < argc) {
+            if (!checked_parse_positive_double(argv[++i], slice_settings.max_abs_mm)) {
+                LOG_ERROR("--slice-max-abs-mm: invalid value '" << argv[i] << "'");
+                return 1;
+            }
+        }
+        else if (a == "--slice-nudge-mm" && i + 1 < argc) {
+            if (!checked_parse_positive_double(argv[++i], slice_settings.nudge_mm)) {
+                LOG_ERROR("--slice-nudge-mm: invalid value '" << argv[i] << "'");
                 return 1;
             }
         }
@@ -589,6 +576,12 @@ int main(int argc, char** argv)
         state.slice_agent_connected = [&slice_agent] {
             return slice_agent && slice_agent->connected();
         };
+        state.slice_agent_clear = [&slice_agent] {
+            if (slice_agent) slice_agent->clear();
+        };
+        state.slice_agent_reconnects = [&slice_agent]() -> uint32_t {
+            return slice_agent ? slice_agent->reconnect_count() : 0u;
+        };
     }
 
     // Log config
@@ -606,12 +599,10 @@ int main(int argc, char** argv)
         if (mrd_port > 0) cfg << " mrd-port=" << mrd_port;
         if (slice_settings.enabled) {
             cfg << " slice-agent=" << slice_cfg.host << ":" << slice_cfg.port
-                << " slice_transpose=" << (slice_settings.axes.transpose ? "on" : "off")
-                << " slice_swap_read_phase=" << (slice_settings.axes.swap_read_phase ? "on" : "off")
-                << " slice_axis_sign=" << slice_settings.axes.axis_sign[0] << ","
-                << slice_settings.axes.axis_sign[1] << "," << slice_settings.axes.axis_sign[2]
                 << " slice_max_step=" << slice_settings.max_step_mm << "mm/"
-                << slice_settings.max_step_deg << "deg";
+                << slice_settings.max_step_deg << "deg"
+                << " slice_max_abs=" << slice_settings.max_abs_mm << "mm"
+                << " slice_nudge=" << slice_settings.nudge_mm << "mm";
         } else {
             cfg << " slice-agent=off";
         }

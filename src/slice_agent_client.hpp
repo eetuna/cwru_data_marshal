@@ -6,22 +6,21 @@
  * Protocol (dynamic-slice-position-main/agent/PROTOCOL.md, verified against
  * slice_agent.cpp):
  *   - TCP, default port 9270, ONE client at a time, no framing, no replies.
- *   - Each message is a 56-byte little-endian SliceCommand (slice_math.hpp).
- *   - The agent publishes an IDENTITY transform to shared memory on every
- *     client connect and again on disconnect. Identity = axial slice at
- *     isocenter, NOT the prescribed slice. Therefore:
- *       * we never connect until we have a real command to send, and
- *       * right after connecting we re-send the last command repeatedly for
- *         a short window so the identity publish is overwritten before the
- *         sequence's next frame read.
- *   - The agent restarts its frame counter at 0 per connection while the
- *     sequence only accepts frames >= the last one it saw, so after a
- *     reconnect the sequence may ignore commands for a while. We keep the
- *     connection open for the whole session and log loudly on reconnect.
+ *   - Each message is a 56-byte little-endian SliceCommand (slice_math.hpp)
+ *     carrying six ABSOLUTE numbers.
+ *   - The agent publishes an identity transform on every client connect and
+ *     again on disconnect. We therefore never connect idle (only when a
+ *     command exists) and re-send the current command a few times right
+ *     after each connect so the identity publish is overwritten before the
+ *     sequence's next frame read.
+ *   - The agent restarts its frame counter per connection while the sequence
+ *     only accepts frames >= the last one it saw, so after a reconnect the
+ *     sequence may ignore commands for a while. We hold the connection for
+ *     the whole session, log loudly on reconnect and count reconnects.
  *
- * Threading: the caller (HTTP handler) only touches a mailbox; a single
- * worker thread owns the socket, connects lazily, writes, reconnects with
- * backoff, and sends flags=0xDEAD on stop(). submit() never blocks on I/O.
+ * Threading: callers only touch a mailbox; one worker thread owns the socket
+ * (connect, write, liveness, reconnect with backoff, 0xDEAD on stop).
+ * submit() never does I/O; it waits (bounded) for the worker's verdict.
  */
 
 #pragma once
@@ -58,11 +57,12 @@ namespace mrd {
 struct SliceAgentConfig {
     std::string host;                 // empty = disabled
     uint16_t    port{9270};
-    uint32_t    connect_timeout_ms{3000};
-    uint32_t    resend_window_ms{2000};   // re-send last cmd after (re)connect
+    uint32_t    connect_timeout_ms{2000};
+    uint32_t    resend_window_ms{2000};   // re-send after (re)connect for this long
     uint32_t    resend_interval_ms{100};
     uint32_t    backoff_min_ms{500};
     uint32_t    backoff_max_ms{10000};
+    uint32_t    liveness_poll_ms{1000};
 };
 
 class SliceAgentClient {
@@ -81,16 +81,17 @@ public:
         std::lock_guard<std::mutex> lk(mtx_);
         if (worker_.joinable()) return;
         stopping_ = false;
+        worker_done_ = false;
         worker_ = std::thread([this] { run(); });
     }
 
-    // Queue a command and wait (bounded) for the worker to write it. Returns
-    // true once the bytes were handed to the agent's socket; false when
-    // disabled, stopped, or the write did not happen within wait_ms (no
-    // agent reachable). The command is kept either way and (re)sent as soon
-    // as a connection exists. Never blocks on I/O itself — only waits on the
-    // worker's progress — so an unreachable agent costs at most wait_ms.
-    bool submit(const slice_math::WireCommand& cmd, uint32_t wait_ms = 1500) {
+    // Queue a command and wait for the worker's verdict: true once the bytes
+    // were written to the agent's socket; false when disabled, stopped, or
+    // the write did not happen (agent unreachable — the command is kept and
+    // sent as soon as a connection exists). The wait is bounded by the
+    // connect timeout plus a margin, so a blackholed host costs at most
+    // that; a refused connection returns immediately.
+    bool submit(const slice_math::WireCommand& cmd) {
         if (!enabled()) return false;
         uint64_t my_gen;
         {
@@ -101,10 +102,19 @@ public:
         }
         cv_.notify_all();
         std::unique_lock<std::mutex> lk(mtx_);
-        ack_cv_.wait_for(lk, std::chrono::milliseconds(wait_ms), [&] {
+        const auto wait = std::chrono::milliseconds(cfg_.connect_timeout_ms + 500);
+        ack_cv_.wait_for(lk, wait, [&] {
             return stopping_ || sent_gen_ack_ >= my_gen || failed_gen_ack_ >= my_gen;
         });
         return sent_gen_ack_ >= my_gen;
+    }
+
+    // Forget the current command (scan start). Nothing is sent to the agent;
+    // the next submit() starts fresh. Prevents a reconnect from replaying a
+    // previous scan's slice position.
+    void clear() {
+        std::lock_guard<std::mutex> lk(mtx_);
+        last_cmd_.reset();
     }
 
     bool connected() const { return connected_.load(); }
@@ -127,76 +137,94 @@ public:
         }
         cv_.notify_all();
         ack_cv_.notify_all();
-        // Unblock a worker stuck in a blocking send: shut the fd down.
+        // Give the worker a moment to send the graceful 0xDEAD and exit on
+        // its own; only if it is stuck (blocking send() to a hung agent)
+        // force the socket shut — SHUT_RDWR, since SHUT_RD alone does not
+        // wake a blocked writer.
         {
-            std::lock_guard<std::mutex> lk(fd_mtx_);
-            if (fd_ >= 0) ::shutdown(fd_, SHUT_RD);
+            std::unique_lock<std::mutex> lk(mtx_);
+            done_cv_.wait_for(lk, std::chrono::milliseconds(kStopGraceMs), [&] { return worker_done_; });
+            if (!worker_done_) {
+                std::lock_guard<std::mutex> flk(fd_mtx_);
+                if (fd_ >= 0) ::shutdown(fd_, SHUT_RDWR);
+            }
         }
         if (t.joinable()) t.join();
     }
+
+    static constexpr uint32_t kStopGraceMs = 500;
 
 private:
     // ---- worker -------------------------------------------------------------
 
     void run() {
-        uint64_t sent_gen = 0;
+        uint64_t sent_gen = 0;          // generation last written (or 0 = resend needed)
+        uint64_t failed_gen = 0;        // generation whose connect attempt last failed
         uint32_t backoff_ms = cfg_.backoff_min_ms;
+        auto next_attempt = std::chrono::steady_clock::now();
 
         while (true) {
             slice_math::WireCommand cmd;
+            uint64_t gen;
             {
                 std::unique_lock<std::mutex> lk(mtx_);
-                // Wake periodically to notice a peer that went away while we
-                // were idle (the agent never sends, so a plain blocking wait
-                // would only learn about it at the next failed send).
-                cv_.wait_for(lk, std::chrono::milliseconds(kLivenessPollMs),
-                             [&] { return stopping_ || (last_cmd_ && generation_ > sent_gen); });
-                if (stopping_) break;
-                if (!last_cmd_) continue;
-                if (generation_ <= sent_gen) {
-                    // Idle tick: liveness check only.
-                    lk.unlock();
-                    if (connected_.load() && peer_closed()) {
-                        on_send_failure();
-                        sent_gen = 0;   // re-send the last command after reconnect
+                const bool have_new = last_cmd_ && generation_ > sent_gen;
+                if (!have_new) {
+                    // Idle: wake on stop, on a new command, or periodically
+                    // for a liveness peek when connected.
+                    if (connected_.load())
+                        cv_.wait_for(lk, std::chrono::milliseconds(cfg_.liveness_poll_ms),
+                                     [&] { return stopping_ || (last_cmd_ && generation_ > sent_gen); });
+                    else
+                        cv_.wait(lk, [&] { return stopping_ || (last_cmd_ && generation_ > sent_gen); });
+                    if (stopping_) break;
+                    if (!(last_cmd_ && generation_ > sent_gen)) {
+                        lk.unlock();
+                        if (connected_.load() && peer_closed()) {
+                            on_send_failure();
+                            // Reconnect on the next command; do not spin.
+                        }
+                        continue;
                     }
-                    continue;
                 }
                 cmd = *last_cmd_;
-                sent_gen = generation_;
+                gen = generation_;
             }
 
-            if (connected_.load() && peer_closed()) {
-                on_send_failure();
-            }
+            if (connected_.load() && peer_closed()) on_send_failure();
 
             if (!connected_.load()) {
-                if (!connect_once()) {
-                    // Keep the command; retry after backoff unless stopped.
-                    ack(failed_gen_ack_, sent_gen);
+                // Automatic retries of the SAME command respect the backoff;
+                // a NEW command (a user action) is attempted immediately —
+                // the agent may well be back.
+                const auto now = std::chrono::steady_clock::now();
+                if (gen == failed_gen && now < next_attempt) {
                     std::unique_lock<std::mutex> lk(mtx_);
-                    cv_.wait_for(lk, std::chrono::milliseconds(backoff_ms),
-                                 [&] { return stopping_; });
+                    cv_.wait_until(lk, next_attempt, [&] { return stopping_ || generation_ > gen; });
                     if (stopping_) break;
+                    continue;   // re-read: either the backoff expired or a newer command exists
+                }
+                if (!connect_once()) {
+                    failed_gen = gen;
+                    ack(failed_gen_ack_, gen);
+                    next_attempt = std::chrono::steady_clock::now()
+                                 + std::chrono::milliseconds(backoff_ms);
                     backoff_ms = std::min(backoff_ms * 2, cfg_.backoff_max_ms);
-                    sent_gen = 0;   // force a resend attempt of the same command
-                    continue;
+                    continue;   // loops into the wait above (or straight to a newer command)
                 }
                 backoff_ms = cfg_.backoff_min_ms;
-                // Overwrite the agent's identity publish quickly and keep
-                // repeating for the resend window (the sequence reads shm
-                // once per image frame and may ignore early frames after a
-                // reconnect — see header comment).
-                resend_window(cmd, sent_gen);
+                sent_gen = gen;
+                resend_window(cmd, gen, sent_gen);
                 continue;
             }
 
             if (send_cmd(cmd)) {
-                ack(sent_gen_ack_, sent_gen);
+                sent_gen = gen;
+                ack(sent_gen_ack_, gen);
             } else {
                 on_send_failure();
-                ack(failed_gen_ack_, sent_gen);
-                sent_gen = 0;   // resend after reconnect
+                ack(failed_gen_ack_, gen);
+                // sent_gen unchanged (< generation_): retried after reconnect.
             }
         }
 
@@ -207,35 +235,36 @@ private:
             send_cmd(quit);
         }
         close_fd();
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            worker_done_ = true;
+        }
+        done_cv_.notify_all();
     }
 
-    // Re-send `cmd` immediately and then every resend_interval_ms for
-    // resend_window_ms, unless a newer command arrives (then it takes over)
-    // or stop() is called. Returns false on socket failure.
-    bool resend_window(slice_math::WireCommand cmd, uint64_t& sent_gen) {
-        auto deadline = std::chrono::steady_clock::now()
-                      + std::chrono::milliseconds(cfg_.resend_window_ms);
+    // Right after a (re)connect: send `cmd` now and repeat it every
+    // resend_interval_ms for resend_window_ms so the agent's identity publish
+    // is overwritten before the sequence's next frame. A newer command
+    // arriving inside the window is sent once and ends the window (the
+    // repeat exists only to beat the identity publish, not to echo the UI).
+    void resend_window(slice_math::WireCommand cmd, uint64_t gen, uint64_t& sent_gen) {
+        const auto deadline = std::chrono::steady_clock::now()
+                            + std::chrono::milliseconds(cfg_.resend_window_ms);
+        bool first = true;
         while (true) {
             if (!send_cmd(cmd)) {
                 on_send_failure();
-                ack(failed_gen_ack_, sent_gen);
+                ack(failed_gen_ack_, gen);
                 sent_gen = 0;
-                return false;
+                return;
             }
-            ack(sent_gen_ack_, sent_gen);
+            if (first) { ack(sent_gen_ack_, gen); first = false; }
             std::unique_lock<std::mutex> lk(mtx_);
             cv_.wait_for(lk, std::chrono::milliseconds(cfg_.resend_interval_ms),
-                         [&] { return stopping_ || generation_ > sent_gen; });
-            if (stopping_) return false;
-            if (generation_ > sent_gen) {
-                cmd = *last_cmd_;
-                sent_gen = generation_;
-                // newer command: restart the window for it
-                deadline = std::chrono::steady_clock::now()
-                         + std::chrono::milliseconds(cfg_.resend_window_ms);
-                continue;
-            }
-            if (std::chrono::steady_clock::now() >= deadline) return true;
+                         [&] { return stopping_ || generation_ > gen; });
+            if (stopping_) return;
+            if (generation_ > gen) return;   // main loop sends the newer command
+            if (std::chrono::steady_clock::now() >= deadline) return;
         }
     }
 
@@ -253,8 +282,8 @@ private:
         close_fd();
         if (was_connected) {
             reconnects_.fetch_add(1);
-            LOG_WARN("slice_agent connection lost; will reconnect. NOTE: the "
-                     "scanner sequence may ignore commands after a reconnect "
+            LOG_WARN("slice_agent connection lost; will reconnect on the next command. "
+                     "NOTE: the scanner sequence may ignore commands after a reconnect "
                      "until the agent's frame counter catches up.");
         }
     }
@@ -275,18 +304,20 @@ private:
 
         int fd = -1;
         bool ok = false;
+        int last_err = 0;
         for (addrinfo* ai = res; ai; ai = ai->ai_next) {
             fd = ::socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC, ai->ai_protocol);
-            if (fd < 0) continue;
+            if (fd < 0) { last_err = errno; continue; }
             ok = connect_with_timeout(fd, ai->ai_addr, ai->ai_addrlen);
             if (ok) break;
+            last_err = errno;
             ::close(fd);
             fd = -1;
         }
         ::freeaddrinfo(res);
         if (!ok) {
             LOG_WARN("slice_agent: connect to " << cfg_.host << ":" << cfg_.port
-                     << " failed (" << std::strerror(errno) << ")");
+                     << " failed (" << std::strerror(last_err) << ")");
             return false;
         }
 
@@ -330,8 +361,8 @@ private:
         unsigned ut = 60000; ::setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &ut, sizeof(ut));
     }
 
-    // The agent never sends anything, so any readable byte or EOF means the
-    // peer has gone away (EOF) or is misbehaving. Non-blocking peek.
+    // The agent never sends anything, so EOF (or a socket error) means the
+    // peer has gone away. Non-blocking peek.
     bool peer_closed() {
         int fd;
         {
@@ -345,8 +376,6 @@ private:
         if (n < 0) return !(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR);
         return false;                                   // unexpected data; keep going
     }
-
-    static constexpr uint32_t kLivenessPollMs = 1000;
 
     bool send_cmd(const slice_math::WireCommand& cmd) {
         int fd;
@@ -385,6 +414,8 @@ private:
     mutable std::mutex mtx_;
     std::condition_variable cv_;       // worker wake-ups
     std::condition_variable ack_cv_;   // submit() waiters
+    std::condition_variable done_cv_;  // stop() waits for the worker's graceful exit
+    bool worker_done_{false};
     bool stopping_{false};
     uint64_t generation_{0};
     uint64_t sent_gen_ack_{0};         // highest generation written to the socket

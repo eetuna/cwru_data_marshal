@@ -246,6 +246,18 @@ if(BUILD_TESTING)
   target_link_libraries(test_slice_math PRIVATE Catch2::Catch2WithMain)
   add_test(NAME test_slice_math COMMAND test_slice_math)
 
+  add_executable(test_slice_http
+    tests/test_slice_http.cpp
+    src/mrd_sink.cpp
+    src/dump_recorder.cpp
+    src/live_image_recorder.cpp
+    src/latest_image_writer.cpp
+  )
+  target_link_libraries(test_slice_http PRIVATE
+    Catch2::Catch2WithMain Boost::system Threads::Threads
+    nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target} CURL::libcurl)
+  add_test(NAME test_slice_http COMMAND test_slice_http)
+
   add_executable(test_slice_agent_client tests/test_slice_agent_client.cpp)
   target_link_libraries(test_slice_agent_client PRIVATE
     Catch2::Catch2WithMain Boost::system Threads::Threads)

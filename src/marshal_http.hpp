@@ -259,20 +259,27 @@ static auto handle_put_transform(const http::request<Body>& req, MarshalState& s
 // ---------------------------------------------------------------------------
 // Slice command channel (UI -> marshal -> scanner-side slice_agent)
 //
-// Three UI-facing endpoints produce slice commands:
-//   POST /write/file_slice_translation  { "values": [ ±1 ] }   legacy ±1 mm nudge
+// The marshal is a stand-in for Andrew's slice_control keyboard tool: it
+// keeps six absolute numbers — tx ty tz (mm), rx ry rz (deg) — starting at
+// zero, adds UI moves to them exactly as his keys do (slice_math::apply_step)
+// and sends the totals to `slice_agent --listen` as 56-byte SliceCommands.
+//
 //   POST /write/slice_delta   { "translation_mm": [..], "rotation_rad": [..] }
-//   POST /write/slice_target  { "position": [..], "read_dir": [..], ... }
-// Each is converted to an ABSOLUTE slice geometry (relative moves are
-// applied to the last commanded geometry, or to the latest image-header
-// geometry before any command has been sent this scan), converted to the
-// agent's Euler-degree wire form (slice_math.hpp) and handed to the
-// SliceAgentClient via state.slice_agent_send. Responses report
-//   "delivered": command handed to a connected agent
-//   "agent_connected", "enabled": current channel status
-// The latest request of each kind is cached and readable at the matching
-// GET /read/... (204 until the first POST); GET /read/slice_commanded shows
-// the last absolute geometry actually sent.
+//       translation_mm[k] moves along row k of buildRotMatrix (0 readout,
+//       1 phase, 2 slice normal) — his arrow / PgUp / PgDn keys;
+//       rotation_rad[k] is added to the k-th angle — his W/S, A/D, Q/E.
+//   POST /write/file_slice_translation { "values": [ ±1 ] }   legacy: PgUp/PgDn
+//   POST /write/slice_target  { "position", "read_dir", "phase_dir", "slice_dir" }
+//       absolute geometry from an image header (Ridaa's "Send Absolute
+//       Position"); converted to the six numbers and sent. Outside
+//       slice_control's tested path — see docs.
+//   POST /write/slice_reset   zero the six numbers and send them — his '0' key.
+//   GET  /read/slice_commanded  the six numbers + the axes they imply.
+//
+// Responses carry "delivered" (bytes written to a connected agent),
+// "agent_connected", "enabled", "state" (the six numbers) and "geometry".
+// Requests are also cached at the matching GET /read/... (204 until the
+// first POST). All of it is cleared at scan start.
 // ---------------------------------------------------------------------------
 
 // JSON snapshot of the geometry cache. {"latest_slice":-1,"slices":{}} when
@@ -307,66 +314,18 @@ inline nlohmann::json geometry_to_json(const slice_math::Geometry& g)
     };
 }
 
-// Geometry of the most recently seen image this scan, if any.
-inline std::optional<slice_math::Geometry> latest_header_geometry(MarshalState& state)
+inline nlohmann::json state_to_json(const slice_math::SliceState& s)
 {
-    std::lock_guard<std::mutex> lk(state.slice_geom_mtx);
-    if (state.latest_slice < 0) return std::nullopt;
-    auto it = state.slice_geom.find(static_cast<uint16_t>(state.latest_slice));
-    if (it == state.slice_geom.end()) return std::nullopt;
-    const auto& h = it->second;
-    slice_math::Geometry g;
-    for (int i = 0; i < 3; ++i) {
-        g.position[i]  = h.position[i];
-        g.read_dir[i]  = h.read_dir[i];
-        g.phase_dir[i] = h.phase_dir[i];
-        g.slice_dir[i] = h.slice_dir[i];
-    }
-    return g;
-}
-
-// Base for a relative move: the last commanded geometry, else the latest
-// image header geometry. Nullopt when neither exists yet.
-inline std::optional<slice_math::Geometry> slice_move_base(MarshalState& state,
-                                                           std::string& source)
-{
-    {
-        std::lock_guard<std::mutex> lk(state.commanded_geom_mtx);
-        if (state.commanded_geom) { source = "commanded"; return state.commanded_geom; }
-    }
-    auto g = latest_header_geometry(state);
-    if (g) source = "image_header";
-    return g;
+    return {{"tx", s.t[0] + 0.0}, {"ty", s.t[1] + 0.0}, {"tz", s.t[2] + 0.0},
+            {"rx_deg", s.r_deg[0] + 0.0}, {"ry_deg", s.r_deg[1] + 0.0}, {"rz_deg", s.r_deg[2] + 0.0}};
 }
 
 struct SliceSendResult {
     bool delivered{false};
     bool agent_connected{false};
     bool enabled{false};
-    slice_math::WireCommand cmd;
+    slice_math::SliceState state;
 };
-
-// Convert an absolute geometry to the agent's wire form, send it, and
-// remember it as the new commanded geometry (the base for the next delta).
-// Always records the geometry, even when not delivered, so a UI move made
-// before the agent connects is not lost — the client re-sends on connect.
-inline SliceSendResult send_slice_geometry(MarshalState& state,
-                                           const slice_math::Geometry& geom,
-                                           const std::string& ts)
-{
-    SliceSendResult r;
-    r.enabled = state.slice_agent_cfg.enabled;
-    r.cmd = slice_math::command_from_geometry(geom, state.slice_agent_cfg.axes);
-    {
-        std::lock_guard<std::mutex> lk(state.commanded_geom_mtx);
-        state.commanded_geom = geom;
-        state.commanded_geom_ts = ts;
-        ++state.commanded_count;
-    }
-    r.delivered = state.slice_agent_send(r.cmd);
-    r.agent_connected = state.slice_agent_connected();
-    return r;
-}
 
 inline nlohmann::json slice_send_status_json(const SliceSendResult& r)
 {
@@ -374,56 +333,85 @@ inline nlohmann::json slice_send_status_json(const SliceSendResult& r)
         {"delivered", r.delivered},
         {"agent_connected", r.agent_connected},
         {"enabled", r.enabled},
-        {"command", {{"tx", r.cmd.tx}, {"ty", r.cmd.ty}, {"tz", r.cmd.tz},
-                     {"rx_deg", r.cmd.rx}, {"ry_deg", r.cmd.ry}, {"rz_deg", r.cmd.rz}}},
+        {"state", state_to_json(r.state)},
+        {"geometry", geometry_to_json(slice_math::geometry_from_state(r.state))},
     };
 }
 
-// Validate a relative move against the configured per-command clamps.
-// Returns an error string, empty when OK.
-inline std::string check_delta_limits(const MarshalState& state,
-                                      const slice_math::Vec3& t_mm,
-                                      const slice_math::Vec3& r_rad)
+// Check the accumulated position against the absolute clamp. Empty = OK.
+inline std::string check_abs_limit(const MarshalState& state, const slice_math::SliceState& s)
 {
-    const double max_mm = state.slice_agent_cfg.max_step_mm;
-    const double max_rad = state.slice_agent_cfg.max_step_deg * slice_math::kDeg2Rad;
     for (int i = 0; i < 3; ++i) {
-        if (!std::isfinite(t_mm[i]) || std::fabs(t_mm[i]) > max_mm)
-            return "translation_mm[" + std::to_string(i) + "] exceeds max step "
-                   + std::to_string(max_mm) + " mm";
-        if (!std::isfinite(r_rad[i]) || std::fabs(r_rad[i]) > max_rad)
-            return "rotation_rad[" + std::to_string(i) + "] exceeds max step "
-                   + std::to_string(state.slice_agent_cfg.max_step_deg) + " deg";
+        if (!std::isfinite(s.t[i]) || !std::isfinite(s.r_deg[i]) ||
+            std::fabs(s.t[i]) > state.slice_agent_cfg.max_abs_mm) {
+            return "resulting position component " + std::to_string(i) + " exceeds max "
+                   + std::to_string(state.slice_agent_cfg.max_abs_mm) + " mm";
+        }
     }
     return {};
 }
 
-// Shared tail of every relative move: base -> apply -> send. Returns the
-// HTTP response.
+// Commit a new state and send it. Called with state.slice_state_mtx HELD by
+// the caller, which is what serializes accumulate+send across HTTP threads
+// (commands reach the agent in the order the state was updated). The state
+// is recorded even when not delivered: the client keeps the command and
+// sends it as soon as the agent is reachable.
+inline SliceSendResult commit_and_send_locked(MarshalState& state,
+                                              const slice_math::SliceState& s,
+                                              const std::string& ts)
+{
+    SliceSendResult r;
+    r.enabled = state.slice_agent_cfg.enabled;
+    r.state = s;
+    state.slice_state = s;
+    state.slice_state_ts = ts;
+    ++state.slice_state_count;
+    r.delivered = state.slice_agent_send(slice_math::command_from_state(s));
+    r.agent_connected = state.slice_agent_connected();
+    return r;
+}
+
+// Validate a relative move against the per-command clamps. Empty = OK.
+inline std::string check_step_limits(const MarshalState& state,
+                                     const slice_math::Vec3& t_mm,
+                                     const slice_math::Vec3& r_deg)
+{
+    const double max_mm = state.slice_agent_cfg.max_step_mm;
+    const double max_deg = state.slice_agent_cfg.max_step_deg;
+    for (int i = 0; i < 3; ++i) {
+        if (!std::isfinite(t_mm[i]) || std::fabs(t_mm[i]) > max_mm)
+            return "translation_mm[" + std::to_string(i) + "] exceeds max step "
+                   + std::to_string(max_mm) + " mm";
+        if (!std::isfinite(r_deg[i]) || std::fabs(r_deg[i]) > max_deg)
+            return "rotation[" + std::to_string(i) + "] exceeds max step "
+                   + std::to_string(max_deg) + " deg";
+    }
+    return {};
+}
+
+// Shared tail of every relative move: clamp -> accumulate -> abs clamp ->
+// send. Returns the HTTP response.
 template <class Body>
-static auto apply_and_send_delta(const http::request<Body>& req, MarshalState& state,
-                                 const char* file,
-                                 const slice_math::Vec3& t_mm,
-                                 const slice_math::Vec3& r_rad,
-                                 const std::string& ts,
-                                 nlohmann::json extra)
+static auto apply_step_and_send(const http::request<Body>& req, MarshalState& state,
+                                const char* file,
+                                const slice_math::Vec3& t_mm,
+                                const slice_math::Vec3& r_deg,
+                                const std::string& ts,
+                                nlohmann::json extra)
     -> http::response<http::string_body>
 {
-    std::string base_source;
-    auto base = slice_move_base(state, base_source);
-    if (!base) {
-        extra["file"] = file;
-        extra["delivered"] = false;
-        extra["error"] = "no base geometry: no image header seen this scan and "
-                         "no slice_target sent yet";
-        return json_response(req, http::status::conflict, extra);
+    if (auto lim = check_step_limits(state, t_mm, r_deg); !lim.empty()) {
+        return json_response(req, http::status::bad_request, {{"error", lim}});
     }
-    const auto moved = slice_math::apply_delta(*base, t_mm, r_rad);
-    const auto sent = send_slice_geometry(state, moved, ts);
+    std::lock_guard<std::mutex> lk(state.slice_state_mtx);
+    slice_math::SliceState next = state.slice_state.value_or(slice_math::SliceState{});
+    slice_math::apply_step(next, t_mm, r_deg);
+    if (auto lim = check_abs_limit(state, next); !lim.empty()) {
+        return json_response(req, http::status::bad_request, {{"error", lim}});
+    }
+    const auto sent = commit_and_send_locked(state, next, ts);
     nlohmann::json out = slice_send_status_json(sent);
     out["file"] = file;
-    out["base"] = base_source;
-    out["geometry"] = geometry_to_json(moved);
     for (auto& [k, v] : extra.items()) out[k] = v;
     return json_response(req, http::status::ok, out);
 }
@@ -462,10 +450,11 @@ static auto handle_post_slice_translation(const http::request<Body>& req, Marsha
         state.latest_slice_translation_json = body.dump();
     }
 
-    // Legacy ±1 = one millimetre along the slice normal (through-plane).
-    return apply_and_send_delta(req, state, "file_slice_translation",
-                                {0.0, 0.0, direction}, {0.0, 0.0, 0.0}, ts,
-                                {{"direction", direction}});
+    // Legacy ±1 = one nudge along the slice normal (PgUp / PgDn).
+    const double step = direction * state.slice_agent_cfg.nudge_mm;
+    return apply_step_and_send(req, state, "file_slice_translation",
+                               {0.0, 0.0, step}, {0.0, 0.0, 0.0}, ts,
+                               {{"direction", direction}});
 }
 
 // GET /read/slice_geometry — position/orientation per slice as observed in
@@ -569,12 +558,9 @@ static auto handle_post_slice_target(const http::request<Body>& req, MarshalStat
         return json_response(req, http::status::bad_request,
             {{"error", "left-handed geometry: read_dir x phase_dir must equal slice_dir"}});
     }
-    for (int i = 0; i < 3; ++i) {
-        if (!std::isfinite(pos[i]) || std::fabs(pos[i]) > state.slice_agent_cfg.max_abs_mm) {
-            return json_response(req, http::status::bad_request,
-                {{"error", "position[" + std::to_string(i) + "] exceeds max "
-                           + std::to_string(state.slice_agent_cfg.max_abs_mm) + " mm"}});
-        }
+    const slice_math::SliceState next = slice_math::state_from_geometry(geom);
+    if (auto lim = check_abs_limit(state, next); !lim.empty()) {
+        return json_response(req, http::status::bad_request, {{"error", lim}});
     }
 
     const std::string ts = mrd::iso8601_now_ms();
@@ -586,10 +572,10 @@ static auto handle_post_slice_target(const http::request<Body>& req, MarshalStat
         state.latest_slice_target_json = payload.dump();
     }
 
-    const auto sent = send_slice_geometry(state, geom, ts);
+    std::lock_guard<std::mutex> lk(state.slice_state_mtx);
+    const auto sent = commit_and_send_locked(state, next, ts);
     nlohmann::json out = slice_send_status_json(sent);
     out["file"] = "slice_target";
-    out["geometry"] = geometry_to_json(geom);
     return json_response(req, http::status::ok, out);
 }
 
@@ -619,16 +605,16 @@ static auto handle_get_slice_target(const http::request<Body>& req, MarshalState
 // ---------------------------------------------------------------------------
 // POST /write/slice_delta and GET /read/slice_delta
 //
-// Relative slice move from the UI: "shift by this much, rotate by this much"
-// — the command style used by incremental front-end buttons. Body (JSON),
-// at least one field required, the other defaults to zero:
-//   { "translation_mm": [dx, dy, dz],       // SLICE frame: along read, phase, normal
-//     "rotation_rad":   [rx, ry, rz] }      // about the slice's read, phase, normal
-// Both are in the slice's own frame (the convention of the WebGL ± button
-// — "+1 mm along the slice axis" — and of Andrew's slice_control tool).
-// The move is applied to the base geometry (last commanded, else latest
-// image header) and the resulting absolute geometry is sent to the agent.
-// Per-command magnitudes are clamped (--slice-max-step-mm/-deg): 400 above.
+// Relative slice move — the command style of the WebGL ± button and rotation
+// sliders. Body (JSON), at least one field required, the other defaults to
+// zero:
+//   { "translation_mm": [d_read, d_phase, d_normal],   // along rows 0/1/2 of
+//                                                      // buildRotMatrix(rx,ry,rz)
+//     "rotation_rad":   [d_rx, d_ry, d_rz] }           // added to the angles
+// This is slice_control.cpp's arithmetic verbatim (arrows/PgUp/PgDn and
+// W/S, A/D, Q/E). Per-command magnitudes are clamped (--slice-max-step-mm /
+// -deg) and the accumulated position against --slice-max-abs-mm: 400 above,
+// nothing sent. The request is cached only when accepted.
 // ---------------------------------------------------------------------------
 template <class Body>
 static auto handle_post_slice_delta(const http::request<Body>& req, MarshalState& state)
@@ -656,56 +642,70 @@ static auto handle_post_slice_delta(const http::request<Body>& req, MarshalState
         return json_response(req, http::status::bad_request, {{"error", err}});
 
     const slice_math::Vec3 t_mm = {t[0], t[1], t[2]};
-    const slice_math::Vec3 r_rad = {r[0], r[1], r[2]};
-    if (auto lim = check_delta_limits(state, t_mm, r_rad); !lim.empty()) {
-        return json_response(req, http::status::bad_request, {{"error", lim}});
-    }
-
+    const slice_math::Vec3 r_deg = {r[0] * slice_math::kRad2Deg,
+                                    r[1] * slice_math::kRad2Deg,
+                                    r[2] * slice_math::kRad2Deg};
     const std::string ts = mrd::iso8601_now_ms();
-    nlohmann::json payload;
-    payload["type"] = "slice_delta";
-    payload["translation_mm"] = {t[0], t[1], t[2]};
-    payload["rotation_rad"] = {r[0], r[1], r[2]};
-    payload["ts"] = ts;
-    {
+    auto res = apply_step_and_send(req, state, "slice_delta", t_mm, r_deg, ts,
+                                   nlohmann::json::object());
+    if (res.result() == http::status::ok) {
+        nlohmann::json payload;
+        payload["type"] = "slice_delta";
+        payload["translation_mm"] = {t[0], t[1], t[2]};
+        payload["rotation_rad"] = {r[0], r[1], r[2]};
+        payload["ts"] = ts;
         std::lock_guard<std::mutex> lk(state.slice_delta_mtx);
         state.latest_slice_delta_json = payload.dump();
     }
-
-    return apply_and_send_delta(req, state, "slice_delta", t_mm, r_rad, ts,
-                                nlohmann::json::object());
+    return res;
 }
 
-// GET /read/slice_commanded — the last absolute geometry sent to the agent
-// (base of the next relative move) plus channel status. 204 until the first
-// command of the scan.
+// POST /write/slice_reset — zero the six numbers and send them (slice_control's
+// '0' key). Note: zero = the identity slice (axial through isocenter), which
+// is where the agent puts the slice on connect; it is NOT the console
+// prescription.
+template <class Body>
+static auto handle_post_slice_reset(const http::request<Body>& req, MarshalState& state)
+    -> http::response<http::string_body>
+{
+    const std::string ts = mrd::iso8601_now_ms();
+    std::lock_guard<std::mutex> lk(state.slice_state_mtx);
+    const auto sent = commit_and_send_locked(state, slice_math::SliceState{}, ts);
+    nlohmann::json out = slice_send_status_json(sent);
+    out["file"] = "slice_reset";
+    return json_response(req, http::status::ok, out);
+}
+
+// GET /read/slice_commanded — the six numbers last sent to the agent, the
+// axes they imply, and channel status. 204 until the first command of the
+// scan.
 template <class Body>
 static auto handle_get_slice_commanded(const http::request<Body>& req, MarshalState& state)
     -> http::response<http::string_body>
 {
-    std::optional<slice_math::Geometry> g;
+    std::optional<slice_math::SliceState> s;
     std::string ts;
     uint64_t count = 0;
     {
-        std::lock_guard<std::mutex> lk(state.commanded_geom_mtx);
-        g = state.commanded_geom;
-        ts = state.commanded_geom_ts;
-        count = state.commanded_count;
+        std::lock_guard<std::mutex> lk(state.slice_state_mtx);
+        s = state.slice_state;
+        ts = state.slice_state_ts;
+        count = state.slice_state_count;
     }
-    if (!g) {
+    if (!s) {
         http::response<http::string_body> res{http::status::no_content, req.version()};
         res.keep_alive(req.keep_alive());
         res.prepare_payload();
         return res;
     }
-    const auto cmd = slice_math::command_from_geometry(*g, state.slice_agent_cfg.axes);
-    nlohmann::json j = geometry_to_json(*g);
+    nlohmann::json j;
+    j["state"] = state_to_json(*s);
+    j["geometry"] = geometry_to_json(slice_math::geometry_from_state(*s));
     j["ts"] = ts;
     j["count"] = count;
-    j["command"] = {{"tx", cmd.tx}, {"ty", cmd.ty}, {"tz", cmd.tz},
-                    {"rx_deg", cmd.rx}, {"ry_deg", cmd.ry}, {"rz_deg", cmd.rz}};
     j["agent"] = {{"enabled", state.slice_agent_cfg.enabled},
-                  {"connected", state.slice_agent_connected()}};
+                  {"connected", state.slice_agent_connected()},
+                  {"reconnects", state.slice_agent_reconnects()}};
     return json_response(req, http::status::ok, j);
 }
 
@@ -867,12 +867,19 @@ static auto handle_get_status(const http::request<Body>& req, MarshalState& stat
     j["recon"]["connected"] = state.recon_connected();
 
     {
-        std::lock_guard<std::mutex> lk(state.commanded_geom_mtx);
+        uint64_t count = 0;
+        bool have_state = false;
+        {
+            std::lock_guard<std::mutex> lk(state.slice_state_mtx);
+            count = state.slice_state_count;
+            have_state = state.slice_state.has_value();
+        }
         j["slice_agent"] = {
             {"enabled", state.slice_agent_cfg.enabled},
             {"connected", state.slice_agent_connected()},
-            {"commands_sent", state.commanded_count},
-            {"commanded_geometry", state.commanded_geom.has_value()},
+            {"reconnects", state.slice_agent_reconnects()},
+            {"commands_this_scan", count},
+            {"has_state", have_state},
         };
     }
 
@@ -1076,6 +1083,10 @@ void handle_http_request(http::request<Body>&& req, MarshalState& state, Send&& 
     }
     if (method == http::verb::get && target == "/read/slice_commanded") {
         send(handle_get_slice_commanded(req, state));
+        return;
+    }
+    if (method == http::verb::post && target == "/write/slice_reset") {
+        send(handle_post_slice_reset(req, state));
         return;
     }
     if (method == http::verb::post && target == "/pose") {

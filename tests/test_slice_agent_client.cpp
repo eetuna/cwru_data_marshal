@@ -27,7 +27,7 @@ namespace {
 // time, records every 56-byte command, counts connections.
 class FakeAgent {
 public:
-    FakeAgent() : acceptor_(ioc_, tcp::endpoint(tcp::v4(), 0)) {
+    explicit FakeAgent(uint16_t port = 0) : acceptor_(ioc_, tcp::endpoint(tcp::v4(), port)) {
         port_ = acceptor_.local_endpoint().port();
         thread_ = std::thread([this] { run(); });
     }
@@ -230,12 +230,63 @@ TEST_CASE("No agent listening: submit never blocks, delivered=false, retries wit
     CHECK_FALSE(client.submit(cmd(1.0)));
     const auto dt = std::chrono::steady_clock::now() - t0;
     // Connection refused is immediate; submit must return on the failure
-    // ack, well before its 1500 ms ceiling.
+    // ack, well before its connect_timeout + 500 ms ceiling.
     CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(dt).count() < 1000);
     std::this_thread::sleep_for(300ms);
     CHECK_FALSE(client.connected());
     CHECK(client.sent_count() == 0);
     client.stop();   // must return promptly even while retrying
+}
+
+TEST_CASE("A new command wakes the client out of connect backoff", "[slice][client]") {
+    // Reserve a port with nothing listening, point the client at it, let it
+    // fail and enter backoff, then start the agent on that port and submit:
+    // the new command must be attempted immediately (not after the backoff)
+    // and report delivered.
+    net::io_context ioc;
+    auto reserve = std::make_unique<tcp::acceptor>(ioc, tcp::endpoint(tcp::v4(), 0));
+    const uint16_t port = reserve->local_endpoint().port();
+    reserve.reset();   // now closed: connection refused
+
+    auto cfg = fast_cfg(port);
+    cfg.backoff_min_ms = 3000; cfg.backoff_max_ms = 3000;   // long backoff on purpose
+    mrd::SliceAgentClient client(cfg);
+    client.start();
+    CHECK_FALSE(client.submit(cmd(1.0)));   // refused -> false quickly, backoff armed
+
+    // Agent appears on the same port (retry binding: the port may be briefly in TIME_WAIT-free state)
+    std::unique_ptr<FakeAgent> agent;
+    for (int i = 0; i < 20 && !agent; ++i) {
+        try { agent = std::make_unique<FakeAgent>(port); } catch (...) { std::this_thread::sleep_for(50ms); }
+    }
+    REQUIRE(agent);
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(client.submit(cmd(2.0)));   // must not wait out the 3 s backoff
+    const auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    CHECK(dt < 1500);
+    REQUIRE(agent->wait_for([&] { auto cs = agent->commands(); return !cs.empty() && cs.back().tz == Catch::Approx(2.0); }));
+    client.stop();
+}
+
+TEST_CASE("clear() forgets the last command: no resend after reconnect", "[slice][client]") {
+    FakeAgent agent;
+    mrd::SliceAgentClient client(fast_cfg(agent.port()));
+    client.start();
+    REQUIRE(client.submit(cmd(5.0)));
+    std::this_thread::sleep_for(400ms);
+    client.clear();
+    CHECK_FALSE(client.last_command().has_value());
+    agent.kick_client();
+    REQUIRE(agent.wait_for([&] { return agent.disconnects() == 1; }));
+    std::this_thread::sleep_for(1500ms);   // liveness tick would reconnect+resend if a command were kept
+    CHECK(agent.connections() == 1);
+    // a fresh command connects and is the only thing sent
+    const size_t before = agent.commands().size();
+    REQUIRE(client.submit(cmd(6.0)));
+    REQUIRE(agent.wait_for([&] { return agent.connections() == 2; }));
+    REQUIRE(agent.wait_for([&] { auto cs = agent.commands(); return cs.size() > before && cs.back().tz == Catch::Approx(6.0); }));
+    for (size_t i = before; i < agent.commands().size(); ++i) CHECK(agent.commands()[i].tz == Catch::Approx(6.0));
+    client.stop();
 }
 
 TEST_CASE("Command submitted before the agent is up is delivered once it appears",

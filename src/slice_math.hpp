@@ -1,16 +1,20 @@
 /*
  * File: src/slice_math.hpp
  * Project: CWRU Data Marshal - MRI Marshal
- * Purpose: Slice-geometry math for the slice_agent command channel.
+ * Purpose: Slice-command state for the scanner-side slice_agent channel.
  *
- * The scanner-side agent (dynamic-slice-position-main/agent/slice_agent.cpp)
- * accepts an ABSOLUTE slice geometry as three Euler angles (degrees) and a
- * slice center (mm, scanner PCS). It rebuilds the rotation as
- *     R = Rz(rz) * Ry(ry) * Rx(rx)
- * and the sequence uses the rows of R as the readout / phase / slice-normal
- * directions. This header converts between the marshal's direction-vector
- * representation (as found in ISMRMRD image headers) and that wire form,
- * and applies relative moves expressed in the slice's own frame.
+ * The reference client is Andrew's slice_control.cpp
+ * (dynamic-slice-position-main/agent/slice_control.cpp). It keeps six
+ * absolute numbers — tx ty tz (mm) and rx ry rz (degrees) — starting at
+ * zero, and on every key:
+ *   arrows / PgUp / PgDn : (tx,ty,tz) += step * row k of buildRotMatrix(rx,ry,rz)
+ *                          (row 0 = readout, row 1 = phase, row 2 = slice normal)
+ *   W/S, A/D, Q/E        : rx / ry / rz += step
+ * and sends the six totals as a 56-byte SliceCommand. SliceState/apply_step
+ * below are that arithmetic verbatim, so the marshal puts the same bytes on
+ * the wire as his tool would for the same moves. buildRotMatrix is ported
+ * verbatim too; how the sequence interprets its output is then identical
+ * to Andrew's own sessions.
  *
  * Header-only, no external dependencies.
  */
@@ -30,15 +34,6 @@ using Mat3 = std::array<Vec3, 3>;   // Mat3[row][col]
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kDeg2Rad = kPi / 180.0;
 constexpr double kRad2Deg = 180.0 / kPi;
-
-// Absolute slice geometry: center in mm (scanner PCS) and three unit
-// direction vectors (readout, phase-encode, slice normal).
-struct Geometry {
-    Vec3 position{0, 0, 0};
-    Vec3 read_dir{1, 0, 0};
-    Vec3 phase_dir{0, 1, 0};
-    Vec3 slice_dir{0, 0, 1};
-};
 
 // ---- basic vector / matrix helpers -----------------------------------------
 
@@ -68,18 +63,6 @@ inline Vec3 scale(const Vec3& a, double s) {
     return {a[0]*s, a[1]*s, a[2]*s};
 }
 
-inline Mat3 identity() {
-    return {{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
-}
-
-inline Mat3 transpose(const Mat3& m) {
-    Mat3 t;
-    for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c)
-            t[r][c] = m[c][r];
-    return t;
-}
-
 inline Mat3 mul(const Mat3& a, const Mat3& b) {
     Mat3 out{};
     for (int r = 0; r < 3; ++r)
@@ -91,49 +74,9 @@ inline Mat3 mul(const Mat3& a, const Mat3& b) {
     return out;
 }
 
-inline double det3(const Mat3& m) {
-    return m[0][0] * (m[1][1]*m[2][2] - m[1][2]*m[2][1])
-         - m[0][1] * (m[1][0]*m[2][2] - m[1][2]*m[2][0])
-         + m[0][2] * (m[1][0]*m[2][1] - m[1][1]*m[2][0]);
-}
-
-// Rotation matrix whose ROWS are the three direction vectors (the layout
-// SliceXfm.h / applySliceTransform() use: row 0 = read, 1 = phase, 2 = normal).
-inline Mat3 rot_from_geometry(const Geometry& g) {
-    return {g.read_dir, g.phase_dir, g.slice_dir};
-}
-
-inline Geometry geometry_from_rot(const Mat3& rows, const Vec3& position) {
-    Geometry g;
-    g.position = position;
-    g.read_dir = rows[0];
-    g.phase_dir = rows[1];
-    g.slice_dir = rows[2];
-    return g;
-}
-
-// Gram-Schmidt on the rows: keeps read, makes phase orthogonal to read,
-// derives the normal as read x phase (right-handed). Cleans up float
-// rounding from image headers before Euler decomposition.
-inline Mat3 orthonormalize_rows(const Mat3& m) {
-    Vec3 r0 = normalized(m[0]);
-    Vec3 r1 = add(m[1], scale(r0, -dot(m[1], r0)));
-    r1 = normalized(r1);
-    Vec3 r2 = cross(r0, r1);
-    return {r0, r1, r2};
-}
-
-// Is the (read, phase, slice) frame right-handed? read x phase must point
-// along slice. Left-handed frames cannot be produced by any Euler triple.
-inline bool is_right_handed(const Geometry& g, double tol = 1e-3) {
-    return dot(cross(g.read_dir, g.phase_dir), g.slice_dir) > 1.0 - tol;
-}
-
-// ---- Euler <-> matrix, in the agent's convention ---------------------------
-
-// Verbatim port of slice_agent.cpp buildRotMatrix(): R = Rz * Ry * Rx, angles
-// in radians.
-inline Mat3 rot_from_euler_zyx(double rx, double ry, double rz) {
+// Verbatim port of slice_agent.cpp / slice_control.cpp buildRotMatrix():
+// R = Rz * Ry * Rx, angles in radians.
+inline Mat3 build_rot_matrix(double rx, double ry, double rz) {
     const double cx = std::cos(rx), sx = std::sin(rx);
     const double cy = std::cos(ry), sy = std::sin(ry);
     const double cz = std::cos(rz), sz = std::sin(rz);
@@ -143,12 +86,13 @@ inline Mat3 rot_from_euler_zyx(double rx, double ry, double rz) {
     return mul(Rz, mul(Ry, Rx));
 }
 
-// Inverse of rot_from_euler_zyx. For R = Rz*Ry*Rx:
+// Inverse of build_rot_matrix (used only by slice_target, which arrives as
+// direction vectors). For R = Rz*Ry*Rx:
 //   R[2][0] = -sin(ry)
 //   R[2][1] = cos(ry) sin(rx),  R[2][2] = cos(ry) cos(rx)
 //   R[1][0] = sin(rz) cos(ry),  R[0][0] = cos(rz) cos(ry)
 // Gimbal lock (|ry| = 90 deg): rx and rz are not separable; choose rx = 0.
-inline void euler_zyx_from_rot(const Mat3& R, double& rx, double& ry, double& rz) {
+inline void euler_from_rot_matrix(const Mat3& R, double& rx, double& ry, double& rz) {
     double s = -R[2][0];
     if (s > 1.0) s = 1.0;
     if (s < -1.0) s = -1.0;
@@ -162,45 +106,83 @@ inline void euler_zyx_from_rot(const Mat3& R, double& rx, double& ry, double& rz
     }
 }
 
-// ---- relative moves in the slice frame -------------------------------------
+// ---- the six numbers ---------------------------------------------------------
 
-// Rotate vector v about unit axis k by angle theta (Rodrigues).
-inline Vec3 rotate_about(const Vec3& v, const Vec3& k, double theta) {
-    const double c = std::cos(theta), s = std::sin(theta);
-    const Vec3 kxv = cross(k, v);
-    const double kdv = dot(k, v);
-    return {v[0]*c + kxv[0]*s + k[0]*kdv*(1 - c),
-            v[1]*c + kxv[1]*s + k[1]*kdv*(1 - c),
-            v[2]*c + kxv[2]*s + k[2]*kdv*(1 - c)};
+// slice_control.cpp:421-422 — all zero at start ("identity"), i.e. exactly
+// what slice_agent publishes on connect.
+struct SliceState {
+    Vec3 t{0, 0, 0};       // tx ty tz, mm
+    Vec3 r_deg{0, 0, 0};   // rx ry rz, degrees
+};
+
+inline Mat3 rot_of(const SliceState& s) {
+    return build_rot_matrix(s.r_deg[0] * kDeg2Rad, s.r_deg[1] * kDeg2Rad, s.r_deg[2] * kDeg2Rad);
 }
 
-// Apply a relative move expressed in the slice's own frame:
-//   translation_mm = [along read, along phase, along slice normal]
-//   rotation_rad   = [about read, about phase, about slice normal]
-// Rotations are applied in that order, each about the axis as it stands
-// after the previous rotation. This matches what the UI buttons mean:
-// "+1" = one mm through-plane, "tilt X" = tilt about the readout axis.
-inline Geometry apply_delta(const Geometry& base,
-                            const Vec3& translation_mm,
-                            const Vec3& rotation_rad) {
-    Geometry g = base;
+// One relative move, slice_control.cpp:472-490 verbatim:
+//   translation_mm[k] steps along row k of the CURRENT rotation matrix
+//   (k = 0 readout, 1 phase, 2 slice normal — arrows / PgUp / PgDn),
+//   rotation_deg[k] is added to the k-th Euler angle (W/S, A/D, Q/E).
+// A key press in his tool is one or the other; when both are given here,
+// translation is applied first (with the pre-rotation matrix), then the
+// angles — the same as pressing the translation key and then the rotation key.
+inline void apply_step(SliceState& s, const Vec3& translation_mm, const Vec3& rotation_deg) {
+    const Mat3 R = rot_of(s);
+    for (int k = 0; k < 3; ++k) {
+        if (translation_mm[k] == 0.0) continue;
+        for (int i = 0; i < 3; ++i) s.t[i] += translation_mm[k] * R[k][i];
+    }
+    for (int k = 0; k < 3; ++k) s.r_deg[k] += rotation_deg[k];
+}
 
-    g.position = add(g.position, scale(g.read_dir,  translation_mm[0]));
-    g.position = add(g.position, scale(g.phase_dir, translation_mm[1]));
-    g.position = add(g.position, scale(g.slice_dir, translation_mm[2]));
+// ---- absolute geometry (slice_target only) ---------------------------------
 
-    auto rotate_frame = [&](const Vec3& axis, double theta) {
-        if (theta == 0.0) return;
-        g.read_dir  = rotate_about(g.read_dir,  axis, theta);
-        g.phase_dir = rotate_about(g.phase_dir, axis, theta);
-        g.slice_dir = rotate_about(g.slice_dir, axis, theta);
-    };
-    rotate_frame(g.read_dir,  rotation_rad[0]);
-    rotate_frame(g.phase_dir, rotation_rad[1]);
-    rotate_frame(g.slice_dir, rotation_rad[2]);
+// Absolute slice geometry as direction vectors (ISMRMRD image-header style).
+struct Geometry {
+    Vec3 position{0, 0, 0};
+    Vec3 read_dir{1, 0, 0};
+    Vec3 phase_dir{0, 1, 0};
+    Vec3 slice_dir{0, 0, 1};
+};
 
-    const Mat3 clean = orthonormalize_rows(rot_from_geometry(g));
-    return geometry_from_rot(clean, g.position);
+// Gram-Schmidt on (read, phase, read x phase): cleans float rounding.
+inline Mat3 orthonormalize_rows(const Mat3& m) {
+    Vec3 r0 = normalized(m[0]);
+    Vec3 r1 = add(m[1], scale(r0, -dot(m[1], r0)));
+    r1 = normalized(r1);
+    Vec3 r2 = cross(r0, r1);
+    return {r0, r1, r2};
+}
+
+// read x phase must point along slice; a left-handed frame has no
+// rotation-matrix (hence no Euler) representation.
+inline bool is_right_handed(const Geometry& g, double tol = 1e-3) {
+    return dot(cross(g.read_dir, g.phase_dir), g.slice_dir) > 1.0 - tol;
+}
+
+// Direction vectors -> the six numbers. The vectors are taken as the rows of
+// buildRotMatrix (row 0 = read, 1 = phase, 2 = normal), which is how
+// slice_control's own translation keys read that matrix; the angles are the
+// Euler triple that rebuilds those rows. Caller checks is_right_handed first.
+inline SliceState state_from_geometry(const Geometry& g) {
+    const Mat3 rows = orthonormalize_rows({g.read_dir, g.phase_dir, g.slice_dir});
+    double rx, ry, rz;
+    euler_from_rot_matrix(rows, rx, ry, rz);
+    SliceState s;
+    s.t = g.position;
+    s.r_deg = {rx * kRad2Deg, ry * kRad2Deg, rz * kRad2Deg};
+    return s;
+}
+
+// The six numbers -> direction vectors (rows of buildRotMatrix), for display.
+inline Geometry geometry_from_state(const SliceState& s) {
+    const Mat3 R = rot_of(s);
+    Geometry g;
+    g.position = s.t;
+    g.read_dir = R[0];
+    g.phase_dir = R[1];
+    g.slice_dir = R[2];
+    return g;
 }
 
 // ---- wire command ------------------------------------------------------------
@@ -217,6 +199,18 @@ static_assert(sizeof(WireCommand) == 56, "SliceCommand must be 56 bytes");
 constexpr uint32_t kFlagUpdate = 0;
 constexpr uint32_t kFlagQuit   = 0xDEAD;
 constexpr size_t   kWireBytes  = 56;
+
+inline WireCommand command_from_state(const SliceState& s) {
+    WireCommand c;
+    c.tx = s.t[0] + 0.0;   // "+ 0.0" folds -0.0 into 0.0 for tidy JSON/logs
+    c.ty = s.t[1] + 0.0;
+    c.tz = s.t[2] + 0.0;
+    c.rx = s.r_deg[0] + 0.0;
+    c.ry = s.r_deg[1] + 0.0;
+    c.rz = s.r_deg[2] + 0.0;
+    c.flags = kFlagUpdate;
+    return c;
+}
 
 // Serialize little-endian regardless of host order.
 inline void write_le64(uint8_t* p, uint64_t v) {
@@ -258,52 +252,6 @@ inline WireCommand from_wire(const uint8_t* p) {
     }
     c.flags = read_le32(p + 48);
     c.pad = read_le32(p + 52);
-    return c;
-}
-
-// Axis-mapping switches settled by the one-time scanner check (the mapping
-// between ISMRMRD header directions and the sequence's sROT_MATRIX rows is
-// not provable from available source). Defaults = pass-through.
-struct AxisOptions {
-    bool transpose{false};        // send R^T instead of R
-    bool swap_read_phase{false};  // exchange read_dir and phase_dir
-    Vec3 axis_sign{1, 1, 1};      // per-PCS-axis sign applied to position and dirs
-};
-
-inline Geometry apply_axis_options(const Geometry& in, const AxisOptions& o) {
-    Geometry g = in;
-    if (o.swap_read_phase) {
-        std::swap(g.read_dir, g.phase_dir);
-        // keep right-handed: normal = read x phase
-        g.slice_dir = cross(g.read_dir, g.phase_dir);
-    }
-    for (int i = 0; i < 3; ++i) {
-        g.position[i]  *= o.axis_sign[i];
-        g.read_dir[i]  *= o.axis_sign[i];
-        g.phase_dir[i] *= o.axis_sign[i];
-        g.slice_dir[i] *= o.axis_sign[i];
-    }
-    return g;
-}
-
-// Absolute geometry -> agent wire command. Caller must have checked the
-// frame is right-handed (is_right_handed) — a left-handed frame has no
-// Euler representation and would silently come out mirrored.
-inline WireCommand command_from_geometry(const Geometry& geom,
-                                         const AxisOptions& opts = {}) {
-    const Geometry g = apply_axis_options(geom, opts);
-    Mat3 R = orthonormalize_rows(rot_from_geometry(g));
-    if (opts.transpose) R = transpose(R);
-    double rx, ry, rz;
-    euler_zyx_from_rot(R, rx, ry, rz);
-    WireCommand c;
-    c.tx = g.position[0] + 0.0;   // "+ 0.0" folds -0.0 into 0.0
-    c.ty = g.position[1] + 0.0;
-    c.tz = g.position[2] + 0.0;
-    c.rx = rx * kRad2Deg + 0.0;
-    c.ry = ry * kRad2Deg + 0.0;
-    c.rz = rz * kRad2Deg + 0.0;
-    c.flags = kFlagUpdate;
     return c;
 }
 
