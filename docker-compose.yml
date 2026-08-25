@@ -9,6 +9,12 @@
 # default recon:9002), SESSION_DATA_DIR (data path). Marshal routes automatically:
 # k-space -> recon; scanner-sent images -> straight to webgl.
 #
+# Slice control (unset = off): SLICE_AGENT_HOST=<MARS ip running `slice_agent --listen`>
+# turns on the UI -> marshal -> slice_agent command channel; SLICE_AGENT_PORT (9270);
+# SLICE_AGENT_EXTRA for axis switches settled on the scanner, e.g.
+# "--slice-transpose" or "--slice-axis-sign +,-,+" (see docs/SLICE_CONTROL_HANDOFF.md).
+#   SLICE_AGENT_HOST=192.168.2.2 docker compose up -d
+#
 # Scanner is NOT a service — drive it against mri-marshal:9100 (real scanner,
 # or python-ismrmrd-server client.py):
 #   docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" \
@@ -28,8 +34,11 @@ services:
     image: cwru/mri-marshal:latest
     container_name: cwru-mri-marshal
     logging: *default-logging
-    # sh -c so MARSHAL_DUMP / MARSHAL_LATEST / RECON_HOST / RECON_PORT are resolved at runtime.
-    command: ["sh", "-c", "exec /opt/mri/build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data $$MARSHAL_LATEST --recon-host $$RECON_HOST --recon-port $$RECON_PORT $$MARSHAL_DUMP"]
+    # sh -c so MARSHAL_DUMP / MARSHAL_LATEST / RECON_HOST / RECON_PORT / SLICE_AGENT_*
+    # are resolved at runtime. The slice-agent flags are emitted ONLY when
+    # SLICE_AGENT_HOST is non-empty (shell ${VAR:+...}) so an unset/empty host
+    # cannot swallow the next flag.
+    command: ["sh", "-c", "exec /opt/mri/build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data $$MARSHAL_LATEST --recon-host $$RECON_HOST --recon-port $$RECON_PORT $$MARSHAL_DUMP $${SLICE_AGENT_HOST:+--slice-agent-host $$SLICE_AGENT_HOST --slice-agent-port $$SLICE_AGENT_PORT $$SLICE_AGENT_EXTRA}"]
     environment:
       - MARSHAL_DUMP=${MARSHAL_DUMP:-}
       # RAM snapshot on by default; MARSHAL_LATEST= (empty) puts the
@@ -38,6 +47,11 @@ services:
       - MARSHAL_LATEST=${MARSHAL_LATEST:---latest-dir /latest}
       - RECON_HOST=${RECON_HOST:-recon}
       - RECON_PORT=${RECON_PORT:-9002}
+      # Slice command channel to the scanner-side `slice_agent --listen`.
+      # Empty host = channel off (slice endpoints answer enabled:false).
+      - SLICE_AGENT_HOST=${SLICE_AGENT_HOST:-}
+      - SLICE_AGENT_PORT=${SLICE_AGENT_PORT:-9270}
+      - SLICE_AGENT_EXTRA=${SLICE_AGENT_EXTRA:-}
     volumes:
       - ${SESSION_DATA_DIR:-./session-data}:/session-data
       # RAM-backed snapshot dir (latest_image.h5 / latest_error.png). Shared

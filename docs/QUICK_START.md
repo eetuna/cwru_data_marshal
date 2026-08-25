@@ -242,37 +242,26 @@ docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:l
   --mode kspace --fps 5 --frames 1 --matrix 96 --slices 5
 ```
 
-**5f. Slice-command check** — verifies the UI→marshal→scanner control channel
-with a mock scanner (no real scanner needed). Two terminals:
+**5f. Slice-command check** — verifies the UI→marshal→`slice_agent` control
+channel with a mock agent (no scanner needed). The channel is off unless the
+marshal is started with `SLICE_AGENT_HOST`:
 
-Terminal 1 — a mock scanner connects and waits for a command:
 ```bash
-docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
-  python3 /scripts/slice_command_mock_scanner.py mri-marshal 9100
-```
-> You'll see: `IMAGE_SENT slice=2 position=(10.5,-20.0,30.0)`, then it waits.
-
-Terminal 2 — read the slice geometry, then send an absolute prescription:
-```bash
-curl -s localhost:8080/read/slice_geometry
+docker run -d --rm --name slice-agent-mock --network cwru-demo-net \
+  -v "$PWD/scripts:/scripts" fire-python:latest python3 /scripts/slice_agent_mock.py
+SLICE_AGENT_HOST=slice-agent-mock docker compose up -d --force-recreate mri-marshal
 curl -s -X POST localhost:8080/write/slice_target \
   -d '{"position":[12.5,-3,40],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,1]}'
+docker logs slice-agent-mock
 ```
-> You'll see: the geometry the mock sent (slice 2 at [10.5, −20, 30]); then
-> `{"delivered":true,...}` — and Terminal 1 prints
-> `TEXT_RECEIVED:{"type":"slice_target","position":[12.5,-3.0,40.0],...}` and
-> exits. That line is the proof: the command went UI-side HTTP → marshal →
-> scanner connection. Without Terminal 1 running, the same POST returns
-> `"delivered":false` — command cached, no scanner to receive it.
-
-The relative command works the same way (rerun Terminal 1 first):
-```bash
-curl -s -X POST localhost:8080/write/slice_delta \
-  -d '{"translation_mm":[1.5,0,-2],"rotation_rad":[0,0.1,0]}'
-```
-> You'll see: `{"delivered":true,...}` and Terminal 1 prints
-> `TEXT_RECEIVED:{"type":"slice_delta",...}` — or `"delivered":false`
-> without Terminal 1.
+> You'll see: `{"delivered":true,"agent_connected":true,...}` and the mock
+> prints `CMD {"tx": 12.5, "ty": -3.0, "tz": 40.0, ...}` — the 56-byte packet
+> Andrew's real `slice_agent` would receive. Then
+> `curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}'`
+> → the mock prints `"tz": 41.0` (one mm along the slice normal). Without a
+> reachable agent the POST returns `"delivered":false` (geometry recorded,
+> re-sent when the agent appears); with `SLICE_AGENT_HOST` unset it returns
+> `"enabled":false`. On the real scanner, `SLICE_AGENT_HOST=<MARS ip>`.
 
 Knobs for 5b–5d: `--fps N` (pace) · `--frames N` (how many; 0 = until Ctrl-C)
 · `--matrix N` (image size) · `--slices N` (multislice) ·

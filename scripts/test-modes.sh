@@ -75,28 +75,57 @@ echo "== restore LIVE mode =="
 docker compose --profile test-recon up -d --force-recreate mri-marshal >/dev/null 2>&1
 for i in $(seq 1 30); do [ "$(mexec curl -s -o /dev/null -w '%{http_code}' localhost:8080/health 2>/dev/null)" = "200" ] && break; sleep 2; done
 
-echo "[5] SLICE COMMANDS (marshal -> scanner TEXT pushback)"
+echo "[5] SLICE COMMANDS (marshal -> scanner-side slice_agent, channel OFF)"
 TGT='{"position":[12.5,-3,40],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,1]}'
 BAD='{"position":[0,0,0],"read_dir":[1,0,0],"phase_dir":[1,0,0],"slice_dir":[0,0,1]}'
-deliv(){ mexec curl -s -X POST localhost:8080/write/slice_target -d "$1" | grep -o '"delivered":[a-z]*'; }
-# no scanner connected yet: cached but not delivered
-chk "slice_target no scanner" "$(deliv "$TGT")" '"delivered":false'
-# invalid prescription is rejected before reaching any scanner
-badcode=$(mexec curl -s -o /dev/null -w "%{http_code}" -X POST localhost:8080/write/slice_target -d "$BAD")
-chk "slice_target bad frame = 400" "$badcode" "400"
-# mock scanner connects (sends image w/ known geometry), then must receive the
-# TEXT. Its output lands in $DATA which may only be host-reachable — read it
-# back through a container mount (same reason exists() does).
-docker run --rm --network $NET -v "$SCRIPTS:/scripts" -v "$DATA:/data" $FP sh -c \
-  "python3 /scripts/slice_command_mock_scanner.py mri-marshal 9100 > /data/mock_scanner_out.txt 2>&1" &
-MOCK_PID=$!
-sleep 6
-chk "slice geometry from mock image" \
-  "$(mexec curl -s localhost:8080/read/slice_geometry | grep -o '"latest_slice":[0-9-]*')" '"latest_slice":2'
-chk "slice_target delivered" "$(deliv "$TGT")" '"delivered":true'
-wait $MOCK_PID 2>/dev/null
-chk "mock scanner received TEXT" \
-  "$(docker run --rm -v "$DATA:/d" $FP sh -c "grep -q 'TEXT_RECEIVED:.*slice_target' /d/mock_scanner_out.txt && echo yes || echo no; rm -f /d/mock_scanner_out.txt")" "yes"
+LEFT='{"position":[0,0,0],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,-1]}'
+field(){ grep -o "\"$1\":[a-z0-9.-]*"; }
+# channel off (no SLICE_AGENT_HOST): accepted + cached, enabled:false, not delivered
+chk "slice_target channel off: enabled=false" \
+  "$(mexec curl -s -X POST localhost:8080/write/slice_target -d "$TGT" | field enabled)" '"enabled":false'
+# invalid prescriptions are rejected before reaching any agent
+chk "slice_target bad frame = 400" \
+  "$(mexec curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/write/slice_target -d "$BAD")" "400"
+chk "slice_target left-handed = 400" \
+  "$(mexec curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/write/slice_target -d "$LEFT")" "400"
+
+echo "[6] SLICE COMMANDS (channel ON -> mock slice_agent)"
+# Mock agent on the compose network; the marshal is recreated pointing at it.
+# The script is passed inline (python3 -c) rather than bind-mounted so this
+# also works from a devcontainer whose $PWD the docker host cannot see.
+docker rm -f slice-agent-mock >/dev/null 2>&1
+docker run -d --rm --name slice-agent-mock --network $NET $FP \
+  python3 -c "$(cat scripts/slice_agent_mock.py)" --port 9270 --timeout 120 >/dev/null
+SLICE_AGENT_HOST=slice-agent-mock docker compose --profile test-recon up -d --force-recreate mri-marshal >/dev/null 2>&1
+for i in $(seq 1 30); do [ "$(mexec curl -s -o /dev/null -w '%{http_code}' localhost:8080/health 2>/dev/null)" = "200" ] && break; sleep 2; done
+chk "status: slice_agent enabled" \
+  "$(mexec curl -s localhost:8080/status | grep -o '"slice_agent":{[^}]*}' | field enabled)" '"enabled":true'
+# lazy connect: nothing reaches the agent until the first command
+chk "no connection before first command" "$(docker logs slice-agent-mock 2>&1 | grep -c CONNECTED)" "0"
+# relative move before any base geometry -> 409
+chk "slice_delta without base = 409" \
+  "$(mexec curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/write/slice_delta -d '{"translation_mm":[0,0,1]}')" "409"
+# absolute target: delivered, agent receives the 56-byte command with tz=40
+chk "slice_target delivered" \
+  "$(mexec curl -s -X POST localhost:8080/write/slice_target -d "$TGT" | field delivered)" '"delivered":true'
+sleep 1
+chk "agent got tz=40" "$(docker logs slice-agent-mock 2>&1 | grep -q '"tz": 40.0' && echo yes || echo no)" "yes"
+# +1 through-plane on that axial slice -> tz 41
+mexec curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}' >/dev/null
+sleep 0.5
+chk "nudge +1 -> agent got tz=41" "$(docker logs slice-agent-mock 2>&1 | grep -q '"tz": 41.0' && echo yes || echo no)" "yes"
+# in-plane rotation: rz on the wire (rows convention -> -30)
+mexec curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,0.5235988]}' >/dev/null
+sleep 0.5
+chk "rotate 30deg about normal -> rz=-30" "$(docker logs slice-agent-mock 2>&1 | grep -q '"rz": -30.0' && echo yes || echo no)" "yes"
+chk "commanded geometry readable" \
+  "$(mexec curl -s -o /dev/null -w '%{http_code}' localhost:8080/read/slice_commanded)" "200"
+# graceful shutdown sends 0xDEAD (57005)
+docker compose --profile test-recon up -d --force-recreate mri-marshal >/dev/null 2>&1
+sleep 2
+chk "marshal restart sent QUIT to agent" "$(docker logs slice-agent-mock 2>&1 | grep -q '"flags": 57005' && echo yes || echo no)" "yes"
+docker rm -f slice-agent-mock >/dev/null 2>&1
+for i in $(seq 1 30); do [ "$(mexec curl -s -o /dev/null -w '%{http_code}' localhost:8080/health 2>/dev/null)" = "200" ] && break; sleep 2; done
 
 echo ""
 echo "== RESULT: $pass passed, $fail failed =="

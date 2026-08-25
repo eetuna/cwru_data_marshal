@@ -161,47 +161,65 @@ ls session-data/dump/from_reconstruction/ | wc -l
 curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/image/latest   # 404
 ```
 
-## Slice command channel (nudge + slice_target)
+## Slice command channel (marshal → slice_agent)
 
-The marshal relays UI slice commands to the scanner over the scan's MRD TCP
-connection as TEXT messages (`{"type":"slice_translation"|"slice_target",...}`;
-full formats in [API_REFERENCE.md](API_REFERENCE.md)). Test the whole loop with
-the mock scanner — it connects like a real python-ismrmrd-server scanner, sends
-one image with known geometry, and prints any command it receives:
+UI slice commands go to the scanner-side `slice_agent --listen` (TCP 9270,
+56-byte packets; formats in [API_REFERENCE.md](API_REFERENCE.md), design in
+[SLICE_CONTROL_HANDOFF.md](SLICE_CONTROL_HANDOFF.md)). Two ways to test it
+without a scanner.
 
+**A. Mock agent in the compose stack** (what `./scripts/test-modes.sh` does as
+tests [5]/[6]):
 ```bash
-# Terminal 1 — mock scanner (occupies the scanner slot; exits after one command)
-docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
-  python3 /scripts/slice_command_mock_scanner.py mri-marshal 9100
-#   IMAGE_SENT slice=2 position=(10.5,-20.0,30.0)  ... waits ...
+docker run -d --rm --name slice-agent-mock --network cwru-demo-net \
+  -v "$PWD/scripts:/scripts" fire-python:latest \
+  python3 /scripts/slice_agent_mock.py --port 9270
+SLICE_AGENT_HOST=slice-agent-mock docker compose up -d --force-recreate mri-marshal
 
-# Terminal 2 — while Terminal 1 is connected:
-curl -s localhost:8080/read/slice_geometry
-#   {"latest_slice":2,"slices":{"2":{"position":[10.5,-20.0,30.0],...}}}
-curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}'
-#   {"delivered":true,...}  -> Terminal 1 prints TEXT_RECEIVED:{"type":"slice_translation",
-#   "direction":1.0,"slice_geometry":{...the geometry above...},...} and exits
-```
-
-Repeat with the absolute prescription (rerun Terminal 1 first):
-```bash
 curl -s -X POST localhost:8080/write/slice_target \
   -d '{"position":[12.5,-3,40],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,1]}'
-#   {"delivered":true,...} -> Terminal 1: TEXT_RECEIVED:{"type":"slice_target",...}
+#   {"delivered":true,"agent_connected":true,"enabled":true,"command":{"tz":40.0,...},...}
+docker logs slice-agent-mock
+#   CONNECTED {...}   CMD {"frame": 0, "tx": 12.5, "ty": -3.0, "tz": 40.0, "rx": 0.0, ...}
+curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}'
+#   -> mock prints CMD {... "tz": 41.0 ...}   (+1 mm along the slice normal)
+curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,0.5235988]}'
+#   -> mock prints CMD {... "rz": -30.0 ...}  (rows convention; --slice-transpose gives +30)
+curl -s localhost:8080/read/slice_commanded     # the absolute geometry last sent
 ```
 
-No-scanner and rejection checks (no mock needed):
+**B. Andrew's real agent on this machine** (proves the shared-memory side):
 ```bash
-curl -s -X POST localhost:8080/write/slice_target \
-  -d '{"position":[0,0,0],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,1]}'
-#   {"delivered":false,...}          (no scanner connected; cached)
-curl -s localhost:8080/read/slice_target        # echoes the cached prescription
+cmake -S dynamic-slice-position-main/agent -B /tmp/agent-build && cmake --build /tmp/agent-build
+/tmp/agent-build/slice_agent --listen &                       # port 9270
+./build/marshal --http 127.0.0.1:18080 --mrd-port 19100 --slice-agent-host 127.0.0.1
+curl -s -X POST localhost:18080/write/slice_target -d '{"position":[12.5,-3,40],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,1]}'
+/tmp/agent-build/shm_peek       # trans=[12.5,-3,40], rot=identity, frameIndex climbing
+```
+Verified 2026-08-25: `+1` moved `trans[2]` 40→41; a 10° tilt about the read
+axis left row 0 unchanged and rotated rows 1/2; killing and restarting
+`slice_agent` produced an automatic reconnect + re-send; SIGTERM on the marshal
+produced "Client quit" on the agent.
+
+Rejection / off-channel checks (no agent needed):
+```bash
+curl -s -X POST localhost:8080/write/slice_delta -d '{"translation_mm":[0,0,1]}'
+#   409 {"error":"no base geometry..."}          (no image yet, no slice_target yet)
 curl -s -X POST localhost:8080/write/slice_target \
   -d '{"position":[0,0,0],"read_dir":[1,0,0],"phase_dir":[1,0,0],"slice_dir":[0,0,1]}'
 #   400 {"error":"read_dir and phase_dir must be orthogonal"} — never sent
+curl -s -X POST localhost:8080/write/slice_target \
+  -d '{"position":[0,0,0],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,-1]}'
+#   400 left-handed geometry
 ```
 
-`./scripts/test-modes.sh` runs these checks automatically as test [5].
+**On the scanner, once** (settles the axis mapping — closed-source Siemens code
+sits between the image-header directions and the sequence's rotation rows):
+send back the geometry you read from `GET /read/slice_geometry` as a
+`slice_target`; the image must not move. If it rotates 90° in-plane use
+`--slice-swap-read-phase`; if it mirrors use `--slice-axis-sign`; if a rotation
+delta tilts the wrong way use `--slice-transpose` (all via `SLICE_AGENT_EXTRA`).
+Then `+1` must move the slice 1 mm along its normal.
 
 ## Record & replay
 

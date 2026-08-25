@@ -1,5 +1,12 @@
 # Plan: make the marshal reroute slice-translation AND know slice geometry
 
+> **Superseded 2026-08-25.** The MRD TEXT delivery below (Piece 2, Option B) never
+> had a scanner-side receiver; Andrew's actual interface is a shared-memory agent
+> (`slice_agent --listen`, TCP 9270). The marshal now sends 56-byte `SliceCommand`
+> packets to it instead — see [SLICE_CONTROL_HANDOFF.md](SLICE_CONTROL_HANDOFF.md).
+> Piece 1 (geometry extraction, `GET /read/slice_geometry`) is unchanged and still
+> in use. Kept for history.
+
 > **Status: IMPLEMENTED 2026-07-07** on marshal branch `feat/slice-command-pushback`
 > (Option B, as recommended below). Piece 1 (geometry extraction from image headers →
 > `SliceGeometry` map + `GET /read/slice_geometry`) and Piece 2 (delivery: the command
