@@ -176,17 +176,18 @@ docker run -d --rm --name slice-agent-mock --network cwru-demo-net \
   python3 /scripts/slice_agent_mock.py --port 9270
 SLICE_AGENT_HOST=slice-agent-mock docker compose up -d --force-recreate mri-marshal
 
+curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}'
+#   {"delivered":true,"agent_connected":true,"enabled":true,"state":{"tz":1.0,...},...}
+docker logs slice-agent-mock
+#   CONNECTED {...}   CMD {"frame": 0, "tx": 0.0, "ty": 0.0, "tz": 1.0, "rx": 0.0, ...}   (= PgUp from zero)
+curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0.1745,0,0]}'
+#   -> mock prints CMD {... "rx": 10.0 ...}   (= W key: +10 added to rx)
 curl -s -X POST localhost:8080/write/slice_target \
   -d '{"position":[12.5,-3,40],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,1]}'
-#   {"delivered":true,"agent_connected":true,"enabled":true,"command":{"tz":40.0,...},...}
-docker logs slice-agent-mock
-#   CONNECTED {...}   CMD {"frame": 0, "tx": 12.5, "ty": -3.0, "tz": 40.0, "rx": 0.0, ...}
-curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}'
-#   -> mock prints CMD {... "tz": 41.0 ...}   (+1 mm along the slice normal)
-curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,0.5]}'
-#   -> mock prints CMD {... "rz": -28.65 ...}  (rows convention; --slice-transpose gives +28.65;
-#      values above the 30 deg / 50 mm per-command clamps are rejected with 400)
-curl -s localhost:8080/read/slice_commanded     # the absolute geometry last sent
+#   -> mock prints CMD {... "tz": 40.0, "rx": 0.0 ...}  (six numbers replaced)
+curl -s -X POST localhost:8080/write/slice_reset
+#   -> mock prints all zeros (= the '0' key)
+curl -s localhost:8080/read/slice_commanded     # the six numbers last sent + implied axes
 ```
 
 **B. Andrew's real agent on this machine** (proves the shared-memory side):
@@ -204,8 +205,8 @@ produced "Client quit" on the agent.
 
 Rejection / off-channel checks (no agent needed):
 ```bash
-curl -s -X POST localhost:8080/write/slice_delta -d '{"translation_mm":[0,0,1]}'
-#   409 {"error":"no base geometry..."}          (no image yet, no slice_target yet)
+curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,1.0]}'
+#   400 rotation[2] exceeds max step 30 deg            — never sent
 curl -s -X POST localhost:8080/write/slice_target \
   -d '{"position":[0,0,0],"read_dir":[1,0,0],"phase_dir":[1,0,0],"slice_dir":[0,0,1]}'
 #   400 {"error":"read_dir and phase_dir must be orthogonal"} — never sent
@@ -214,13 +215,10 @@ curl -s -X POST localhost:8080/write/slice_target \
 #   400 left-handed geometry
 ```
 
-**On the scanner, once** (settles the axis mapping — closed-source Siemens code
-sits between the image-header directions and the sequence's rotation rows):
-send back the geometry you read from `GET /read/slice_geometry` as a
-`slice_target`; the image must not move. If it rotates 90° in-plane use
-`--slice-swap-read-phase`; if it mirrors use `--slice-axis-sign`; if a rotation
-delta tilts the wrong way use `--slice-transpose` (all via `SLICE_AGENT_EXTRA`).
-Then `+1` must move the slice 1 mm along its normal.
+On the scanner nothing special is needed beyond what Andrew already does with
+his keyboard tool: `slice_agent --listen` on the MARS, sequence toggle on. The
+`±` buttons and sliders send the same bytes his PgUp/PgDn and W/S/A/D/Q/E keys
+send (unit-tested against a verbatim port of `slice_control.cpp`).
 
 ## Record & replay
 

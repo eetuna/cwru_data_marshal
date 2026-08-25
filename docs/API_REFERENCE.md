@@ -184,18 +184,15 @@ Write a new slice transform delta:
 
 #### Slice command channel (overview)
 
-Three endpoints let the UI move the imaging slice. Each is converted by the marshal into an **absolute slice geometry** (center in mm, scanner PCS, plus unit read / phase / slice-normal directions) and sent to the scanner-side `slice_agent --listen` (Andrew's `dynamic-slice-position-main/agent`) as a 56-byte `SliceCommand` on TCP port 9270 — three Euler angles in degrees (`R = Rz·Ry·Rx`, rows = read/phase/normal) plus the center. The channel is **off unless** `--slice-agent-host` is set (`SLICE_AGENT_HOST` in compose). See [SLICE_CONTROL_HANDOFF.md](SLICE_CONTROL_HANDOFF.md).
+The marshal is a stand-in for Andrew's `slice_control` keyboard tool. It keeps six absolute numbers — `tx ty tz` (mm) and `rx ry rz` (degrees), zero at start and at every scan start — adds UI moves to them exactly as his keys do, and sends the six totals to the scanner-side `slice_agent --listen` (`dynamic-slice-position-main/agent`) as a 56-byte `SliceCommand` on TCP 9270. The agent rebuilds the rotation with its `buildRotMatrix` (`R = Rz·Ry·Rx`) and publishes to shared memory for the sequence. The channel is **off unless** `--slice-agent-host` is set (`SLICE_AGENT_HOST` in compose). See [SLICE_CONTROL_HANDOFF.md](SLICE_CONTROL_HANDOFF.md).
 
 Common response fields:
 ```json
 {"file": "...", "delivered": true, "agent_connected": true, "enabled": true,
- "base": "commanded" | "image_header",            // relative moves only
- "geometry": {"position": [...], "read_dir": [...], "phase_dir": [...], "slice_dir": [...]},
- "command": {"tx": 12.5, "ty": -3.0, "tz": 40.0, "rx_deg": 0.0, "ry_deg": 0.0, "rz_deg": 0.0}}
+ "state": {"tx": 0.0, "ty": 0.0, "tz": 1.0, "rx_deg": 10.0, "ry_deg": 0.0, "rz_deg": 0.0},
+ "geometry": {"position": [...], "read_dir": [...], "phase_dir": [...], "slice_dir": [...]}}
 ```
-`delivered` = the packet was written to a connected agent (the first command of a session waits up to 1.5 s for the lazy connect). `false` with `enabled:true` = agent unreachable; the geometry is still recorded and re-sent when the agent appears. Every request is also cached and readable at the matching `GET /read/...` (`204` until the first POST).
-
-**Base of a relative move:** the last geometry the marshal sent (`"commanded"`), else the latest image header of this scan (`"image_header"`). Neither yet → `409` `{"error":"no base geometry..."}`. The base is deliberately *not* re-read from image headers after the first command: the cardiac sequence does not write the moved geometry back into headers. Both are cleared at scan start.
+`state` = the six numbers just sent; `geometry` = the axes they imply (rows of `buildRotMatrix`). `delivered` = the packet was written to a connected agent (the first command of a session waits for the lazy connect, bounded by the connect timeout). `false` with `enabled:true` = agent unreachable; the state is still advanced and re-sent when the agent appears. Every accepted request is also cached and readable at the matching `GET /read/...` (`204` until the first POST).
 
 #### POST /write/file_slice_translation
 
@@ -203,7 +200,7 @@ Legacy ±1 nudge from the WebGL `±` buttons. Body:
 ```json
 {"client_id": "webgl", "sent_at": 1706126625123456789, "values": [1]}
 ```
-`values` must be a single-element array whose value is exactly `+1` or `-1`; anything else returns `400`. Equivalent to `slice_delta` with `translation_mm = [0, 0, ±1]`: **one millimetre along the slice normal**. Returns the common fields plus `"direction"`. (`/write/file_slice_translation.json` is accepted as an alias.)
+`values` must be a single-element array whose value is exactly `+1` or `-1`; anything else returns `400`. Equals `slice_delta` with `translation_mm = [0, 0, ±nudge]` (`--slice-nudge-mm`, default 1): **Andrew's PgUp / PgDn**. Returns the common fields plus `"direction"`. (`/write/file_slice_translation.json` is accepted as an alias.)
 
 #### GET /read/file_slice_translation
 
@@ -216,7 +213,7 @@ Absolute slice prescription from the UI: "put the slice exactly here, facing thi
 {"position": [12.5, -3.0, 40.0],
  "read_dir": [1,0,0], "phase_dir": [0,1,0], "slice_dir": [0,0,1]}
 ```
-`position` = slice center in mm (scanner PCS, the same frame as MRD image headers); the three direction vectors are the slice plane's axes. Rejected with `400` and nothing sent when: a vector is not unit length or the three are not mutually orthogonal (tolerance 1e-3); the frame is left-handed (`read_dir × phase_dir` must equal `slice_dir` — a left-handed frame has no Euler representation); or any `position` component exceeds the absolute clamp (300 mm). Returns the common fields.
+`position` = slice center in mm (scanner PCS); the three direction vectors are taken as rows 0/1/2 of `buildRotMatrix` and converted to `rx ry rz`; the result replaces the six numbers and is sent. Rejected with `400` and nothing sent when: a vector is not unit length or the three are not mutually orthogonal (tolerance 1e-3); the frame is left-handed (`read_dir × phase_dir` must equal `slice_dir`); or any `position` component exceeds `--slice-max-abs-mm` (300). Returns the common fields. This is the one path Andrew's own tool never exercises (his keys never send a header-derived pose) — see SLICE_CONTROL_HANDOFF.md.
 
 #### GET /read/slice_target
 
@@ -228,22 +225,26 @@ Relative slice move — the command style for incremental UI buttons. Body (at l
 ```json
 {"translation_mm": [1.5, 0, -2.0], "rotation_rad": [0, 0.1, 0]}
 ```
-**Both vectors are in the slice's own frame:** `translation_mm = [along read_dir, along phase_dir, along slice_dir]`; `rotation_rad = [about read_dir, about phase_dir, about slice_dir]`, applied in that order, each about the axis as it stands after the previous rotation. This is the convention of the WebGL `±` button ("±1 mm along the slice axis") and of Andrew's `slice_control` tool. Per-command magnitude is clamped (`--slice-max-step-mm` 50, `--slice-max-step-deg` 30) → `400` above. Returns the common fields (`base` says what the move was applied to).
+Exactly `slice_control.cpp`'s key arithmetic: `translation_mm[k]` moves `(tx,ty,tz)` along **row k of `buildRotMatrix(rx,ry,rz)`** (0 = readout → arrows, 1 = phase → arrows, 2 = slice normal → PgUp/PgDn); `rotation_rad[k]` (converted to degrees) is **added to the k-th angle** (`rx` → W/S, `ry` → D/A, `rz` → E/Q). Translation is applied before the rotation in the same request. Per-command magnitude is clamped (`--slice-max-step-mm` 50, `--slice-max-step-deg` 30) and the accumulated `|tx|,|ty|,|tz|` against `--slice-max-abs-mm` (300) → `400`, nothing sent, request not cached. Returns the common fields.
 
 #### GET /read/slice_delta
 
-Returns the last cached delta request (non-consuming); `204 No Content` before the first POST.
+Returns the last accepted delta request (non-consuming); `204 No Content` before the first POST.
+
+#### POST /write/slice_reset
+
+Zero the six numbers and send them (Andrew's `0` key). Zero = the identity slice (axial through isocenter, where the agent puts the slice on connect), not the console prescription. Body ignored. Returns the common fields.
 
 #### GET /read/slice_commanded
 
-The last absolute geometry actually sent to the agent (the base of the next relative move), the wire angles it was converted to, a `count` of commands this scan, and agent status:
+The six numbers last sent to the agent, the axes they imply, a `count` of commands this scan, and agent status:
 ```json
-{"position": [12.5, -3.0, 41.0], "read_dir": [1,0,0], "phase_dir": [0,1,0], "slice_dir": [0,0,1],
+{"state": {"tx": 0.0, "ty": 0.0, "tz": 1.0, "rx_deg": 10.0, "ry_deg": 0.0, "rz_deg": 0.0},
+ "geometry": {"position": [0,0,1], "read_dir": [1,0,0], "phase_dir": [0,0.985,-0.174], "slice_dir": [0,0.174,0.985]},
  "ts": "2026-08-25T...", "count": 3,
- "command": {"tx": 12.5, "ty": -3.0, "tz": 41.0, "rx_deg": 0.0, "ry_deg": 0.0, "rz_deg": 0.0},
- "agent": {"enabled": true, "connected": true}}
+ "agent": {"enabled": true, "connected": true, "reconnects": 0}}
 ```
-`204 No Content` until the first command of the scan. `GET /status` also carries a `slice_agent` block (`enabled`, `connected`, `commands_sent`, `commanded_geometry`).
+`204 No Content` until the first command of the scan. `GET /status` also carries a `slice_agent` block (`enabled`, `connected`, `reconnects`, `commands_this_scan`, `has_state`).
 
 #### GET /read/slice_geometry
 
@@ -298,11 +299,10 @@ List archived reconstruction HDF5 files under `dump/from_reconstruction/` (same 
 | `--ws-port N` | (none) | Optional WebSocket listener port |
 | `--slice-agent-host host` | (none = channel off) | Scanner-side `slice_agent --listen` host (the MARS). Enables the slice command channel. Compose: `SLICE_AGENT_HOST`. |
 | `--slice-agent-port N` | `9270` | `slice_agent` port. Compose: `SLICE_AGENT_PORT`. |
-| `--slice-transpose` | off | Send the transposed rotation (settled by the one-time scanner check; see SLICE_CONTROL_HANDOFF.md). |
-| `--slice-swap-read-phase` | off | Exchange read/phase directions before sending (scanner check). |
-| `--slice-axis-sign a,b,c` | `+,+,+` | Per-PCS-axis sign applied to position and directions (scanner check). |
 | `--slice-max-step-mm N` | `50` | Per-command clamp on relative translation components. |
 | `--slice-max-step-deg N` | `30` | Per-command clamp on relative rotation components. |
+| `--slice-max-abs-mm N` | `300` | Clamp on the accumulated `|tx|,|ty|,|tz|` (any path). |
+| `--slice-nudge-mm N` | `1` | Millimetres per press of the legacy `±` endpoint. |
 | `--slice-resend-ms N` | `2000` | After every (re)connect, re-send the last command at 10 Hz for this long (the agent publishes an identity transform on connect; this overwrites it before the next frame). |
 
 ---

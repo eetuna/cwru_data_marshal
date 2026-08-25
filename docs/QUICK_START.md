@@ -250,18 +250,17 @@ marshal is started with `SLICE_AGENT_HOST`:
 docker run -d --rm --name slice-agent-mock --network cwru-demo-net \
   -v "$PWD/scripts:/scripts" fire-python:latest python3 /scripts/slice_agent_mock.py
 SLICE_AGENT_HOST=slice-agent-mock docker compose up -d --force-recreate mri-marshal
-curl -s -X POST localhost:8080/write/slice_target \
-  -d '{"position":[12.5,-3,40],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,1]}'
+curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}'
 docker logs slice-agent-mock
 ```
-> You'll see: `{"delivered":true,"agent_connected":true,...}` and the mock
-> prints `CMD {"tx": 12.5, "ty": -3.0, "tz": 40.0, ...}` — the 56-byte packet
-> Andrew's real `slice_agent` would receive. Then
-> `curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}'`
-> → the mock prints `"tz": 41.0` (one mm along the slice normal). Without a
-> reachable agent the POST returns `"delivered":false` (geometry recorded,
-> re-sent when the agent appears); with `SLICE_AGENT_HOST` unset it returns
-> `"enabled":false`. On the real scanner, `SLICE_AGENT_HOST=<MARS ip>`.
+> You'll see: `{"delivered":true,"agent_connected":true,"state":{"tz":1.0,...}}`
+> and the mock prints `CMD {"tx": 0.0, "ty": 0.0, "tz": 1.0, ...}` — the
+> 56-byte packet Andrew's real `slice_agent` receives, identical to a PgUp in
+> his `slice_control` tool. A rotation slider adds degrees to `rx/ry/rz` the
+> same way (W/S, A/D, Q/E). Without a reachable agent the POST returns
+> `"delivered":false` (state kept, re-sent when the agent appears); with
+> `SLICE_AGENT_HOST` unset it returns `"enabled":false`. On the real scanner,
+> `SLICE_AGENT_HOST=<MARS ip>`.
 
 Knobs for 5b–5d: `--fps N` (pace) · `--frames N` (how many; 0 = until Ctrl-C)
 · `--matrix N` (image size) · `--slices N` (multislice) ·

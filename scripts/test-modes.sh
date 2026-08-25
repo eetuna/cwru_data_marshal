@@ -102,25 +102,32 @@ chk "status: slice_agent enabled" \
   "$(mexec curl -s localhost:8080/status | grep -o '"slice_agent":{[^}]*}' | field enabled)" '"enabled":true'
 # lazy connect: nothing reaches the agent until the first command
 chk "no connection before first command" "$(docker logs slice-agent-mock 2>&1 | grep -c CONNECTED)" "0"
-# relative move before any base geometry -> 409
-chk "slice_delta without base = 409" \
-  "$(mexec curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/write/slice_delta -d '{"translation_mm":[0,0,1]}')" "409"
-# absolute target: delivered, agent receives the 56-byte command with tz=40
+# first press from zero: +1 = PgUp -> tz=1 (six numbers start at zero, like slice_control)
+chk "nudge +1 delivered" \
+  "$(mexec curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}' | field delivered)" '"delivered":true'
+sleep 1
+chk "agent got tz=1" "$(docker logs slice-agent-mock 2>&1 | grep -q '"tz": 1.0' && echo yes || echo no)" "yes"
+# absolute target: six numbers replaced, agent receives tz=40
 chk "slice_target delivered" \
   "$(mexec curl -s -X POST localhost:8080/write/slice_target -d "$TGT" | field delivered)" '"delivered":true'
-sleep 1
+sleep 0.5
 chk "agent got tz=40" "$(docker logs slice-agent-mock 2>&1 | grep -q '"tz": 40.0' && echo yes || echo no)" "yes"
-# +1 through-plane on that axial slice -> tz 41
+# +1 on top of that -> tz 41
 mexec curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}' >/dev/null
 sleep 0.5
 chk "nudge +1 -> agent got tz=41" "$(docker logs slice-agent-mock 2>&1 | grep -q '"tz": 41.0' && echo yes || echo no)" "yes"
-# in-plane rotation by 0.5 rad = 28.65 deg (under the 30 deg clamp): rz on the
-# wire is negative (rows convention; --slice-transpose would flip it)
+# rotation slider: 0.5 rad = 28.65 deg is ADDED to rz (Andrew's E key), positive
 mexec curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,0.5]}' >/dev/null
 sleep 0.5
-chk "rotate 0.5rad about normal -> rz=-28.65" "$(docker logs slice-agent-mock 2>&1 | grep -q '"rz": -28.64' && echo yes || echo no)" "yes"
-chk "commanded geometry readable" \
-  "$(mexec curl -s -o /dev/null -w '%{http_code}' localhost:8080/read/slice_commanded)" "200"
+chk "rotate 0.5rad -> rz=+28.65" "$(docker logs slice-agent-mock 2>&1 | grep -q '"rz": 28.64' && echo yes || echo no)" "yes"
+chk "over-clamp step = 400" \
+  "$(mexec curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,1.0]}')" "400"
+chk "commanded state readable" \
+  "$(mexec curl -s localhost:8080/read/slice_commanded | grep -o '"rz_deg":[0-9.]*' | cut -c1-14)" '"rz_deg":28.64'
+# reset = the '0' key: zeros sent
+mexec curl -s -X POST localhost:8080/write/slice_reset >/dev/null
+sleep 0.5
+chk "slice_reset -> agent got zeros" "$(docker logs slice-agent-mock 2>&1 | tail -1 | grep -q '"tz": 0.0, "rx": 0.0' && echo yes || echo no)" "yes"
 # graceful shutdown sends 0xDEAD (57005)
 docker compose --profile test-recon up -d --force-recreate mri-marshal >/dev/null 2>&1
 sleep 2

@@ -11,8 +11,8 @@
 #
 # Slice control (unset = off): SLICE_AGENT_HOST=<MARS ip running `slice_agent --listen`>
 # turns on the UI -> marshal -> slice_agent command channel; SLICE_AGENT_PORT (9270);
-# SLICE_AGENT_EXTRA for axis switches settled on the scanner, e.g.
-# "--slice-transpose" or "--slice-axis-sign +,-,+" (see docs/SLICE_CONTROL_HANDOFF.md).
+# SLICE_AGENT_EXTRA for optional clamps, e.g. "--slice-max-step-deg 45"
+# (see docs/SLICE_CONTROL_HANDOFF.md).
 #   SLICE_AGENT_HOST=192.168.2.2 docker compose up -d
 #
 # Scanner is NOT a service — drive it against mri-marshal:9100 (real scanner,
