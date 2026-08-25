@@ -79,7 +79,8 @@ docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:l
 docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
   python3 /scripts/fire_stream.py --address mri-marshal --port 9100 --mode image --fps 10 --frames 0 --matrix 128
 
-# MULTISLICE: 5-slice k-space volume per frame (2D panel = middle slice, 3D panel = all slices)
+# MULTISLICE: 5-slice k-space volume per frame, slices 6 mm apart along the normal
+# (2-D panels = 3 slices of the stack; 3-D history = the same 3 as parallel planes)
 docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
   python3 /scripts/fire_stream.py --address mri-marshal --port 9100 --mode kspace --fps 5 --frames 0 --matrix 128 --slices 5
 

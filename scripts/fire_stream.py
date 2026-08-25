@@ -132,6 +132,7 @@ def main():
         "cor": ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
     }
     read_dir, phase_dir, slice_dir = ORIENTS[args.orient]
+    SLICE_SPACING_MM = 6.0   # matches the 6 mm/slice FOV used in image mode
     for i in range(3):
         acq.read_dir[i] = read_dir[i]
         acq.phase_dir[i] = phase_dir[i]
@@ -164,6 +165,15 @@ def main():
                         acq.scan_counter = counter
                         acq.idx.repetition = frame
                         acq.idx.slice = s
+                        # Each slice at its own position along the slice
+                        # normal (centred stack, SLICE_SPACING_MM apart), like
+                        # a real multislice prescription. The recon copies
+                        # this into each image header, so the viewer's 3-D
+                        # history fans the stack out instead of drawing every
+                        # slice on top of each other at the origin.
+                        off = (s - (slices - 1) / 2.0) * SLICE_SPACING_MM
+                        for i in range(3):
+                            acq.position[i] = slice_dir[i] * off
                         acq.idx.kspace_encode_step_1 = line
                         acq.clearAllFlags()
                         if line == 0:
