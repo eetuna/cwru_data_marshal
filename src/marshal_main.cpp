@@ -6,8 +6,7 @@
  * Flags: --http host:port, --ws-port N, --recon-host HOST, --recon-port N,
  *        --dump-dir PATH, --dump, --recon-close-timeout-ms N,
  *        --slice-agent-host HOST (enables the slice command channel),
- *        --slice-agent-port N, --slice-max-step-mm N, --slice-max-step-deg N,
- *        --slice-max-abs-mm N, --slice-nudge-mm N, --slice-resend-ms N
+ *        --slice-agent-port N, --slice-resend-ms N
  */
 
 #undef LOG_COMPONENT
@@ -243,18 +242,6 @@ bool parse_host_port(const std::string& input, std::string& host, uint16_t& port
     return checked_parse_uint16(input.substr(p + 1), port) && port != 0;
 }
 
-// Positive finite double (all --slice-* magnitudes are strictly positive).
-bool checked_parse_positive_double(const std::string& s, double& out) {
-    try {
-        size_t pos = 0;
-        double v = std::stod(s, &pos);
-        if (pos != s.size()) return false;
-        if (!(v > 0.0) || !std::isfinite(v)) return false;
-        out = v;
-        return true;
-    } catch (...) { return false; }
-}
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -393,30 +380,6 @@ int main(int argc, char** argv)
         else if (a == "--slice-agent-port" && i + 1 < argc) {
             if (!checked_parse_uint16(argv[++i], slice_cfg.port) || slice_cfg.port == 0) {
                 LOG_ERROR("--slice-agent-port: invalid value '" << argv[i] << "'");
-                return 1;
-            }
-        }
-        else if (a == "--slice-max-step-mm" && i + 1 < argc) {
-            if (!checked_parse_positive_double(argv[++i], slice_settings.max_step_mm)) {
-                LOG_ERROR("--slice-max-step-mm: invalid value '" << argv[i] << "'");
-                return 1;
-            }
-        }
-        else if (a == "--slice-max-step-deg" && i + 1 < argc) {
-            if (!checked_parse_positive_double(argv[++i], slice_settings.max_step_deg)) {
-                LOG_ERROR("--slice-max-step-deg: invalid value '" << argv[i] << "'");
-                return 1;
-            }
-        }
-        else if (a == "--slice-max-abs-mm" && i + 1 < argc) {
-            if (!checked_parse_positive_double(argv[++i], slice_settings.max_abs_mm)) {
-                LOG_ERROR("--slice-max-abs-mm: invalid value '" << argv[i] << "'");
-                return 1;
-            }
-        }
-        else if (a == "--slice-nudge-mm" && i + 1 < argc) {
-            if (!checked_parse_positive_double(argv[++i], slice_settings.nudge_mm)) {
-                LOG_ERROR("--slice-nudge-mm: invalid value '" << argv[i] << "'");
                 return 1;
             }
         }
@@ -579,9 +542,6 @@ int main(int argc, char** argv)
         state.slice_agent_connected = [&slice_agent] {
             return slice_agent && slice_agent->connected();
         };
-        state.slice_agent_reconnects = [&slice_agent]() -> uint32_t {
-            return slice_agent ? slice_agent->reconnect_count() : 0u;
-        };
     }
 
     // Log config
@@ -598,11 +558,7 @@ int main(int argc, char** argv)
         if (ws_port > 0) cfg << " ws-port=" << ws_port;
         if (mrd_port > 0) cfg << " mrd-port=" << mrd_port;
         if (slice_settings.enabled) {
-            cfg << " slice-agent=" << slice_cfg.host << ":" << slice_cfg.port
-                << " slice_max_step=" << slice_settings.max_step_mm << "mm/"
-                << slice_settings.max_step_deg << "deg"
-                << " slice_max_abs=" << slice_settings.max_abs_mm << "mm"
-                << " slice_nudge=" << slice_settings.nudge_mm << "mm";
+            cfg << " slice-agent=" << slice_cfg.host << ":" << slice_cfg.port;
         } else {
             cfg << " slice-agent=off";
         }

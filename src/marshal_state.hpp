@@ -179,10 +179,6 @@ struct MarshalState {
     // so a new prescription never inherits the previous scan's slice.
     struct SliceAgentSettings {
         bool enabled{false};
-        double max_step_mm{50.0};    // per-command translation clamp (each component)
-        double max_step_deg{180.0};  // per-command rotation clamp (the UI slider's range)
-        double max_abs_mm{300.0};    // clamp on the accumulated |tx|,|ty|,|tz|
-        double nudge_mm{1.0};        // legacy ±1 endpoint: one press = this many mm
     };
     SliceAgentSettings slice_agent_cfg;
 
@@ -201,7 +197,6 @@ struct MarshalState {
         [](const slice_math::WireCommand&) { return uint64_t{0}; };   // 0 = not queued
     std::function<bool(uint64_t)> slice_agent_wait = [](uint64_t) { return false; };
     std::function<bool()> slice_agent_connected = [] { return false; };
-    std::function<uint32_t()> slice_agent_reconnects = [] { return 0u; };
 
     // Scan start / scan close: the six numbers go back to zero and the agent
     // is told so (identity — what it publishes on connect anyway), so the
