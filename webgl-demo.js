@@ -190,15 +190,16 @@ async function main() {
   let currentImageHistory = [];
   let currentSnapshotSlices = [];
   let currentDisplayedSlices = [];
-  // Persistent "last 3 distinct slice locations" history. A slice location
-  // is its plane in space (orientation + position). Re-acquiring a location
-  // refreshes its slot; a new location enters at the front and evicts the
-  // oldest beyond 3. Lives in browser memory, so it survives scan
-  // boundaries: three orthogonal acquisitions fill three slots (latest
-  // transverse + sagittal + coronal, regardless of which scan produced
-  // them), a 3-slice parallel stack fills all three with the stack, and a
-  // repeatedly re-acquired slice just refreshes its own slot.
-  let sliceLocationHistory = [];
+  // Persistent "last 3 acquisitions" history, keyed by slice orientation.
+  // An acquisition is a single slice or a whole same-orientation stack
+  // published together (ALL of its slices are kept). Re-acquiring an
+  // orientation refreshes its entry; a new orientation enters at the front
+  // and evicts the oldest beyond 3. Lives in browser memory, so it survives
+  // scan boundaries: three orthogonal scans show latest transverse +
+  // sagittal + coronal regardless of which scan produced them; a 5-slice
+  // stack shows all 5 planes; a repeatedly re-acquired / robot-repositioned
+  // slice just refreshes its own entry.
+  let sliceLocationHistory = [];   // [{ key, slices: [record, ...] }], newest first
   let lastTimestamp = -1;
   let lastVolumeTimestamp = -1;
   let lastTipTimestamp = -1;
@@ -401,7 +402,9 @@ initRotationSliders();
   function render2DImage(ctx, imagePanels) {
     if (!Array.isArray(imagePanels) || imagePanels.length === 0) return;
 
-    const maxPanels = 3;
+    // One panel per displayed slice (a whole stack shows every slice);
+    // never fewer than 3 panels so the layout stays stable.
+    const maxPanels = Math.max(3, imagePanels.length);
     const panels = imagePanels.slice(0, maxPanels);
     const targetWidth = Math.max(...panels.map(img => img?.width || 1));
     const targetHeight = Math.max(...panels.map(img => img?.height || 1));
@@ -1028,23 +1031,32 @@ initRotationSliders();
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(s);
     }
+    // One history entry per ACQUISITION: a single slice, or a whole
+    // same-orientation stack published together (all of its slices kept).
+    // maxSlots bounds the number of entries, not slices — so a 5-slice
+    // stack shows all 5 planes, and three orthogonal scans show one each.
     const before = sliceLocationHistory.slice();
     for (const [key, group] of groups) {
       sliceLocationHistory = sliceLocationHistory.filter((e) => e.key !== key);
-      for (let i = group.length - 1; i >= 0; i--) {
-        sliceLocationHistory.unshift({ key, slice: group[i] });
-      }
+      sliceLocationHistory.unshift({ key, slices: group.slice() });
     }
     sliceLocationHistory = sliceLocationHistory.slice(0, maxSlots);
     // Records that left the history will never be drawn again: free the GPU
     // texture renderSliceHistoryIn3D cached on them (_sliceTexture3D).
-    const kept = new Set(sliceLocationHistory.map((e) => e.slice));
+    const kept = new Set(sliceLocationHistory.flatMap((e) => e.slices));
     for (const e of before) {
-      if (!kept.has(e.slice) && e.slice._sliceTexture3D && typeof glSlices !== 'undefined' && glSlices) {
-        glSlices.deleteTexture(e.slice._sliceTexture3D);
-        e.slice._sliceTexture3D = null;
+      for (const s of e.slices) {
+        if (!kept.has(s) && s._sliceTexture3D && typeof glSlices !== 'undefined' && glSlices) {
+          glSlices.deleteTexture(s._sliceTexture3D);
+          s._sliceTexture3D = null;
+        }
       }
     }
+  }
+
+  // All slices currently in the history, newest acquisition first.
+  function displayedSlicesFromHistory() {
+    return sliceLocationHistory.flatMap((e) => e.slices);
   }
 
   async function updateTextureFromServer() {
@@ -1089,7 +1101,7 @@ initRotationSliders();
           // history; the panels show the last 3 distinct slice locations
           // (across scans), newest first.
           upsertSliceHistory(activeSlices, 3);
-          currentDisplayedSlices = sliceLocationHistory.map((e) => e.slice);
+          currentDisplayedSlices = displayedSlicesFromHistory();
           currentImageHistory = currentDisplayedSlices.slice();
 
           const preferredSelected = Number.isFinite(data.selected_slice_index)
@@ -1455,7 +1467,7 @@ initRotationSliders();
       return null;
     };
 
-    const slices = imageHistory.slice(0, 3)
+    const slices = imageHistory
       .map((img) => {
         if (!img || !Array.isArray(img.values) || !img.width || !img.height) return null;
         const pos = getPosition(img.position);
@@ -2329,7 +2341,7 @@ initRotationSliders();
         glSlices.depthFunc(glSlices.LEQUAL);
         glSlices.clear(glSlices.COLOR_BUFFER_BIT | glSlices.DEPTH_BUFFER_BIT);
         const rendered = renderSliceHistoryIn3D(glSlices, sliceProgramInfo, currentImageHistory);
-        updateStatus('status3dSlices', rendered ? `✓ last ${Math.min(currentImageHistory.length, 3)} slices in 3D` : 'Waiting for slice metadata...');
+        updateStatus('status3dSlices', rendered ? `✓ ${currentImageHistory.length} slice(s) from the last ${sliceLocationHistory.length} acquisition(s) in 3D` : 'Waiting for slice metadata...');
       }
 
       imageRenderDirty = false;
