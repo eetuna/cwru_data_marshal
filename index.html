@@ -300,7 +300,10 @@
       -->
       <div class="canvas-section">
         <h2>3D Slice History</h2>
-        <canvas id="canvasSlices3d" width="960" height="720"></canvas>
+        <div style="position: relative;">
+          <canvas id="canvasSlices3d" width="960" height="720"></canvas>
+          <div id="sliceHistoryPositionOverlay" style="position: absolute; top: 10px; left: 10px; background-color: rgba(0, 0, 0, 0.7); color: #ffcc00; padding: 8px 12px; border: 1px solid #ffcc00; border-radius: 4px; font-family: monospace; font-size: 18px; line-height: 1.4; z-index: 10; pointer-events: none;"></div>
+        </div>
       </div>
       <div class="canvas-section">
         <h2>Saved Transform</h2>

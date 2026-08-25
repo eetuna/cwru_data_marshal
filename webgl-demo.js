@@ -1,21 +1,34 @@
 // WebGL rendering engine - renders 3D volume with separate 2D image canvas
-import { Image2DRenderer } from "./render-2d-image.js";
+// (Image2DRenderer import removed: nothing ever called .render() on it.)
 
 let deltaTime = 0;
 let mouseRotationX = 0.0;
 let mouseRotationY = 0.0;
 let mouseRotationZ = 0.0;
 let volumeZoom = -6.0;
-let sliceHistoryZoom = -90.0;
+// Distance that frames a 500 mm x 500 mm area at the origin under the 45°
+// FOV used by renderSliceHistoryIn3D: d = (500/2) / tan(fov/2). Slices are
+// placed at their absolute scanner positions (no recentring), so the view
+// must start far enough out to see them.
+let sliceHistoryZoom = -604.0;
 let isMouseDown = false;
 let lastMouseX = 0;
 let lastMouseY = 0;
 let sliceHistoryRotationX = -0.3;
 let sliceHistoryRotationY = 0.4;
 let sliceHistoryRotationZ = 0.0;
+let sliceHistoryPanX = 0.0;
+let sliceHistoryPanY = 0.0;
 let isSliceHistoryMouseDown = false;
+let sliceHistoryDragMode = 'rotate';
 let lastSliceHistoryMouseX = 0;
 let lastSliceHistoryMouseY = 0;
+// Render-on-change: the WebGL canvases are redrawn only when new image data
+// arrived (imageRenderDirty) or the user rotated/zoomed/panned
+// (userInteractionDirty). Redrawing at 60 fps with nothing changed was pure
+// CPU/GPU waste.
+let imageRenderDirty = true;
+let userInteractionDirty = false;
 function initCurrentSliders() {
   for (let i = 1; i <= 6; i++) {
     const slider = document.getElementById(`sliderI${i}`);
@@ -195,7 +208,8 @@ async function main() {
   let savedTransformDataBySlot = [null, null, null];
 
   // Create 2D image renderer
-  const image2DRenderer = new Image2DRenderer(gl);
+  // (Image2DRenderer instance removed: its render() was never called, so
+  // updateImage() only rebuilt a texture nobody drew.)
 initCurrentSliders();
 initRotationSliders();
 
@@ -428,36 +442,42 @@ initRotationSliders();
       }
 
       const { width, height, values } = imageData;
-      let minValue = Infinity;
-      let maxValue = -Infinity;
-      for (let i = 0; i < values.length; i++) {
-        if (values[i] < minValue) minValue = values[i];
-        if (values[i] > maxValue) maxValue = values[i];
-      }
-      const range = maxValue - minValue > 0.001 ? maxValue - minValue : 1.0;
+      // Cache the normalized bitmap on the record: the min/max scan and
+      // per-pixel normalize run once per unique slice, not on every redraw
+      // triggered by another panel changing (Ridaa Z. Ali, 4a70c82).
+      if (!imageData._panelCanvas) {
+        let minValue = Infinity;
+        let maxValue = -Infinity;
+        for (let i = 0; i < values.length; i++) {
+          if (values[i] < minValue) minValue = values[i];
+          if (values[i] > maxValue) maxValue = values[i];
+        }
+        const range = maxValue - minValue > 0.001 ? maxValue - minValue : 1.0;
 
-      const slicePixels = new Uint8ClampedArray(width * height * 4);
-      for (let i = 0; i < values.length; i++) {
-        const normalized = (values[i] - minValue) / range;
-        const value = Math.min(1.0, Math.max(0.0, normalized));
-        const byteValue = Math.round(value * 255);
-        slicePixels[i * 4] = byteValue;
-        slicePixels[i * 4 + 1] = byteValue;
-        slicePixels[i * 4 + 2] = byteValue;
-        slicePixels[i * 4 + 3] = 255;
-      }
+        const slicePixels = new Uint8ClampedArray(width * height * 4);
+        for (let i = 0; i < values.length; i++) {
+          const normalized = (values[i] - minValue) / range;
+          const value = Math.min(1.0, Math.max(0.0, normalized));
+          const byteValue = Math.round(value * 255);
+          slicePixels[i * 4] = byteValue;
+          slicePixels[i * 4 + 1] = byteValue;
+          slicePixels[i * 4 + 2] = byteValue;
+          slicePixels[i * 4 + 3] = 255;
+        }
 
-      const tmpCanvas = document.createElement('canvas');
-      tmpCanvas.width = width;
-      tmpCanvas.height = height;
-      const tmpCtx = tmpCanvas.getContext('2d');
-      if (!tmpCtx) {
-        continue;
+        const tmpCanvas = document.createElement('canvas');
+        tmpCanvas.width = width;
+        tmpCanvas.height = height;
+        const tmpCtx = tmpCanvas.getContext('2d');
+        if (!tmpCtx) {
+          continue;
+        }
+        tmpCtx.putImageData(new ImageData(slicePixels, width, height), 0, 0);
+        imageData._panelCanvas = tmpCanvas;
       }
-      tmpCtx.putImageData(new ImageData(slicePixels, width, height), 0, 0);
 
       ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(tmpCanvas, 0, 0, width, height, offsetX, 0, targetWidth, targetHeight);
+      ctx.drawImage(imageData._panelCanvas, 0, 0, width, height, offsetX, 0, targetWidth, targetHeight);
 
       ctx.strokeStyle = '#333';
       ctx.strokeRect(offsetX + 0.5, 0.5, targetWidth - 1, targetHeight - 1);
@@ -1008,6 +1028,7 @@ initRotationSliders();
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(s);
     }
+    const before = sliceLocationHistory.slice();
     for (const [key, group] of groups) {
       sliceLocationHistory = sliceLocationHistory.filter((e) => e.key !== key);
       for (let i = group.length - 1; i >= 0; i--) {
@@ -1015,6 +1036,15 @@ initRotationSliders();
       }
     }
     sliceLocationHistory = sliceLocationHistory.slice(0, maxSlots);
+    // Records that left the history will never be drawn again: free the GPU
+    // texture renderSliceHistoryIn3D cached on them (_sliceTexture3D).
+    const kept = new Set(sliceLocationHistory.map((e) => e.slice));
+    for (const e of before) {
+      if (!kept.has(e.slice) && e.slice._sliceTexture3D && typeof glSlices !== 'undefined' && glSlices) {
+        glSlices.deleteTexture(e.slice._sliceTexture3D);
+        e.slice._sliceTexture3D = null;
+      }
+    }
   }
 
   async function updateTextureFromServer() {
@@ -1070,14 +1100,8 @@ initRotationSliders();
           postWillRender2DImageToServer(currentImageData);
           render2DImage(gl2d, currentDisplayedSlices);
           postRendered2DImageToServer(currentImageData);
-          
-          // Extract metadata and update renderer
-          const metadata = {
-            position: currentImageData.position,
-            orientation: currentImageData.orientation,
-            pixelSize: currentImageData.pixelSize
-          };
-          image2DRenderer.updateImage(currentImageData.values, currentImageData.width, currentImageData.height, metadata);
+          // New image data: the WebGL canvases must redraw on the next frame.
+          imageRenderDirty = true;
 
           // Surface the currently shown panel slice(s) in debug to avoid confusion when selected_slice_index is fixed.
           const debugSlice = currentDisplayedSlices[0] || currentImageData;
@@ -1439,35 +1463,32 @@ initRotationSliders();
         const px = getPixelSize(img.pixelSize);
         if (!(pos && ori && px)) return null;
         return {
-          values: img.values,
           width: img.width,
           height: img.height,
           pos,
           ori,
           px,
+          record: img, // the original record: its cached GPU texture lives here
         };
       })
       .filter(Boolean);
 
     if (slices.length === 0) return false;
 
-    let cx = 0, cy = 0, cz = 0;
-    for (const s of slices) {
-      cx += s.pos[0];
-      cy += s.pos[1];
-      cz += s.pos[2];
-    }
-    cx /= slices.length;
-    cy /= slices.length;
-    cz /= slices.length;
-
     const fieldOfView = (45 * Math.PI) / 180;
     const aspect = gl.canvas.clientWidth / gl.canvas.clientHeight;
     const projectionMatrix = glMatrix.mat4.create();
-    glMatrix.mat4.perspective(projectionMatrix, fieldOfView, aspect, 0.1, 300.0);
+    // Far plane must exceed the max zoom-out distance (640, see the wheel
+    // handler) or the scene is clipped away and zooming out past ~300 units
+    // appears to do nothing (Ridaa Z. Ali, bd2c846).
+    glMatrix.mat4.perspective(projectionMatrix, fieldOfView, aspect, 0.1, 650.0);
 
     const viewMatrix = glMatrix.mat4.create();
-    glMatrix.mat4.translate(viewMatrix, viewMatrix, [0.0, 0.0, sliceHistoryZoom]);
+    // Pan is folded into the same translate as zoom: rotation is applied to
+    // object-space vertices first (chain T * Rx * Ry * Rz), so panX/panY
+    // shift the already-rotated scene in screen space, like the zoom dolly
+    // does on Z.
+    glMatrix.mat4.translate(viewMatrix, viewMatrix, [sliceHistoryPanX, sliceHistoryPanY, sliceHistoryZoom]);
     glMatrix.mat4.rotate(viewMatrix, viewMatrix, sliceHistoryRotationX, [1, 0, 0]);
     glMatrix.mat4.rotate(viewMatrix, viewMatrix, sliceHistoryRotationY, [0, 1, 0]);
     glMatrix.mat4.rotate(viewMatrix, viewMatrix, sliceHistoryRotationZ, [0, 0, 1]);
@@ -1476,15 +1497,21 @@ initRotationSliders();
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.enable(gl.DEPTH_TEST);
+    // Slices are blended (black pixels are transparent, see
+    // createTextureFromMatrix); don't let transparent texels write depth or
+    // a plane's empty border would occlude the planes crossing behind it.
+    gl.depthMask(false);
 
+    const renderedPositions = [];
     for (const s of slices) {
-      const localPos = [s.pos[0] - cx, s.pos[1] - cy, s.pos[2] - cz];
-
+      // Slices sit at their absolute scanner positions — no recentring on the
+      // centroid — so the 3-D view is a fixed world frame.
+      renderedPositions.push(s.pos);
       const poseMatrix = glMatrix.mat4.fromValues(
         s.ori[0], s.ori[3], s.ori[6], 0,
         s.ori[1], s.ori[4], s.ori[7], 0,
         s.ori[2], s.ori[5], s.ori[8], 0,
-        localPos[0], localPos[1], localPos[2], 1
+        s.pos[0], s.pos[1], s.pos[2], 1
       );
 
       const halfWidthWorld = 0.5 * s.width * s.px[0];
@@ -1498,10 +1525,24 @@ initRotationSliders();
       const modelViewMatrix = glMatrix.mat4.create();
       glMatrix.mat4.multiply(modelViewMatrix, viewMatrix, planeModel);
 
-      const sliceTexture = createTextureFromMatrix(gl, s.values, s.width, s.height);
-      renderQuad(gl, programInfo, sliceTexture, projectionMatrix, modelViewMatrix);
-      // Free per-frame textures (see renderVolumeCube note).
-      gl.deleteTexture(sliceTexture);
+      // Upload the texture once per record and reuse it on later redraws
+      // (view rotation, another slot changing). Freed when the record leaves
+      // the history (upsertSliceHistory) — no per-frame create/delete churn
+      // and no leak.
+      if (!s.record._sliceTexture3D) {
+        s.record._sliceTexture3D = createTextureFromMatrix(gl, s.record.values, s.width, s.height);
+      }
+      renderQuad(gl, programInfo, s.record._sliceTexture3D, projectionMatrix, modelViewMatrix);
+    }
+    gl.depthMask(true);
+
+    // Overlay: absolute positions of the rendered planes, for scanner-day
+    // debugging of "which slice is where".
+    const overlay = document.getElementById('sliceHistoryPositionOverlay');
+    if (overlay) {
+      overlay.innerHTML = renderedPositions.map((p, i) =>
+        `<div>3D slice ${i}: [${p[0].toFixed(1)}, ${p[1].toFixed(1)}, ${p[2].toFixed(1)}]</div>`
+      ).join('');
     }
 
     gl.disable(gl.BLEND);
@@ -2081,6 +2122,7 @@ initRotationSliders();
       const deltaY = e.clientY - lastMouseY;
       const sensitivity = 0.01;
       mouseRotationY += deltaX * sensitivity;
+      userInteractionDirty = true;
       mouseRotationX += deltaY * sensitivity;
       if (e.shiftKey) {
         mouseRotationZ += deltaX * sensitivity;
@@ -2109,13 +2151,20 @@ initRotationSliders();
     e.preventDefault();
     const delta = normalizeWheelDelta(e);
     volumeZoom += delta * 0.04;
+    userInteractionDirty = true;
     volumeZoom = Math.min(-1.5, Math.max(-120.0, volumeZoom));
     updateStatus('debug', `Vol zoom ${volumeZoom.toFixed(1)} | Slice zoom ${sliceHistoryZoom.toFixed(1)}`);
   }, { passive: false });
 
   if (canvasSlices3D) {
+    // Right/middle-drag pans; suppress the context menu so right-drag works.
+    canvasSlices3D.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+    });
+
     canvasSlices3D.addEventListener('mousedown', (e) => {
       isSliceHistoryMouseDown = true;
+      sliceHistoryDragMode = (e.button === 2 || e.button === 1) ? 'pan' : 'rotate';
       lastSliceHistoryMouseX = e.clientX;
       lastSliceHistoryMouseY = e.clientY;
       e.preventDefault();
@@ -2125,14 +2174,23 @@ initRotationSliders();
       if (isSliceHistoryMouseDown) {
         const deltaX = e.clientX - lastSliceHistoryMouseX;
         const deltaY = e.clientY - lastSliceHistoryMouseY;
-        const sensitivity = 0.01;
-        sliceHistoryRotationY += deltaX * sensitivity;
-        sliceHistoryRotationX += deltaY * sensitivity;
-        if (e.shiftKey) {
-          sliceHistoryRotationZ += deltaX * sensitivity;
+        if (sliceHistoryDragMode === 'pan') {
+          // Scale with zoom distance so a mouse movement covers the same
+          // apparent screen distance whether zoomed in or out.
+          const panSensitivity = Math.abs(sliceHistoryZoom) * 0.0015;
+          sliceHistoryPanX += deltaX * panSensitivity;
+          sliceHistoryPanY -= deltaY * panSensitivity;
+        } else {
+          const sensitivity = 0.01;
+          sliceHistoryRotationY += deltaX * sensitivity;
+          sliceHistoryRotationX += deltaY * sensitivity;
+          if (e.shiftKey) {
+            sliceHistoryRotationZ += deltaX * sensitivity;
+          }
         }
         lastSliceHistoryMouseX = e.clientX;
         lastSliceHistoryMouseY = e.clientY;
+        userInteractionDirty = true;
       }
     });
 
@@ -2148,8 +2206,9 @@ initRotationSliders();
       e.preventDefault();
       const delta = normalizeWheelDelta(e);
       sliceHistoryZoom += delta * 0.2;
-      sliceHistoryZoom = Math.min(-5.0, Math.max(-600.0, sliceHistoryZoom));
+      sliceHistoryZoom = Math.min(-5.0, Math.max(-640.0, sliceHistoryZoom));
       updateStatus('debug', `Vol zoom ${volumeZoom.toFixed(1)} | Slice zoom ${sliceHistoryZoom.toFixed(1)}`);
+      userInteractionDirty = true;
     }, { passive: false });
   }
 
@@ -2249,24 +2308,32 @@ initRotationSliders();
       });
     }
 
-    gl.clearColor(0.0, 0.0, 0.0, 1.0);
-    gl.clearDepth(1.0);
-    gl.enable(gl.DEPTH_TEST);
-    gl.depthFunc(gl.LEQUAL);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    // Redraw the image canvases only when something changed: new image data
+    // or a user rotate/zoom/pan. Otherwise every frame re-uploaded and
+    // redrew identical content.
+    if (imageRenderDirty || userInteractionDirty) {
+      gl.clearColor(0.0, 0.0, 0.0, 1.0);
+      gl.clearDepth(1.0);
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    // renderVolumeCube(gl, programInfo, volumeSlices);
-    renderLatest2DSliceIn3D(gl, programInfo, currentImageData);
-    // renderMesh(gl, meshProgramInfo, meshBuffers);
+      // renderVolumeCube(gl, programInfo, volumeSlices);
+      renderLatest2DSliceIn3D(gl, programInfo, currentImageData);
+      // renderMesh(gl, meshProgramInfo, meshBuffers);
 
-    if (glSlices && sliceProgramInfo) {
-      glSlices.clearColor(0.0, 0.0, 0.0, 1.0);
-      glSlices.clearDepth(1.0);
-      glSlices.enable(glSlices.DEPTH_TEST);
-      glSlices.depthFunc(glSlices.LEQUAL);
-      glSlices.clear(glSlices.COLOR_BUFFER_BIT | glSlices.DEPTH_BUFFER_BIT);
-      const rendered = renderSliceHistoryIn3D(glSlices, sliceProgramInfo, currentImageHistory);
-      updateStatus('status3dSlices', rendered ? `✓ last ${Math.min(currentImageHistory.length, 3)} slices in 3D` : 'Waiting for slice metadata...');
+      if (glSlices && sliceProgramInfo) {
+        glSlices.clearColor(0.0, 0.0, 0.0, 1.0);
+        glSlices.clearDepth(1.0);
+        glSlices.enable(glSlices.DEPTH_TEST);
+        glSlices.depthFunc(glSlices.LEQUAL);
+        glSlices.clear(glSlices.COLOR_BUFFER_BIT | glSlices.DEPTH_BUFFER_BIT);
+        const rendered = renderSliceHistoryIn3D(glSlices, sliceProgramInfo, currentImageHistory);
+        updateStatus('status3dSlices', rendered ? `✓ last ${Math.min(currentImageHistory.length, 3)} slices in 3D` : 'Waiting for slice metadata...');
+      }
+
+      imageRenderDirty = false;
+      userInteractionDirty = false;
     }
 
     // Render FK control points on the separate canvas
@@ -2332,7 +2399,10 @@ function createTextureFromMatrix(gl, matrix, width, height) {
     rgbaData[i * 4] = byteValue;
     rgbaData[i * 4 + 1] = byteValue;
     rgbaData[i * 4 + 2] = byteValue;
-    rgbaData[i * 4 + 3] = byteValue;
+    // Alpha: black pixels fully transparent, everything else opaque — so a
+    // slice's empty border does not block the planes crossing it in the 3-D
+    // history view (Ridaa Z. Ali, 4a70c82).
+    rgbaData[i * 4 + 3] = byteValue === 0 ? 0 : 255;
   }
 
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgbaData);
