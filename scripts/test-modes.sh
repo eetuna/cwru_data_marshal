@@ -114,10 +114,11 @@ chk "agent got tz=40" "$(docker logs slice-agent-mock 2>&1 | grep -q '"tz": 40.0
 mexec curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}' >/dev/null
 sleep 0.5
 chk "nudge +1 -> agent got tz=41" "$(docker logs slice-agent-mock 2>&1 | grep -q '"tz": 41.0' && echo yes || echo no)" "yes"
-# in-plane rotation: rz on the wire (rows convention -> -30)
-mexec curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,0.5235988]}' >/dev/null
+# in-plane rotation by 0.5 rad = 28.65 deg (under the 30 deg clamp): rz on the
+# wire is negative (rows convention; --slice-transpose would flip it)
+mexec curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,0.5]}' >/dev/null
 sleep 0.5
-chk "rotate 30deg about normal -> rz=-30" "$(docker logs slice-agent-mock 2>&1 | grep -q '"rz": -30.0' && echo yes || echo no)" "yes"
+chk "rotate 0.5rad about normal -> rz=-28.65" "$(docker logs slice-agent-mock 2>&1 | grep -q '"rz": -28.64' && echo yes || echo no)" "yes"
 chk "commanded geometry readable" \
   "$(mexec curl -s -o /dev/null -w '%{http_code}' localhost:8080/read/slice_commanded)" "200"
 # graceful shutdown sends 0xDEAD (57005)

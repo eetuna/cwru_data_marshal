@@ -183,8 +183,9 @@ docker logs slice-agent-mock
 #   CONNECTED {...}   CMD {"frame": 0, "tx": 12.5, "ty": -3.0, "tz": 40.0, "rx": 0.0, ...}
 curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}'
 #   -> mock prints CMD {... "tz": 41.0 ...}   (+1 mm along the slice normal)
-curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,0.5235988]}'
-#   -> mock prints CMD {... "rz": -30.0 ...}  (rows convention; --slice-transpose gives +30)
+curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,0.5]}'
+#   -> mock prints CMD {... "rz": -28.65 ...}  (rows convention; --slice-transpose gives +28.65;
+#      values above the 30 deg / 50 mm per-command clamps are rejected with 400)
 curl -s localhost:8080/read/slice_commanded     # the absolute geometry last sent
 ```
 
