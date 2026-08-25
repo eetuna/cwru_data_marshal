@@ -247,14 +247,14 @@ channel with a mock agent (no scanner needed). The channel is off unless the
 marshal is started with `SLICE_AGENT_HOST`:
 
 ```bash
-docker run -d --rm --name slice-agent-mock --network cwru-demo-net \
-  -v "$PWD/scripts:/scripts" fire-python:latest python3 /scripts/slice_agent_mock.py
+docker run -d --rm --name slice-agent-mock --network cwru-demo-net fire-python:latest \
+  python3 -c "$(cat scripts/slice_agent_mock.py)" --port 9270      # inline: works from a devcontainer too
 SLICE_AGENT_HOST=slice-agent-mock docker compose up -d --force-recreate mri-marshal
 curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}'
 docker logs slice-agent-mock
 ```
-> You'll see: `{"delivered":true,"agent_connected":true,"state":{"tz":1.0,...}}`
-> and the mock prints `CMD {"tx": 0.0, "ty": 0.0, "tz": 1.0, ...}` — the
+> You'll see: `{"agent_connected":true,"delivered":true,...,"state":{...,"tz":1.0}}`
+> and the mock prints `CMD {"frame": 0, "tx": 0.0, "ty": 0.0, "tz": 1.0, ...}` — the
 > 56-byte packet Andrew's real `slice_agent` receives, identical to a PgUp in
 > his `slice_control` tool. A rotation slider adds degrees to `rx/ry/rz` the
 > same way (W/S, A/D, Q/E). Without a reachable agent the POST returns

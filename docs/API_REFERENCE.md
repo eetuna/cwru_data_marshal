@@ -192,7 +192,7 @@ Common response fields:
  "state": {"tx": 0.0, "ty": 0.0, "tz": 1.0, "rx_deg": 10.0, "ry_deg": 0.0, "rz_deg": 0.0},
  "geometry": {"position": [...], "read_dir": [...], "phase_dir": [...], "slice_dir": [...]}}
 ```
-`state` = the six numbers just sent; `geometry` = the axes they imply (rows of `buildRotMatrix`). `delivered` = the packet was written to a connected agent (the first command of a session waits for the lazy connect, bounded by the connect timeout). `false` with `enabled:true` = agent unreachable; the state is still advanced and re-sent when the agent appears. Every accepted request is also cached and readable at the matching `GET /read/...` (`204` until the first POST).
+`state` = the six numbers just sent; `geometry` = the axes they imply (rows of `buildRotMatrix`). `delivered` = the packet was written to a connected agent (the first command of a session waits for the lazy connect, bounded by the connect timeout). `false` with `enabled:true` = agent unreachable; the state is still advanced and re-sent when the agent appears. Every accepted `slice_delta` / `file_slice_translation` / `slice_target` request is also cached and readable at the matching `GET /read/...` (`204` until the first POST); `slice_reset` has no cache of its own — read back via `GET /read/slice_commanded`. Rejected requests (400) are not cached.
 
 #### POST /write/file_slice_translation
 
@@ -225,7 +225,7 @@ Relative slice move — the command style for incremental UI buttons. Body (at l
 ```json
 {"translation_mm": [1.5, 0, -2.0], "rotation_rad": [0, 0.1, 0]}
 ```
-Exactly `slice_control.cpp`'s key arithmetic: `translation_mm[k]` moves `(tx,ty,tz)` along **row k of `buildRotMatrix(rx,ry,rz)`** (0 = readout → arrows, 1 = phase → arrows, 2 = slice normal → PgUp/PgDn); `rotation_rad[k]` (converted to degrees) is **added to the k-th angle** (`rx` → W/S, `ry` → D/A, `rz` → E/Q). Translation is applied before the rotation in the same request. Per-command magnitude is clamped (`--slice-max-step-mm` 50, `--slice-max-step-deg` 30) and the accumulated `|tx|,|ty|,|tz|` against `--slice-max-abs-mm` (300) → `400`, nothing sent, request not cached. Returns the common fields.
+Exactly `slice_control.cpp`'s key arithmetic: `translation_mm[k]` moves `(tx,ty,tz)` along **row k of `buildRotMatrix(rx,ry,rz)`** (0 = readout → arrows, 1 = phase → arrows, 2 = slice normal → PgUp/PgDn); `rotation_rad[k]` (converted to degrees) is **added to the k-th angle** (`rx` → W/S, `ry` → D/A, `rz` → E/Q). Translation is applied before the rotation in the same request. Per-command magnitude is clamped (`--slice-max-step-mm` 50, `--slice-max-step-deg` 180) and the accumulated `|tx|,|ty|,|tz|` against `--slice-max-abs-mm` (300) → `400`, nothing sent, request not cached. Returns the common fields.
 
 #### GET /read/slice_delta
 
@@ -300,7 +300,7 @@ List archived reconstruction HDF5 files under `dump/from_reconstruction/` (same 
 | `--slice-agent-host host` | (none = channel off) | Scanner-side `slice_agent --listen` host (the MARS). Enables the slice command channel. Compose: `SLICE_AGENT_HOST`. |
 | `--slice-agent-port N` | `9270` | `slice_agent` port. Compose: `SLICE_AGENT_PORT`. |
 | `--slice-max-step-mm N` | `50` | Per-command clamp on relative translation components. |
-| `--slice-max-step-deg N` | `30` | Per-command clamp on relative rotation components. |
+| `--slice-max-step-deg N` | `180` | Per-command clamp on relative rotation components (the UI slider's range). |
 | `--slice-max-abs-mm N` | `300` | Clamp on the accumulated `|tx|,|ty|,|tz|` (any path). |
 | `--slice-nudge-mm N` | `1` | Millimetres per press of the legacy `±` endpoint. |
 | `--slice-resend-ms N` | `2000` | After every (re)connect, re-send the last command at 10 Hz for this long (the agent publishes an identity transform on connect; this overwrites it before the next frame). |
@@ -422,6 +422,6 @@ print(f"Tip: {tip['entries'][0]['values'][:3]}")
 
 ## Data Flow
 
-At a glance: scanner data and recon returns travel over **MRD TCP**; all query/control (image pointer, pose, transform, slice nudge, health, dump listing, debug) is **HTTP**. `<mode>` is `live` (default) or `dump` (`--dump`); the two are mutually exclusive and only the selected mode's subtree is populated. The only mid-scan readable interface is `latest_image.h5` (live mode only); `scan_<ts>.h5` is an archival output finalized on CLOSE.
+At a glance: scanner data and recon returns travel over **MRD TCP**; all query/control (image pointer, pose, transform, slice commands, health, dump listing, debug) is **HTTP**; slice commands additionally leave the marshal as 56-byte `SliceCommand` packets on a separate **TCP** connection to the scanner-side `slice_agent` (port 9270, only when `--slice-agent-host` is set). `<mode>` is `live` (default) or `dump` (`--dump`); the two are mutually exclusive and only the selected mode's subtree is populated. The only mid-scan readable interface is `latest_image.h5` (live mode only); `scan_<ts>.h5` is an archival output finalized on CLOSE.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system diagram, session flow, and wire-protocol reference.

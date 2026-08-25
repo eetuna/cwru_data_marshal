@@ -21,10 +21,12 @@ Add `MARSHAL_DUMP=--dump` in front for dump/archival mode. Then open the viewer 
 Knobs (env on `docker compose up`): `MARSHAL_DUMP` (unset = live, `--dump` = dump), `MARSHAL_LATEST`
 (RAM snapshot — default on at `/dev/shm/cwru-latest`; set empty for on-disk),
 `RECON_HOST`/`RECON_PORT` (recon target), `SESSION_DATA_DIR` (data path),
+`SLICE_AGENT_HOST`/`SLICE_AGENT_PORT`/`SLICE_AGENT_EXTRA` (slice control; off unless the host is set),
 `HTTP_PORT`/`MRD_PORT`/`ROBOT_PORT`/`UI_PORT`/`WRITE_PORT`
 (exposed ports). The marshal routes automatically: k-space → recon; scanner-sent images →
 straight to the viewer (no per-scan choice). UI slice commands (translate/rotate/set
-position+orientation) are relayed to the scanner over the live MRD connection — see
+position+orientation) go over a separate TCP connection to the scanner-side
+`slice_agent --listen` (port 9270; on only when `SLICE_AGENT_HOST` is set) — see
 [SLICE_CONTROL_HANDOFF.md](docs/SLICE_CONTROL_HANDOFF.md).
 
 ## What runs
@@ -41,7 +43,8 @@ position+orientation) are relayed to the scanner over the live MRD connection �
 scanner ──MRD TCP :9100──> mri-marshal ──MRD TCP :9002──> recon
                               │  <── IMAGE(1022) back ─────┘
                               ├─ publishes /image/latest ──> webgl-client (:3000)
-                              └─ archives per-scan H5 under session-data/
+                              ├─ archives per-scan H5 under session-data/
+                              └─ slice commands ──TCP :9270──> slice_agent on the MARS (optional)
 robot clients <──HTTP :8081──> robot-marshal ──> webgl-client
 ```
 
@@ -58,6 +61,7 @@ robot clients <──HTTP :8081──> robot-marshal ──> webgl-client
 
 ```bash
 ./scripts/build-client-images.sh                 # build (or rebuild) the cwru/* images
+# slice control (until merged): MRI_BRANCH=feat/slice-agent-client ROBOT_BRANCH=feat/slice-agent-client-webgl ./scripts/build-client-images.sh
 ./scripts/export_usb.sh /path/to/usb             # docker save + compose file for offline transfer
 ```
 

@@ -169,7 +169,11 @@ UI slice commands go to the scanner-side `slice_agent --listen` (TCP 9270,
 without a scanner.
 
 **A. Mock agent in the compose stack** (what `./scripts/test-modes.sh` does as
-tests [5]/[6]):
+tests [5]/[6]; note the marshal image must be built from the slice-agent
+branches — `MRI_BRANCH=feat/slice-agent-client ROBOT_BRANCH=feat/slice-agent-client-webgl ./scripts/build-client-images.sh` — until they are merged; the
+script inlines the mock with `python3 -c "$(cat scripts/slice_agent_mock.py)"`
+because a devcontainer's `$PWD` bind mount is invisible to the docker host —
+use that form too if the mount below shows an empty `/scripts`):
 ```bash
 docker run -d --rm --name slice-agent-mock --network cwru-demo-net \
   -v "$PWD/scripts:/scripts" fire-python:latest \
@@ -180,8 +184,8 @@ curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t"
 #   {"delivered":true,"agent_connected":true,"enabled":true,"state":{"tz":1.0,...},...}
 docker logs slice-agent-mock
 #   CONNECTED {...}   CMD {"frame": 0, "tx": 0.0, "ty": 0.0, "tz": 1.0, "rx": 0.0, ...}   (= PgUp from zero)
-curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0.1745,0,0]}'
-#   -> mock prints CMD {... "rx": 10.0 ...}   (= W key: +10 added to rx)
+curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0.17453293,0,0]}'
+#   -> mock prints CMD {"frame": 1, ... "rx": 10.0 ...}   (= W key: +10 added to rx)
 curl -s -X POST localhost:8080/write/slice_target \
   -d '{"position":[12.5,-3,40],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,1]}'
 #   -> mock prints CMD {... "tz": 40.0, "rx": 0.0 ...}  (six numbers replaced)
@@ -205,8 +209,8 @@ produced "Client quit" on the agent.
 
 Rejection / off-channel checks (no agent needed):
 ```bash
-curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,1.0]}'
-#   400 rotation[2] exceeds max step 30 deg            — never sent
+curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,4.0]}'
+#   400 rotation[2] exceeds max step 180 deg           — never sent
 curl -s -X POST localhost:8080/write/slice_target \
   -d '{"position":[0,0,0],"read_dir":[1,0,0],"phase_dir":[1,0,0],"slice_dir":[0,0,1]}'
 #   400 {"error":"read_dir and phase_dir must be orthogonal"} — never sent

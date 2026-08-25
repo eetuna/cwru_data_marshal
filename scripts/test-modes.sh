@@ -5,6 +5,8 @@
 #
 # Rebuild first if you changed code:
 #   ./scripts/build-client-images.sh      # builds the 5 images incl. fire-python
+# Tests [5]/[6] need the slice-agent code, which (until merged) lives on
+#   MRI_BRANCH=feat/slice-agent-client ROBOT_BRANCH=feat/slice-agent-client-webgl ./scripts/build-client-images.sh
 # (marshal code lives in .worktrees/mri_data_marshal; webgl/robot in
 #  .worktrees/robot_data_marshal — the build script builds from those worktrees.)
 #
@@ -120,8 +122,8 @@ chk "nudge +1 -> agent got tz=41" "$(docker logs slice-agent-mock 2>&1 | grep -q
 mexec curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,0.5]}' >/dev/null
 sleep 0.5
 chk "rotate 0.5rad -> rz=+28.65" "$(docker logs slice-agent-mock 2>&1 | grep -q '"rz": 28.64' && echo yes || echo no)" "yes"
-chk "over-clamp step = 400" \
-  "$(mexec curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,1.0]}')" "400"
+chk "over-clamp step (4 rad > 180 deg) = 400" \
+  "$(mexec curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,4.0]}')" "400"
 chk "commanded state readable" \
   "$(mexec curl -s localhost:8080/read/slice_commanded | grep -o '"rz_deg":[0-9.]*' | cut -c1-14)" '"rz_deg":28.64'
 # reset = the '0' key: zeros sent

@@ -44,9 +44,10 @@ it to recon — it is published directly. Only ACQUISITION drives the recon serv
 direction cosines `read_dir[3]`, `phase_dir[3]`, `slice_dir[3]` (with
 `field_of_view[3]` and `patient_table_position[3]`). Together these fix where the
 slice sits and how it is oriented. Downstream consumers use them to place the image
-in 3D, and the marshal uses the latest one as the starting point of the first
-relative slice move of a scan (`/write/slice_delta`, `/write/file_slice_translation`;
-see [SLICE_CONTROL_HANDOFF.md](SLICE_CONTROL_HANDOFF.md)).
+in 3D; the marshal serves the latest one at `GET /read/slice_geometry` and the UI can
+feed it back as an absolute prescription (`/write/slice_target`). Relative slice moves
+do **not** start from it — they accumulate from zero like Andrew's `slice_control`
+(see [SLICE_CONTROL_HANDOFF.md](SLICE_CONTROL_HANDOFF.md)).
 
 ## Recon service contract
 

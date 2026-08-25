@@ -57,9 +57,17 @@ def main():
         clients += 1
         log("CONNECTED", peer=addr[0], n=clients)
         frame = 0
+        # --timeout also bounds a hung client: recv blocks at most 1 s per try.
+        conn.settimeout(1.0)
         with conn:
             while True:
-                raw = recv_exact(conn, SIZE)
+                if a.timeout and time.time() - t0 > a.timeout:
+                    log("TIMEOUT")
+                    return 2
+                try:
+                    raw = recv_exact(conn, SIZE)
+                except socket.timeout:
+                    continue
                 if raw is None:
                     log("DISCONNECTED", frames=frame)
                     break
