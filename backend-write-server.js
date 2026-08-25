@@ -158,6 +158,19 @@ app.post('/api/write/:clientId/:fileKey', async (req, res) => {
         backend_response: response.data
       });
     } catch (backendError) {
+      // A marshal REJECTION (4xx with a JSON body, e.g. a clamp or a
+      // left-handed slice frame) is not a connectivity failure: pass its
+      // status and body through so the UI can show the actual reason.
+      if (backendError.response && backendError.response.status >= 400 &&
+          backendError.response.status < 500) {
+        console.warn(`[Backend Write Server] Marshal rejected ${fileName}: ${backendError.response.status}`, backendError.response.data);
+        return res.status(backendError.response.status).json({
+          success: false,
+          message: `Marshal rejected write for ${fileName}`,
+          target_marshal: targetServer,
+          backend_response: backendError.response.data
+        });
+      }
       console.error(`✗ [Backend Write Server] Failed to reach ${isMriWrite ? 'MRI' : 'Robot'} marshal at ${targetServer}/write/${targetFileKey}`);
       console.error(`✗ [Backend Write Server] Error details:`, backendError.message);
 
