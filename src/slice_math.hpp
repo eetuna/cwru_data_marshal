@@ -154,10 +154,13 @@ inline Mat3 orthonormalize_rows(const Mat3& m) {
     return {r0, r1, r2};
 }
 
-// read x phase must point along slice; a left-handed frame has no
-// rotation-matrix (hence no Euler) representation.
-inline bool is_right_handed(const Geometry& g, double tol = 1e-3) {
-    return dot(cross(g.read_dir, g.phase_dir), g.slice_dir) > 1.0 - tol;
+// read x phase must point along slice (not against it); a left-handed frame
+// has no rotation-matrix (hence no Euler) representation. A sign test:
+// unit length / orthogonality are checked separately by the caller, and a
+// slightly de-normalised float32 header must not be misreported as
+// left-handed.
+inline bool is_right_handed(const Geometry& g) {
+    return dot(cross(g.read_dir, g.phase_dir), g.slice_dir) > 0.5;
 }
 
 // Direction vectors -> the six numbers. The vectors are taken as the rows of

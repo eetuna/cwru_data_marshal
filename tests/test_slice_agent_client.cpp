@@ -268,24 +268,41 @@ TEST_CASE("A new command wakes the client out of connect backoff", "[slice][clie
     client.stop();
 }
 
-TEST_CASE("clear() forgets the last command: no resend after reconnect", "[slice][client]") {
+TEST_CASE("A connection dropped while idle is re-established and the command re-sent",
+          "[slice][client]") {
+    FakeAgent agent;
+    auto cfg = fast_cfg(agent.port());
+    cfg.liveness_poll_ms = 200;
+    mrd::SliceAgentClient client(cfg);
+    client.start();
+    REQUIRE(client.submit(cmd(5.0)));
+    std::this_thread::sleep_for(400ms);   // resend window done
+    agent.kick_client();
+    REQUIRE(agent.wait_for([&] { return agent.disconnects() == 1; }));
+    // no new command: the liveness tick must notice, reconnect and re-send 5.0
+    REQUIRE(agent.wait_for([&] { return agent.connections() == 2; }, 5000ms));
+    REQUIRE(agent.wait_for([&] { auto cs = agent.commands(); return !cs.empty() && cs.back().tz == Catch::Approx(5.0); }));
+    CHECK(client.reconnect_count() == 1);
+    client.stop();
+}
+
+TEST_CASE("post() never blocks and wait() reports the verdict; zeros replace the command",
+          "[slice][client]") {
     FakeAgent agent;
     mrd::SliceAgentClient client(fast_cfg(agent.port()));
     client.start();
-    REQUIRE(client.submit(cmd(5.0)));
-    std::this_thread::sleep_for(400ms);
-    client.clear();
-    CHECK_FALSE(client.last_command().has_value());
-    agent.kick_client();
-    REQUIRE(agent.wait_for([&] { return agent.disconnects() == 1; }));
-    std::this_thread::sleep_for(1500ms);   // liveness tick would reconnect+resend if a command were kept
-    CHECK(agent.connections() == 1);
-    // a fresh command connects and is the only thing sent
-    const size_t before = agent.commands().size();
-    REQUIRE(client.submit(cmd(6.0)));
-    REQUIRE(agent.wait_for([&] { return agent.connections() == 2; }));
-    REQUIRE(agent.wait_for([&] { auto cs = agent.commands(); return cs.size() > before && cs.back().tz == Catch::Approx(6.0); }));
-    for (size_t i = before; i < agent.commands().size(); ++i) CHECK(agent.commands()[i].tz == Catch::Approx(6.0));
+    const auto t0 = std::chrono::steady_clock::now();
+    const uint64_t g1 = client.post(cmd(7.0));
+    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() < 20);
+    REQUIRE(g1 == 1);
+    CHECK(client.wait(g1));
+    // scan-start style zero: posted without waiting, replaces the last command
+    const uint64_t g2 = client.post(cmd(0.0));
+    REQUIRE(g2 == 2);
+    REQUIRE(agent.wait_for([&] { auto cs = agent.commands(); return !cs.empty() && cs.back().tz == 0.0; }));
+    REQUIRE(client.last_command().has_value());
+    CHECK(client.last_command()->tz == 0.0);
+    CHECK_FALSE(client.wait(0));   // 0 = never queued
     client.stop();
 }
 

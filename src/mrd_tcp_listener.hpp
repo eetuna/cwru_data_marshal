@@ -667,17 +667,11 @@ private:
                         state_.slice_geom.clear();
                         state_.latest_slice = -1;
                     }
-                    {
-                        // Likewise the slice-command state: a new scan starts
-                        // from zero (identity), never from where the previous
-                        // scan's slice was driven to. The client forgets its
-                        // last command too, so a reconnect cannot replay it.
-                        std::lock_guard<std::mutex> lk(state_.slice_state_mtx);
-                        state_.slice_state.reset();
-                        state_.slice_state_ts.clear();
-                        state_.slice_state_count = 0;
-                        state_.slice_agent_clear();
-                    }
+                    // Likewise the slice-command state: a new scan starts
+                    // from zero (identity), never from where the previous
+                    // scan's slice was driven to; zeros are sent to the agent
+                    // (non-blocking) so the old slice is not left published.
+                    state_.reset_slice_state();
                     if (state_.dump_enabled && state_.dump_recorder) {
                         // Pass the raw wire body for byte-exact
                         // METADATA_XML preservation in the spool.

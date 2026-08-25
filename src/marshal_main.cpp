@@ -569,15 +569,15 @@ int main(int argc, char** argv)
     if (slice_settings.enabled) {
         slice_agent = std::make_unique<mrd::SliceAgentClient>(slice_cfg);
         slice_agent->start();
-        // Hooks are safe after stop(): submit() returns false once stopping.
-        state.slice_agent_send = [&slice_agent](const slice_math::WireCommand& c) {
-            return slice_agent && slice_agent->submit(c);
+        // Hooks are safe after stop(): post() returns 0 and wait() false once stopping.
+        state.slice_agent_post = [&slice_agent](const slice_math::WireCommand& c) -> uint64_t {
+            return slice_agent ? slice_agent->post(c) : 0u;
+        };
+        state.slice_agent_wait = [&slice_agent](uint64_t gen) {
+            return slice_agent && slice_agent->wait(gen);
         };
         state.slice_agent_connected = [&slice_agent] {
             return slice_agent && slice_agent->connected();
-        };
-        state.slice_agent_clear = [&slice_agent] {
-            if (slice_agent) slice_agent->clear();
         };
         state.slice_agent_reconnects = [&slice_agent]() -> uint32_t {
             return slice_agent ? slice_agent->reconnect_count() : 0u;

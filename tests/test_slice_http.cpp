@@ -57,20 +57,32 @@ struct AgentStub {
     std::vector<slice_math::WireCommand> sent;
     bool deliver{true};
     bool connected{true};
-    int cleared{0};
+    uint64_t gen{0};
     void install(MarshalState& state, bool enabled = true) {
         state.dump_dir = unique_temp_dir();
         state.slice_agent_cfg.enabled = enabled;
-        state.slice_agent_send = [this](const slice_math::WireCommand& c) {
+        state.slice_agent_post = [this](const slice_math::WireCommand& c) -> uint64_t {
             sent.push_back(c);
-            return deliver;
+            return ++gen;
         };
+        state.slice_agent_wait = [this](uint64_t g) { return g != 0 && deliver; };
         state.slice_agent_connected = [this] { return connected; };
-        state.slice_agent_clear = [this] { ++cleared; };
     }
 };
 
 json nudge(double dir) { return {{"client_id", "client-webgl"}, {"values", {dir}}}; }
+
+// Install an axial slice at a known position as the "latest image header".
+void seed_header_geometry(MarshalState& state, uint16_t slice = 3,
+                          float x = 10.5f, float y = -20.f, float z = 30.f) {
+    ISMRMRD::ImageHeader hdr{};
+    hdr.slice = slice;
+    hdr.position[0] = x; hdr.position[1] = y; hdr.position[2] = z;
+    hdr.read_dir[0] = 1.f; hdr.phase_dir[1] = 1.f; hdr.slice_dir[2] = 1.f;
+    std::vector<uint8_t> wire(mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t), 0);
+    std::memcpy(wire.data(), &hdr, sizeof(hdr));
+    mrd::update_slice_geometry(state, wire.data(), wire.size());
+}
 
 } // namespace
 
@@ -137,9 +149,8 @@ TEST_CASE("Rotation sliders add degrees exactly like W/S, A/D, Q/E", "[http][sli
 
 TEST_CASE("slice_delta: in-plane translation follows rows 0/1; both fields at once", "[http][slice]") {
     MarshalState state; AgentStub agent; agent.install(state);
-    REQUIRE(post(state, "/write/slice_delta", {{"rotation_rad", {0, 0, 90 * slice_math::kDeg2Rad}}}).result()
-            == http::status::bad_request);   // 90 > 30 deg clamp
-    state.slice_agent_cfg.max_step_deg = 180.0;
+    REQUIRE(post(state, "/write/slice_delta", {{"rotation_rad", {0, 0, 200 * slice_math::kDeg2Rad}}}).result()
+            == http::status::bad_request);   // 200 > 180 deg clamp (the slider's range)
     REQUIRE(post(state, "/write/slice_delta", {{"rotation_rad", {0, 0, 90 * slice_math::kDeg2Rad}}}).result()
             == http::status::ok);
     // "read" step of 2 mm after a 90-degree roll: row 0 of buildRot(0,0,90)
@@ -170,6 +181,11 @@ TEST_CASE("Clamps: per-step and accumulated absolute", "[http][slice]") {
     CHECK(agent.sent.back().tz == Catch::Approx(300.0));
     // rejected delta is not cached
     CHECK(json::parse(get(state, "/read/slice_delta").body())["translation_mm"][2] == Catch::Approx(50.0));
+    // rejected legacy nudge is not cached either
+    REQUIRE(get(state, "/read/file_slice_translation").result() == http::status::no_content);
+    CHECK(post(state, "/write/file_slice_translation", nudge(1)).result() == http::status::bad_request);
+    CHECK(get(state, "/read/file_slice_translation").result() == http::status::no_content);
+    CHECK(agent.sent.size() == 6);
 }
 
 TEST_CASE("slice_reset zeroes and sends (the '0' key)", "[http][slice]") {
@@ -184,24 +200,79 @@ TEST_CASE("slice_reset zeroes and sends (the '0' key)", "[http][slice]") {
     CHECK(json::parse(res.body())["state"]["rx_deg"] == 0.0);
 }
 
-TEST_CASE("Scan start clears the state and the client's last command", "[http][slice]") {
+TEST_CASE("Scan start zeroes the state and tells the agent", "[http][slice]") {
     MarshalState state; AgentStub agent; agent.install(state);
     post(state, "/write/file_slice_translation", nudge(1));
+    post(state, "/write/slice_delta", {{"rotation_rad", {0.2, 0, 0}}});
     REQUIRE(get(state, "/read/slice_commanded").result() == http::status::ok);
-    {   // same reset the METADATA_XML handler runs
-        std::lock_guard<std::mutex> lk(state.slice_state_mtx);
-        state.slice_state.reset();
-        state.slice_state_ts.clear();
-        state.slice_state_count = 0;
-        state.slice_agent_clear();
-    }
-    CHECK(agent.cleared == 1);
+    REQUIRE(agent.sent.size() == 2);
+
+    state.reset_slice_state();   // what the METADATA_XML handler and close_scan() run
+    // zeros were posted to the agent so the old slice is not left published
+    REQUIRE(agent.sent.size() == 3);
+    CHECK(agent.sent[2].tz == 0.0);
+    CHECK(agent.sent[2].rx == 0.0);
     REQUIRE(get(state, "/read/slice_commanded").result() == http::status::no_content);
+    CHECK(json::parse(get(state, "/status").body())["slice_agent"]["commands_this_scan"] == 0);
+
+    // a reset with nothing sent this scan posts nothing
+    state.reset_slice_state();
+    CHECK(agent.sent.size() == 3);
+
     // next press starts from zero again
     post(state, "/write/file_slice_translation", nudge(1));
-    REQUIRE(agent.sent.size() == 2);
-    CHECK(agent.sent[1].tz == Catch::Approx(1.0));
+    REQUIRE(agent.sent.size() == 4);
+    CHECK(agent.sent[3].tz == Catch::Approx(1.0));
+    CHECK(agent.sent[3].rx == 0.0);
     CHECK(json::parse(get(state, "/read/slice_commanded").body())["count"] == 1);
+
+    // close_scan() (POST /close path) resets too
+    post(state, "/write/file_slice_translation", nudge(1));
+    state.close_scan();
+    CHECK(agent.sent.back().tz == 0.0);
+    REQUIRE(get(state, "/read/slice_commanded").result() == http::status::no_content);
+}
+
+TEST_CASE("GET /read/slice_geometry serves image-header geometry (display only)", "[http][slice][geometry]") {
+    MarshalState state; AgentStub agent; agent.install(state);
+    REQUIRE(get(state, "/read/slice_geometry").result() == http::status::no_content);
+
+    seed_header_geometry(state);   // slice 3 at (10.5, -20, 30), axial
+    auto res = get(state, "/read/slice_geometry");
+    REQUIRE(res.result() == http::status::ok);
+    auto geom = json::parse(res.body());
+    CHECK(geom["latest_slice"] == 3);
+    REQUIRE(geom["slices"].contains("3"));
+    CHECK(geom["slices"]["3"]["position"][0] == Catch::Approx(10.5));
+    CHECK(geom["slices"]["3"]["position"][1] == Catch::Approx(-20.0));
+    CHECK(geom["slices"]["3"]["slice_dir"][2] == Catch::Approx(1.0));
+    CHECK(geom["slices"]["3"].contains("ts"));
+
+    // Header geometry is NOT the base of a move: the first +1 still starts from zero
+    post(state, "/write/file_slice_translation", nudge(1));
+    REQUIRE(agent.sent.size() == 1);
+    CHECK(agent.sent[0].tz == Catch::Approx(1.0));
+    CHECK(agent.sent[0].tx == 0.0);
+
+    // scan start clears it (same reset the METADATA_XML handler runs)
+    {
+        std::lock_guard<std::mutex> lk(state.slice_geom_mtx);
+        state.slice_geom.clear();
+        state.latest_slice = -1;
+    }
+    REQUIRE(get(state, "/read/slice_geometry").result() == http::status::no_content);
+}
+
+TEST_CASE("Legacy endpoint rejections and empty caches", "[http][slice]") {
+    MarshalState state; AgentStub agent; agent.install(state);
+    REQUIRE(get(state, "/read/file_slice_translation").result() == http::status::no_content);
+    REQUIRE(get(state, "/read/slice_delta").result() == http::status::no_content);
+    http::request<http::string_body> bad{http::verb::post, "/write/file_slice_translation", 11};
+    bad.body() = "not json"; bad.prepare_payload();
+    CHECK(dispatch(bad, state).result() == http::status::bad_request);
+    CHECK(post(state, "/write/file_slice_translation", nudge(2)).result() == http::status::bad_request);
+    CHECK(post(state, "/write/file_slice_translation", {{"values", {1, 1}}}).result() == http::status::bad_request);
+    CHECK(agent.sent.empty());
 }
 
 TEST_CASE("Agent unreachable / channel off", "[http][slice]") {
@@ -219,7 +290,8 @@ TEST_CASE("Agent unreachable / channel off", "[http][slice]") {
     CHECK(agent.sent[1].tz == Catch::Approx(2.0));
 
     MarshalState off; AgentStub none; none.install(off, /*enabled=*/false);
-    off.slice_agent_send = [](const slice_math::WireCommand&) { return false; };
+    off.slice_agent_post = [](const slice_math::WireCommand&) { return uint64_t{0}; };
+    off.slice_agent_wait = [](uint64_t) { return false; };
     auto r2 = post(off, "/write/file_slice_translation", nudge(1));
     REQUIRE(r2.result() == http::status::ok);
     CHECK(json::parse(r2.body())["enabled"] == false);
@@ -255,6 +327,11 @@ TEST_CASE("slice_target: absolute geometry -> six numbers", "[http][slice][targe
     post(state, "/write/file_slice_translation", nudge(1));
     CHECK(agent.sent[1].tz == Catch::Approx(41.0));
 
+    // slightly de-normalised float32-style vectors are still right-handed
+    json fuzzy = valid;
+    fuzzy["read_dir"] = {0.9995, 0.0, 0.0}; fuzzy["phase_dir"] = {0.0, 0.9995, 0.0}; fuzzy["slice_dir"] = {0.0, 0.0, 0.9995};
+    REQUIRE(post(state, "/write/slice_target", fuzzy).result() == http::status::ok);
+
     // tilted target: the angles rebuild the direction rows
     const auto R = slice_math::build_rot_matrix(0.4, -0.2, 0.9);
     json tilted = {
@@ -282,7 +359,7 @@ TEST_CASE("slice_target: absolute geometry -> six numbers", "[http][slice][targe
     CHECK(json::parse(lres.body())["error"].get<std::string>().find("left-handed") != std::string::npos);
     json far = valid; far["position"] = {0.0, 0.0, 1000.0};
     CHECK(post(state, "/write/slice_target", far).result() == http::status::bad_request);
-    CHECK(agent.sent.size() == 3);   // nothing invalid reached the agent
+    CHECK(agent.sent.size() == 4);   // nothing invalid reached the agent
 }
 
 TEST_CASE("/status carries the slice_agent block", "[http][slice]") {

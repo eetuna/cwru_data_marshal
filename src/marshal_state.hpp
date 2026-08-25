@@ -155,8 +155,9 @@ struct MarshalState {
 
     // Slice geometry observed in image headers (position + orientation per
     // slice index), updated on every IMAGE from either lane, cleared at each
-    // scan start (METADATA_XML). Served at GET /read/slice_geometry and used
-    // as the base of the first relative slice move of a scan.
+    // scan start (METADATA_XML). Served at GET /read/slice_geometry (display /
+    // the UI's "Send Absolute Position"). Slice commands do NOT start from
+    // it — they accumulate from zero like slice_control (see slice_state).
     struct SliceGeometry {
         uint16_t slice{0};
         float position[3]{};
@@ -179,15 +180,16 @@ struct MarshalState {
     struct SliceAgentSettings {
         bool enabled{false};
         double max_step_mm{50.0};    // per-command translation clamp (each component)
-        double max_step_deg{30.0};   // per-command rotation clamp (each component)
+        double max_step_deg{180.0};  // per-command rotation clamp (the UI slider's range)
         double max_abs_mm{300.0};    // clamp on the accumulated |tx|,|ty|,|tz|
         double nudge_mm{1.0};        // legacy ±1 endpoint: one press = this many mm
     };
     SliceAgentSettings slice_agent_cfg;
 
-    // slice_state_mtx also serializes "accumulate + send" across HTTP
-    // threads so the agent always receives commands in the order the state
-    // was updated.
+    // slice_state_mtx serializes "accumulate + post" across HTTP threads so
+    // the agent receives commands in the order the state was updated. Only
+    // the non-blocking post happens under it; the wait for delivery is done
+    // after it is released.
     std::mutex slice_state_mtx;
     std::optional<slice_math::SliceState> slice_state;   // nullopt = nothing sent this scan
     std::string slice_state_ts;                          // ISO8601 of the last command
@@ -195,11 +197,25 @@ struct MarshalState {
 
     // Hooks set by main when the agent client is configured. Defaults:
     // disabled / not connected / nothing sent.
-    std::function<bool(const slice_math::WireCommand&)> slice_agent_send =
-        [](const slice_math::WireCommand&) { return false; };
+    std::function<uint64_t(const slice_math::WireCommand&)> slice_agent_post =
+        [](const slice_math::WireCommand&) { return uint64_t{0}; };   // 0 = not queued
+    std::function<bool(uint64_t)> slice_agent_wait = [](uint64_t) { return false; };
     std::function<bool()> slice_agent_connected = [] { return false; };
-    std::function<void()> slice_agent_clear = [] {};          // scan start: forget last cmd
     std::function<uint32_t()> slice_agent_reconnects = [] { return 0u; };
+
+    // Scan start / scan close: the six numbers go back to zero and the agent
+    // is told so (identity — what it publishes on connect anyway), so the
+    // previous scan's slice never survives into the next prescription. The
+    // post is non-blocking; safe on the scanner reader thread.
+    void reset_slice_state() {
+        std::lock_guard<std::mutex> lk(slice_state_mtx);
+        const bool had_state = slice_state.has_value();
+        slice_state.reset();
+        slice_state_ts.clear();
+        slice_state_count = 0;
+        if (had_state && slice_agent_cfg.enabled)
+            slice_agent_post(slice_math::command_from_state(slice_math::SliceState{}));
+    }
 
     // Pose cache
     PoseStore poses;
@@ -273,5 +289,6 @@ struct MarshalState {
         config_received.store(false);
         recon_failure_reported.store(false);
         recon_latest_group.reset();
+        reset_slice_state();
     }
 };

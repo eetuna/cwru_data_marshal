@@ -351,22 +351,31 @@ inline std::string check_abs_limit(const MarshalState& state, const slice_math::
     return {};
 }
 
-// Commit a new state and send it. Called with state.slice_state_mtx HELD by
-// the caller, which is what serializes accumulate+send across HTTP threads
-// (commands reach the agent in the order the state was updated). The state
-// is recorded even when not delivered: the client keeps the command and
-// sends it as soon as the agent is reachable.
-inline SliceSendResult commit_and_send_locked(MarshalState& state,
-                                              const slice_math::SliceState& s,
-                                              const std::string& ts)
+// Commit a new state and queue it for the agent. Called with
+// state.slice_state_mtx HELD by the caller, which is what serializes
+// accumulate+post across HTTP threads (commands reach the agent in the order
+// the state was updated). Only the non-blocking post happens here; the
+// caller releases the lock and then calls finish_send() to wait for the
+// verdict, so a slow/unreachable agent never stalls other lock holders
+// (scan-start reset, /status). The state is recorded even when not
+// delivered: the client keeps the command and sends it once reachable.
+inline uint64_t commit_locked(MarshalState& state, const slice_math::SliceState& s,
+                              const std::string& ts)
+{
+    state.slice_state = s;
+    state.slice_state_ts = ts;
+    ++state.slice_state_count;
+    return state.slice_agent_post(slice_math::command_from_state(s));
+}
+
+// Wait for the posted command's verdict (lock NOT held).
+inline SliceSendResult finish_send(MarshalState& state, const slice_math::SliceState& s,
+                                   uint64_t gen)
 {
     SliceSendResult r;
     r.enabled = state.slice_agent_cfg.enabled;
     r.state = s;
-    state.slice_state = s;
-    state.slice_state_ts = ts;
-    ++state.slice_state_count;
-    r.delivered = state.slice_agent_send(slice_math::command_from_state(s));
+    r.delivered = state.slice_agent_wait(gen);
     r.agent_connected = state.slice_agent_connected();
     return r;
 }
@@ -403,13 +412,18 @@ static auto apply_step_and_send(const http::request<Body>& req, MarshalState& st
     if (auto lim = check_step_limits(state, t_mm, r_deg); !lim.empty()) {
         return json_response(req, http::status::bad_request, {{"error", lim}});
     }
-    std::lock_guard<std::mutex> lk(state.slice_state_mtx);
-    slice_math::SliceState next = state.slice_state.value_or(slice_math::SliceState{});
-    slice_math::apply_step(next, t_mm, r_deg);
-    if (auto lim = check_abs_limit(state, next); !lim.empty()) {
-        return json_response(req, http::status::bad_request, {{"error", lim}});
+    slice_math::SliceState next;
+    uint64_t gen;
+    {
+        std::lock_guard<std::mutex> lk(state.slice_state_mtx);
+        next = state.slice_state.value_or(slice_math::SliceState{});
+        slice_math::apply_step(next, t_mm, r_deg);
+        if (auto lim = check_abs_limit(state, next); !lim.empty()) {
+            return json_response(req, http::status::bad_request, {{"error", lim}});
+        }
+        gen = commit_locked(state, next, ts);
     }
-    const auto sent = commit_and_send_locked(state, next, ts);
+    const auto sent = finish_send(state, next, gen);
     nlohmann::json out = slice_send_status_json(sent);
     out["file"] = file;
     for (auto& [k, v] : extra.items()) out[k] = v;
@@ -445,16 +459,17 @@ static auto handle_post_slice_translation(const http::request<Body>& req, Marsha
 
     const std::string ts = mrd::iso8601_now_ms();
     body["ts"] = ts;
-    {
-        std::lock_guard<std::mutex> lk(state.slice_translation_mtx);
-        state.latest_slice_translation_json = body.dump();
-    }
 
     // Legacy ±1 = one nudge along the slice normal (PgUp / PgDn).
     const double step = direction * state.slice_agent_cfg.nudge_mm;
-    return apply_step_and_send(req, state, "file_slice_translation",
-                               {0.0, 0.0, step}, {0.0, 0.0, 0.0}, ts,
-                               {{"direction", direction}});
+    auto res = apply_step_and_send(req, state, "file_slice_translation",
+                                   {0.0, 0.0, step}, {0.0, 0.0, 0.0}, ts,
+                                   {{"direction", direction}});
+    if (res.result() == http::status::ok) {   // cache only accepted requests
+        std::lock_guard<std::mutex> lk(state.slice_translation_mtx);
+        state.latest_slice_translation_json = body.dump();
+    }
+    return res;
 }
 
 // GET /read/slice_geometry — position/orientation per slice as observed in
@@ -554,7 +569,7 @@ static auto handle_post_slice_target(const http::request<Body>& req, MarshalStat
     }
     // A left-handed frame has no rotation-matrix (hence no Euler)
     // representation; sending it would silently mirror the slice.
-    if (!slice_math::is_right_handed(geom, kTol)) {
+    if (!slice_math::is_right_handed(geom)) {
         return json_response(req, http::status::bad_request,
             {{"error", "left-handed geometry: read_dir x phase_dir must equal slice_dir"}});
     }
@@ -564,16 +579,18 @@ static auto handle_post_slice_target(const http::request<Body>& req, MarshalStat
     }
 
     const std::string ts = mrd::iso8601_now_ms();
-    nlohmann::json payload = geometry_to_json(geom);
-    payload["type"] = "slice_target";
-    payload["ts"] = ts;
+    uint64_t gen;
     {
-        std::lock_guard<std::mutex> lk(state.slice_target_mtx);
+        std::lock_guard<std::mutex> lk(state.slice_state_mtx);
+        gen = commit_locked(state, next, ts);
+        // Cache under the same lock so /read/slice_target and
+        // /read/slice_commanded cannot disagree on ordering.
+        nlohmann::json payload = geometry_to_json(geom);
+        payload["ts"] = ts;
+        std::lock_guard<std::mutex> tlk(state.slice_target_mtx);
         state.latest_slice_target_json = payload.dump();
     }
-
-    std::lock_guard<std::mutex> lk(state.slice_state_mtx);
-    const auto sent = commit_and_send_locked(state, next, ts);
+    const auto sent = finish_send(state, next, gen);
     nlohmann::json out = slice_send_status_json(sent);
     out["file"] = "slice_target";
     return json_response(req, http::status::ok, out);
@@ -648,9 +665,8 @@ static auto handle_post_slice_delta(const http::request<Body>& req, MarshalState
     const std::string ts = mrd::iso8601_now_ms();
     auto res = apply_step_and_send(req, state, "slice_delta", t_mm, r_deg, ts,
                                    nlohmann::json::object());
-    if (res.result() == http::status::ok) {
+    if (res.result() == http::status::ok) {   // cache only accepted requests
         nlohmann::json payload;
-        payload["type"] = "slice_delta";
         payload["translation_mm"] = {t[0], t[1], t[2]};
         payload["rotation_rad"] = {r[0], r[1], r[2]};
         payload["ts"] = ts;
@@ -669,8 +685,12 @@ static auto handle_post_slice_reset(const http::request<Body>& req, MarshalState
     -> http::response<http::string_body>
 {
     const std::string ts = mrd::iso8601_now_ms();
-    std::lock_guard<std::mutex> lk(state.slice_state_mtx);
-    const auto sent = commit_and_send_locked(state, slice_math::SliceState{}, ts);
+    uint64_t gen;
+    {
+        std::lock_guard<std::mutex> lk(state.slice_state_mtx);
+        gen = commit_locked(state, slice_math::SliceState{}, ts);
+    }
+    const auto sent = finish_send(state, slice_math::SliceState{}, gen);
     nlohmann::json out = slice_send_status_json(sent);
     out["file"] = "slice_reset";
     return json_response(req, http::status::ok, out);

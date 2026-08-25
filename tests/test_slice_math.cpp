@@ -170,7 +170,7 @@ TEST_CASE("slice_target: direction rows -> angles -> same rows", "[slice][target
     for (int i = 0; i < 2000; ++i) {
         const Mat3 R = build_rot_matrix(full(rng), half(rng), full(rng));
         Geometry g; g.position = {1, 2, 3}; g.read_dir = R[0]; g.phase_dir = R[1]; g.slice_dir = R[2];
-        REQUIRE(is_right_handed(g, 1e-9));
+        REQUIRE(is_right_handed(g));
         const SliceState s = state_from_geometry(g);
         CHECK(s.t[0] == 1.0);
         CHECK(max_abs_diff(rot_of(s), R) < 1e-9);
