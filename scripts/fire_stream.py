@@ -100,6 +100,9 @@ def main():
     p.add_argument("--matrix", type=int, default=128)
     p.add_argument("--slices", type=int, default=1)
     p.add_argument("--coils", type=int, default=8)
+    p.add_argument("--orient", choices=["tra", "sag", "cor"], default="tra",
+                   help="slice orientation: transverse (default), sagittal, coronal — "
+                        "run one scan per orientation to test the viewer's 3-plane history")
     args = p.parse_args()
 
     matrix, coils, slices = args.matrix, args.coils, args.slices
@@ -120,7 +123,19 @@ def main():
     acq.resize(matrix, coils)
     acq.available_channels = coils
     acq.center_sample = matrix // 2
-    acq.read_dir[0] = 1.0; acq.phase_dir[1] = 1.0; acq.slice_dir[2] = 1.0
+    # Orientation triads (patient coordinates): read, phase, slice-normal.
+    # Each is right-handed (cross(read, phase) == slice) — the viewer's
+    # geometry validation rejects left-handed triads as invalid geometry.
+    ORIENTS = {
+        "tra": ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+        "sag": ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
+        "cor": ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+    }
+    read_dir, phase_dir, slice_dir = ORIENTS[args.orient]
+    for i in range(3):
+        acq.read_dir[i] = read_dir[i]
+        acq.phase_dir[i] = phase_dir[i]
+        acq.slice_dir[i] = slice_dir[i]
 
     period = 1.0 / args.fps if args.fps > 0 else 0.0
     counter = 0
@@ -128,7 +143,7 @@ def main():
     last_log = 0.0
     t_start = time.time()
     print(f"streaming mode={args.mode} fps={args.fps} matrix={matrix} slices={slices} "
-          f"-> {args.address}:{args.port}", flush=True)
+          f"orient={args.orient} -> {args.address}:{args.port}", flush=True)
     try:
         while args.frames == 0 or frame < args.frames:
             t0 = time.time()
@@ -171,9 +186,9 @@ def main():
                 im = ismrmrd.Image.from_array(vol, transpose=False)
                 im.image_index = frame
                 im.field_of_view = (300.0, 300.0, 6.0 * slices)
-                im.read_dir = (1.0, 0.0, 0.0)
-                im.phase_dir = (0.0, 1.0, 0.0)
-                im.slice_dir = (0.0, 0.0, 1.0)
+                im.read_dir = read_dir
+                im.phase_dir = phase_dir
+                im.slice_dir = slice_dir
                 if frame == 0:
                     print(f"  image payload shape={im.data.shape} "
                           f"(matrix_size={tuple(im.matrix_size)}, channels={im.channels})", flush=True)

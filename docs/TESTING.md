@@ -161,6 +161,36 @@ ls session-data/dump/from_reconstruction/ | wc -l
 curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/image/latest   # 404
 ```
 
+## Regression checks — 2026-08-18 scanner-test notes
+
+Each check maps to a symptom reported at the August 2026 scanner test (infinite
+re-render after the scan, jittering/black multislice panels, "frozen during
+the scan then a burst", slice-count changes ignored, 3-plane view contents,
+"recon does nothing"). Live mode, bundled test recon, browser optional — every
+expectation below is checkable with `curl`. `S` is the streamer prefix:
+
+```bash
+S='docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest python3 /scripts/fire_stream.py --address mri-marshal --port 9100 --mode kspace --fps 5 --matrix 64'
+G='curl -s localhost:8080/image/latest'                       # marshal publish counter
+T='curl -s localhost:3000/api/read/client-webgl/0'             # what the viewer polls (2D)
+```
+
+| Check | Run | Expect |
+|---|---|---|
+| **No re-render loop when idle** | after any scan: `$T \| python3 -c "import sys,json;print(json.load(sys.stdin)['timestamp'])"` three times, 1 s apart | the same token every time (e.g. `0:18 0:18 0:18`). Pre-fix this changed on every poll — the "infinite loop". |
+| **3D feed quiet when idle** | `curl -s localhost:3000/api/read/client-webgl/1 \| md5sum` twice | identical (served from cache; no repeated HDF5 reads / "Error loading 3D volume" churn) |
+| **Updates *during* a multislice scan** | `eval $S --slices 3 --frames 24 --fps 3 &` then `for i in 1 2 3 4 5 6 7; do sleep 1; $G; done` | `generation` climbs while the scan runs (e.g. 48 50 53 57 60 63) — not flat until the end. Pre-fix: frozen during the scan, burst after. |
+| **Parallel same-orientation stack, no black planes** | `eval $S --slices 3 --frames 5` then `$T \| python3 -c "import sys,json;d=json.load(sys.stdin);print(len(d['slices']),[max(s['values']) for s in d['slices']])"` | `3 [4095, 4095, 4095]` — three slices, all non-black; the 3-D panel shows all three |
+| **Slice count changes between scans** | `eval $S --slices 2 --frames 3`; `$G`; `eval $S --slices 4 --frames 3`; `$G` | snapshot goes 2 → 4 slices (`docker exec cwru-webgl-client python3 -c "import h5py;print(h5py.File('/latest/live/from_reconstruction/latest_image.h5','r')['dataset/image_0/data'].shape)"`), counter advanced |
+| **3-plane view: last 3 distinct planes, across scans** | `eval $S --orient tra --frames 5`; `eval $S --orient sag --frames 5`; `eval $S --orient cor --frames 5` | after the third scan the viewer's 3-D panel shows one transverse, one sagittal, one coronal plane (three separate scans!). Then `eval $S --orient sag --frames 5` again: only the sagittal plane refreshes; the other two stay — "one new slice and two older ones". |
+| **Nothing there yet** | `curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/image/latest` on a fresh marshal | `204` — not an error |
+| **"Recon does nothing"** | start with an unreachable recon: `RECON_HOST=10.255.255.1 docker compose up -d --force-recreate mri-marshal`, run any k-space scan | `docker logs cwru-mri-marshal \| grep -i recon` shows `Failed to connect to recon at 10.255.255.1:9002 …`; `$G` returns `"error":true` with the `latest_error.png` marker; `/health` stays 200. This is the signature to look for when the recon "does nothing" at the scanner (wrong/unset `RECON_HOST`). |
+
+Not covered here (needs a real browser / console): the zoom-pan death from
+the GPU texture leak (fixed by pairing every texture/buffer create with a
+delete), and true mid-scan slice-count changes (only successive scans can be
+simulated). The full matrix was last run 2026-08-25: 8/8 pass.
+
 ## Slice command channel (marshal → slice_agent)
 
 UI slice commands go to the scanner-side `slice_agent --listen` (TCP 9270,

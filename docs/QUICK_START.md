@@ -275,6 +275,25 @@ Knobs for 5b–5d: `--fps N` (pace) · `--frames N` (how many; 0 = until Ctrl-C)
 
 ---
 
+**5g. Three orthogonal planes — the 3-D multiplane check.** The 3-D panel
+keeps the **last 3 distinct slice planes, across scans**: run three short
+scans, one per orientation, and all three stay visible together.
+```bash
+for o in tra sag cor; do
+  docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
+    python3 /scripts/fire_stream.py --address mri-marshal --port 9100 \
+    --mode kspace --fps 5 --frames 10 --matrix 96 --orient $o
+done
+```
+> You'll see: after the first scan one plane; after the second, **two** (the
+> first one stays); after the third, one transverse + one sagittal + one
+> coronal plane crossing in the 3-D panel, and the three 2-D panels showing
+> one of each. Now run the loop body once more with `--orient sag`: only the
+> sagittal plane refreshes — transverse and coronal stay put. A parallel
+> stack (`--slices 3`, one orientation) shows all three parallel slices
+> instead. Full pass/fail matrix for the August-2026 scanner-test symptoms:
+> [TESTING.md](TESTING.md#regression-checks--2026-08-18-scanner-test-notes).
+
 ## Step 6 — Check the results
 
 Live mode (ports = yours if remapped):
