@@ -1,151 +1,119 @@
 #!/bin/bash
-# Build all CWRU Data Marshal Docker images
-# This script builds images from the source branches using worktrees
+# Build all CWRU Data Marshal Docker images.
+#
+# Each image is built from a CLEAN EXPORT (git archive) of a code branch at a
+# specific commit — never from a working folder. That makes every image
+# reproducible ("Building from: <branch> @ <commit>" is printed and is the
+# truth) and removes the failure modes of the old worktree-based flow:
+# stale checkouts silently rebuilt, `git pull` on main not moving the code
+# branches, and one clone used from two paths (WSL host + devcontainer)
+# wrecking each other's worktree registrations.
+#
+# Which commit is built, per branch: the cwru-mercis tip if reachable and
+# not behind the local branch; otherwise the local branch (with a warning).
+#
+# Local iteration (build uncommitted code on purpose):
+#   MRI_BUILD_DIR=/path/to/marshal/checkout ./scripts/build-client-images.sh
+#   ROBOT_BUILD_DIR=/path/to/robot/checkout ./scripts/build-client-images.sh
+# The script then builds that folder as-is and says so loudly.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
 
 echo "============================================"
 echo "  CWRU Data Marshal - Build Docker Images"
 echo "============================================"
 echo ""
 
-# Clean up any stale worktree registrations
-git worktree prune
-
-# Ensure required branches exist (fetch directly from upstream repo)
 MRI_BRANCH="${MRI_BRANCH:-mri-data-marshal}"
 ROBOT_BRANCH="${ROBOT_BRANCH:-robot_data_marshal_with_catheter_system_components}"
-UPSTREAM_REPO="https://github.com/cwru-mercis/cwru_data_marshal.git"
+UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/cwru-mercis/cwru_data_marshal.git}"
 
-echo "Checking required branches..."
-for BRANCH in "$MRI_BRANCH" "$ROBOT_BRANCH"; do
-    if ! git rev-parse --verify "$BRANCH" >/dev/null 2>&1; then
-        echo "Branch '$BRANCH' not found locally, fetching from cwru-mercis..."
-        if ! git fetch "$UPSTREAM_REPO" "$BRANCH:$BRANCH" 2>/dev/null; then
-            echo ""
-            echo "  ✗ ERROR: Failed to fetch branch '$BRANCH'"
-            echo ""
-            echo "  This repository is private. You need:"
-            echo "    1. Access to https://github.com/cwru-mercis/cwru_data_marshal"
-            echo "    2. GitHub authentication configured (SSH key or personal access token)"
-            echo ""
-            echo "  To set up SSH authentication:"
-            echo "    https://docs.github.com/en/authentication/connecting-to-github-with-ssh"
-            echo ""
-            exit 1
-        fi
+# Never hang on an interactive credential prompt; an unreachable/unauthorised
+# remote just means "build the local branch".
+export GIT_TERMINAL_PROMPT=0
+
+# Print the commit to build for a branch (stdout); diagnostics go to stderr.
+resolve_commit() {
+    local branch="$1"
+    local remote_sha="" local_sha=""
+    if git fetch --quiet "$UPSTREAM_REPO" "$branch" 2>/dev/null; then
+        remote_sha="$(git rev-parse FETCH_HEAD)"
     fi
-done
-
-# Check if worktrees exist, create if needed
-MRI_WORKTREE="$PROJECT_ROOT/.worktrees/mri_data_marshal"
-ROBOT_WORKTREE="$PROJECT_ROOT/.worktrees/robot_data_marshal"
-
-# Validate existing worktrees before reuse. An orphaned directory (gitdir
-# record pruned but files left behind) or a worktree checked out to a
-# different branch would otherwise be used silently and produce stale
-# builds. Abort with a clear instruction instead.
-check_worktree() {
-    local wt="$1"
-    local want_branch="$2"
-    if [ ! -d "$wt" ]; then
-        return 0
+    if git rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
+        local_sha="$(git rev-parse "refs/heads/$branch")"
     fi
-    local got_branch
-    if ! got_branch="$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null)"; then
-        echo ""
-        echo "  ✗ ERROR: $wt exists but is not a valid git worktree (orphaned)."
-        echo "           Delete it and rerun: rm -rf $wt"
+    if [ -z "$remote_sha" ] && [ -z "$local_sha" ]; then
+        echo "" >&2
+        echo "  ✗ ERROR: branch '$branch' is neither reachable at $UPSTREAM_REPO nor present locally." >&2
+        echo "           This repository is private: you need access to cwru-mercis and GitHub" >&2
+        echo "           authentication configured (SSH key or personal access token)." >&2
         exit 1
     fi
-    if [ "$got_branch" != "$want_branch" ]; then
-        echo ""
-        echo "  ✗ ERROR: $wt is on branch '$got_branch' but this script expects '$want_branch'."
-        echo "           Either delete it and rerun (rm -rf $wt) or check out the expected"
-        echo "           branch manually inside that worktree."
-        exit 1
+    if [ -z "$remote_sha" ]; then
+        echo "  ! cwru-mercis unreachable; building local '$branch'." >&2
+        echo "$local_sha"; return 0
     fi
-}
-
-check_worktree "$MRI_WORKTREE" "$MRI_BRANCH"
-check_worktree "$ROBOT_WORKTREE" "$ROBOT_BRANCH"
-
-# Refresh a build worktree to the remote branch tip. Without this, a rerun
-# of the script silently rebuilt whatever the worktree held from the LAST
-# build — `git pull` on main does not move the code branches, so users
-# rebuilt stale code and reported "no new features in the images". If the
-# remote is unreachable, build the current local state and say so.
-refresh_worktree() {
-    local wt="$1"
-    local branch="$2"
-    if git -C "$wt" pull --ff-only 2>/dev/null; then
-        return 0
+    if [ -z "$local_sha" ] || git merge-base --is-ancestor "$local_sha" "$remote_sha" 2>/dev/null; then
+        echo "$remote_sha"; return 0
     fi
-    if git -C "$wt" fetch "$UPSTREAM_REPO" "$branch" 2>/dev/null; then
-        if ! git -C "$wt" merge --ff-only FETCH_HEAD 2>/dev/null; then
-            echo "  ! $wt has local commits/divergence; building its current state."
-        fi
+    if git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+        echo "  ! Local '$branch' is AHEAD of cwru-mercis (unpushed commits); building local." >&2
     else
-        echo "  ! Remote unreachable; building current local state of $wt."
+        echo "  ! Local '$branch' and cwru-mercis have DIVERGED; building local. Push/merge to reconcile." >&2
     fi
+    echo "$local_sha"
 }
 
-# Resolve the directory to build a branch from. Normal case: the .worktrees/
-# checkout (created on demand). Dev-machine case: the branch is already
-# checked out in some other worktree — `git worktree add` would refuse, so
-# build from that checkout IF it is clean; a dirty tree would bake
-# uncommitted code into an image, which is exactly the staleness/confusion
-# this script tries to prevent, so abort instead.
-resolve_build_dir() {
-    local wt="$1"
-    local branch="$2"
-    if [ -d "$wt" ]; then
-        refresh_worktree "$wt" "$branch" >&2
-        echo "$wt"
-        return 0
-    fi
-    if git worktree add "$wt" "$branch" >&2 2>/dev/null; then
-        echo "$wt"
-        return 0
-    fi
-    local existing
-    existing="$(git worktree list --porcelain | awk -v b="refs/heads/$branch" '
-        $1 == "worktree" { wt = $2 } $1 == "branch" && $2 == b { print wt }')"
-    if [ -n "$existing" ]; then
-        if [ -n "$(git -C "$existing" status --porcelain)" ]; then
-            echo "  ✗ ERROR: branch '$branch' is checked out at $existing with uncommitted" >&2
-            echo "           changes. Commit/stash them, or free the branch, then rerun." >&2
-            exit 1
-        fi
-        echo "  ! Branch '$branch' already checked out at $existing (clean) — building from there." >&2
-        echo "$existing"
-        return 0
-    fi
-    echo "  ✗ ERROR: could not create a worktree for '$branch' and found no existing checkout." >&2
-    exit 1
+# Export a commit into a fresh directory (clean tree: no build artefacts, no
+# uncommitted edits, no stray files).
+export_commit() {
+    local sha="$1" dest="$2"
+    rm -rf "$dest"
+    mkdir -p "$dest"
+    git archive --format=tar "$sha" | tar -x -C "$dest"
 }
 
-MRI_BUILD_DIR="$(resolve_build_dir "$MRI_WORKTREE" "$MRI_BRANCH")"
-ROBOT_BUILD_DIR="$(resolve_build_dir "$ROBOT_WORKTREE" "$ROBOT_BRANCH")"
+BUILD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cwru-build.XXXXXX")"
+trap 'rm -rf "$BUILD_ROOT"' EXIT
+
+echo "Resolving source commits..."
+if [ -n "${MRI_BUILD_DIR:-}" ]; then
+    echo "  ! MRI_BUILD_DIR set: building the marshal from WORKING FOLDER $MRI_BUILD_DIR (uncommitted changes included)."
+    MRI_DESC="working folder $MRI_BUILD_DIR"
+else
+    MRI_SHA="$(resolve_commit "$MRI_BRANCH")"
+    MRI_BUILD_DIR="$BUILD_ROOT/mri"
+    export_commit "$MRI_SHA" "$MRI_BUILD_DIR"
+    MRI_DESC="$(git log --oneline -1 "$MRI_SHA")"
+fi
+if [ -n "${ROBOT_BUILD_DIR:-}" ]; then
+    echo "  ! ROBOT_BUILD_DIR set: building robot/webgl from WORKING FOLDER $ROBOT_BUILD_DIR (uncommitted changes included)."
+    ROBOT_DESC="working folder $ROBOT_BUILD_DIR"
+else
+    ROBOT_SHA="$(resolve_commit "$ROBOT_BRANCH")"
+    ROBOT_BUILD_DIR="$BUILD_ROOT/robot"
+    export_commit "$ROBOT_SHA" "$ROBOT_BUILD_DIR"
+    ROBOT_DESC="$(git log --oneline -1 "$ROBOT_SHA")"
+fi
 
 echo ""
 echo "Building from:"
-echo "  $MRI_BRANCH @ $(git -C "$MRI_BUILD_DIR" log --oneline -1)"
-echo "  $ROBOT_BRANCH @ $(git -C "$ROBOT_BUILD_DIR" log --oneline -1)"
+echo "  $MRI_BRANCH @ $MRI_DESC"
+echo "  $ROBOT_BRANCH @ $ROBOT_DESC"
+echo ""
 
 echo "[1/3] Building MRI marshal + recon..."
 echo "  - cwru/mri-marshal"
 echo "  - fire-python (python-ismrmrd-server recon)"
 echo ""
 
-cd "$MRI_BUILD_DIR"
-
 # Build MRI Marshal
 echo "Building cwru/mri-marshal..."
-docker build -f "$PROJECT_ROOT/docker/Dockerfile.mri" -t cwru/mri-marshal:latest .
+docker build -f "$PROJECT_ROOT/docker/Dockerfile.mri" -t cwru/mri-marshal:latest "$MRI_BUILD_DIR"
 
 # Build recon = python-ismrmrd-server. Build context is the server root (its
 # Dockerfile COPYs the whole source tree); -f points at docker/Dockerfile inside it.
@@ -160,19 +128,17 @@ echo "  - cwru/robot-clients"
 echo "  - cwru/webgl-client"
 echo ""
 
-cd "$ROBOT_BUILD_DIR"
-
 # Build Robot Marshal
 echo "Building cwru/robot-marshal..."
-docker build -f "$PROJECT_ROOT/docker/Dockerfile.robot" -t cwru/robot-marshal:latest .
+docker build -f "$PROJECT_ROOT/docker/Dockerfile.robot" -t cwru/robot-marshal:latest "$ROBOT_BUILD_DIR"
 
 # Build Robot Clients
 echo "Building cwru/robot-clients..."
-docker build -f "$PROJECT_ROOT/docker/Dockerfile.robot-clients" -t cwru/robot-clients:latest .
+docker build -f "$PROJECT_ROOT/docker/Dockerfile.robot-clients" -t cwru/robot-clients:latest "$ROBOT_BUILD_DIR"
 
 # Build WebGL Client (front-end UI)
 echo "Building cwru/webgl-client..."
-docker build -f "$PROJECT_ROOT/docker/Dockerfile.webgl-client" -t cwru/webgl-client:latest .
+docker build -f "$PROJECT_ROOT/docker/Dockerfile.webgl-client" -t cwru/webgl-client:latest "$ROBOT_BUILD_DIR"
 
 echo ""
 echo "[3/3] Verifying images..."
@@ -199,16 +165,14 @@ echo ""
 if [ "$ALL_GOOD" = true ]; then
     echo "============================================"
     echo "  Build complete! All 5 images ready."
+    echo "  Built from:"
+    echo "    $MRI_BRANCH @ $MRI_DESC"
+    echo "    $ROBOT_BRANCH @ $ROBOT_DESC"
+    echo "  Next: docker compose up -d --force-recreate"
     echo "============================================"
-    echo ""
-    echo "Next steps:"
-    echo "  1. Run with:    docker compose up -d   (MARSHAL_DUMP=--dump for dump mode)"
-    echo "  2. Export with: ./scripts/export_usb.sh /path/to/usb"
-    echo ""
-    exit 0
 else
     echo "============================================"
-    echo "  ERROR: Some images failed to build"
+    echo "  Build finished with missing images — see above."
     echo "============================================"
     exit 1
 fi

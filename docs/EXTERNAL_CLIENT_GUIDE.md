@@ -311,12 +311,11 @@ docker logs cwru-robot-marshal
 docker logs cwru-mri-marshal | grep -i recon
 
 # Rebuilt the images but new features are missing? The build script prints
-# "Building from: <branch> @ <commit>" — compare against GitHub. Stale build
-# worktrees are the usual cause (git pull only updates main, not the code
-# branches); rerunning ./scripts/build-client-images.sh refreshes them. Then
-# recreate containers — plain `up -d` keeps old containers on old images:
-git -C .worktrees/mri_data_marshal log --oneline -1
-git -C .worktrees/robot_data_marshal log --oneline -1
+# "Building from: <branch> @ <commit>" — compare that commit against GitHub
+# (it builds a clean export of the branch; git pull on main never changes
+# what is built). If the commit is right but the UI is old, the containers
+# were not recreated — plain `up -d` keeps old containers on old images:
+git ls-remote https://github.com/cwru-mercis/cwru_data_marshal.git mri-data-marshal robot_data_marshal_with_catheter_system_components
 docker compose up -d --force-recreate
 
 # Ports listening?

@@ -5,8 +5,9 @@
 #
 # Rebuild first if you changed code:
 #   ./scripts/build-client-images.sh      # builds the 5 images incl. fire-python
-# (marshal code lives in .worktrees/mri_data_marshal; webgl/robot in
-#  .worktrees/robot_data_marshal — the build script builds from those worktrees.)
+# (marshal code lives on the mri-data-marshal branch; webgl/robot on the
+#  robot_data_marshal_with_catheter_system_components branch — the build
+#  script exports each at its commit and builds from that export.)
 #
 # HTTP checks run via `docker exec ... curl` so this works from any shell
 # (published ports land on the docker host, not necessarily your $PWD host).

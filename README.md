@@ -64,9 +64,11 @@ robot clients <──HTTP :8081──> robot-marshal ──> webgl-client
 ./scripts/export_usb.sh /path/to/usb             # docker save + compose file for offline transfer
 ```
 
-Source lives in git worktrees under `.worktrees/` (built into the images):
-`mri_data_marshal` (MRI marshal + recon) and `robot_data_marshal` (robot marshal,
-clients, webgl). The build script fast-forwards these from GitHub on every run
-and prints the commit each image is built from — `git pull` alone does NOT
-update them (code lives on the code branches, not `main`). After rebuilding,
-restart with `docker compose up -d --force-recreate`.
+The code lives on two branches, not on `main`: `mri-data-marshal` (MRI marshal +
+recon) and `robot_data_marshal_with_catheter_system_components` (robot marshal,
+clients, webgl). The build script fetches each from GitHub, exports it at its
+commit (a clean copy — never your working folder) and prints
+`Building from: <branch> @ <commit>` — so `git pull` alone never affects what
+gets built, and the printed line is the truth. To build uncommitted local code
+on purpose: `MRI_BUILD_DIR=<checkout>` / `ROBOT_BUILD_DIR=<checkout>`. After
+rebuilding, restart with `docker compose up -d --force-recreate`.

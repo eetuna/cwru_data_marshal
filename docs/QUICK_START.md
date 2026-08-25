@@ -20,12 +20,15 @@ Builds the 5 images the stack runs: `cwru/mri-marshal`, `fire-python`
 `cwru/webgl-client`. First build takes ~10–20 min (downloads + compiles);
 rebuilds are fast. Success ends with `Build complete! All 5 images ready.`
 
-> **Getting code updates:** rerun this script — it fast-forwards its build
-> worktrees from GitHub and prints the exact commit each image is built from
-> (check that line if a feature seems missing). Note that `git pull` alone
-> does NOT update the code: `main` carries only docs/compose, the code lives
-> on the `mri-data-marshal` and robot branches, which this script refreshes
-> for you. After rebuilding, restart the stack with
+> **Getting code updates:** just rerun this script. It fetches the two code
+> branches from GitHub, builds each from a clean export at its commit (never
+> from a working folder), and prints `Building from: <branch> @ <commit>` —
+> check that line if a feature seems missing. `git pull` alone does NOT
+> update the code: `main` carries only docs/compose; the code lives on the
+> `mri-data-marshal` and robot branches, which the script fetches itself.
+> Developers testing uncommitted changes: `MRI_BUILD_DIR=<checkout>` or
+> `ROBOT_BUILD_DIR=<checkout>` in front of the command builds that folder
+> as-is (the script says so loudly). After rebuilding, restart the stack with
 > `docker compose up -d --force-recreate` — a plain `up -d` keeps the old
 > containers running on the old images.
 
