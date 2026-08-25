@@ -5,8 +5,6 @@
 #
 # Rebuild first if you changed code:
 #   ./scripts/build-client-images.sh      # builds the 5 images incl. fire-python
-# Tests [5]/[6] need the slice-agent code, which (until merged) lives on
-#   MRI_BRANCH=feat/slice-agent-client ROBOT_BRANCH=feat/slice-agent-client-webgl ./scripts/build-client-images.sh
 # (marshal code lives in .worktrees/mri_data_marshal; webgl/robot in
 #  .worktrees/robot_data_marshal — the build script builds from those worktrees.)
 #

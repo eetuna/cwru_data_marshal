@@ -169,11 +169,10 @@ UI slice commands go to the scanner-side `slice_agent --listen` (TCP 9270,
 without a scanner.
 
 **A. Mock agent in the compose stack** (what `./scripts/test-modes.sh` does as
-tests [5]/[6]; note the marshal image must be built from the slice-agent
-branches — `MRI_BRANCH=feat/slice-agent-client ROBOT_BRANCH=feat/slice-agent-client-webgl ./scripts/build-client-images.sh` — until they are merged; the
-script inlines the mock with `python3 -c "$(cat scripts/slice_agent_mock.py)"`
-because a devcontainer's `$PWD` bind mount is invisible to the docker host —
-use that form too if the mount below shows an empty `/scripts`):
+tests [5]/[6]; the script inlines the mock with
+`python3 -c "$(cat scripts/slice_agent_mock.py)"` because a devcontainer's
+`$PWD` bind mount is invisible to the docker host — use that form too if the
+mount below shows an empty `/scripts`):
 ```bash
 docker run -d --rm --name slice-agent-mock --network cwru-demo-net \
   -v "$PWD/scripts:/scripts" fire-python:latest \

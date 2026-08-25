@@ -61,7 +61,6 @@ robot clients <──HTTP :8081──> robot-marshal ──> webgl-client
 
 ```bash
 ./scripts/build-client-images.sh                 # build (or rebuild) the cwru/* images
-# slice control (until merged): MRI_BRANCH=feat/slice-agent-client ROBOT_BRANCH=feat/slice-agent-client-webgl ./scripts/build-client-images.sh
 ./scripts/export_usb.sh /path/to/usb             # docker save + compose file for offline transfer
 ```
 
