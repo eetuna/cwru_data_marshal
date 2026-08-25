@@ -28,7 +28,6 @@ Six absolute numbers, `tx ty tz` (mm) and `rx ry rz` (degrees), start at zero:
 | Rotation Y slider, *d*° | D / A | `ry += d` |
 | Rotation Z slider, *d*° | E / Q | `rz += d` |
 | (`slice_delta` in-plane) | arrows | `(tx,ty,tz) += step × row 0 / row 1` |
-| `POST /write/slice_reset` | `0` | all six = 0 |
 | "Send Absolute Position" (`slice_target`) | — | six numbers computed from the header pose (see below) |
 
 After every change the six totals are sent as one 56-byte `SliceCommand`;
@@ -48,9 +47,7 @@ SLICE_AGENT_HOST=<MARS ip> docker compose up -d
 ```
 
 Unset/empty = channel off (endpoints still cache; answer `"enabled": false`).
-`SLICE_AGENT_PORT` defaults to 9270. `SLICE_AGENT_EXTRA` can carry
-`--slice-max-step-mm`, `--slice-max-step-deg`, `--slice-max-abs-mm`,
-`--slice-nudge-mm`, `--slice-resend-ms`.
+`SLICE_AGENT_PORT` defaults to 9270. `SLICE_AGENT_EXTRA` can carry `--slice-resend-ms`.
 
 On the scanner: `./slice_agent --listen` running on the MARS (Andrew's binary,
 already exists), then the sequence with WIP "Dynamic Slice Control" on. That
@@ -63,13 +60,9 @@ client instead of `slice_control`.
   `{"rotation_rad":[r,0,0]}` etc.; "Send Absolute Position" →
   `POST /write/slice_target`. All unchanged.
 - Response fields worth showing: `delivered` (packet written to a connected
-  agent), `agent_connected`, `enabled`, `state` (the six numbers), `geometry`.
+  agent), `enabled`, `state` (the six numbers).
   The write-server wraps the marshal reply under `backend_response`; branch
   `feat/slice-agent-client-webgl` already reads `backend_response.delivered`.
-- Useful additions if wanted: a "reset" button (`POST /write/slice_reset`)
-  and a readout of `GET /read/slice_commanded` (the six numbers — the scanner
-  does not write the moved position back into image headers, so this is the
-  only "where is the slice now").
 
 ## `slice_target` (the one thing outside Andrew's tested path)
 
@@ -77,7 +70,7 @@ Ridaa's "Send Absolute Position" posts a pose taken from an image header
 (`position` + `read_dir/phase_dir/slice_dir`). The marshal takes those vectors
 as the rows of `buildRotMatrix` (the way `slice_control` itself reads that
 matrix for its translation keys), converts them to `rx ry rz`, and sends the
-six numbers. It is validated (unit, orthogonal, right-handed, position clamp)
+six numbers. It is validated (unit, orthogonal, right-handed)
 and works consistently with the `±`/slider path. But Andrew has never sent a
 header-derived pose through his agent, so whether the header's read/phase
 axes coincide with the sequence's rows is unverified. If a `slice_target` of
@@ -94,8 +87,7 @@ the `±`/slider path is unaffected either way.
 3. The agent restarts its frame counter per TCP connection and the cardiac
    sequence never resets `m_lastFrame` (`RadialCardiac2D.cpp:660`), so after
    a reconnect mid-scan commands are ignored until the counter catches up.
-   The marshal keeps one connection per session and reports `reconnects` in
-   `/status`.
+   The marshal keeps one connection per session and reconnects if it drops.
 4. The cardiac sequence does not write the moved geometry into the MDH
    (folder 1's `DynamicSlicePos.cpp:586-620` does) → image headers/DICOM keep
    the prescribed pose.

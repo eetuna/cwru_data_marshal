@@ -253,7 +253,7 @@ SLICE_AGENT_HOST=slice-agent-mock docker compose up -d --force-recreate mri-mars
 curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}'
 docker logs slice-agent-mock
 ```
-> You'll see: `{"agent_connected":true,"delivered":true,...,"state":{...,"tz":1.0}}`
+> You'll see: `{"delivered":true,"enabled":true,...,"state":{...,"tz":1.0}}`
 > and the mock prints `CMD {"frame": 0, "tx": 0.0, "ty": 0.0, "tz": 1.0, ...}` — the
 > 56-byte packet Andrew's real `slice_agent` receives, identical to a PgUp in
 > his `slice_control` tool. A rotation slider adds degrees to `rx/ry/rz` the

@@ -181,7 +181,7 @@ docker run -d --rm --name slice-agent-mock --network cwru-demo-net \
 SLICE_AGENT_HOST=slice-agent-mock docker compose up -d --force-recreate mri-marshal
 
 curl -s -X POST localhost:8080/write/file_slice_translation -d '{"client_id":"t","values":[1]}'
-#   {"delivered":true,"agent_connected":true,"enabled":true,"state":{"tz":1.0,...},...}
+#   {"delivered":true,"enabled":true,"state":{...,"tz":1.0}}
 docker logs slice-agent-mock
 #   CONNECTED {...}   CMD {"frame": 0, "tx": 0.0, "ty": 0.0, "tz": 1.0, "rx": 0.0, ...}   (= PgUp from zero)
 curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0.17453293,0,0]}'
@@ -189,9 +189,6 @@ curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0.17453293
 curl -s -X POST localhost:8080/write/slice_target \
   -d '{"position":[12.5,-3,40],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,1]}'
 #   -> mock prints CMD {... "tz": 40.0, "rx": 0.0 ...}  (six numbers replaced)
-curl -s -X POST localhost:8080/write/slice_reset
-#   -> mock prints all zeros (= the '0' key)
-curl -s localhost:8080/read/slice_commanded     # the six numbers last sent + implied axes
 ```
 
 **B. Andrew's real agent on this machine** (proves the shared-memory side):
@@ -209,8 +206,6 @@ produced "Client quit" on the agent.
 
 Rejection / off-channel checks (no agent needed):
 ```bash
-curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,4.0]}'
-#   400 rotation[2] exceeds max step 180 deg           — never sent
 curl -s -X POST localhost:8080/write/slice_target \
   -d '{"position":[0,0,0],"read_dir":[1,0,0],"phase_dir":[1,0,0],"slice_dir":[0,0,1]}'
 #   400 {"error":"read_dir and phase_dir must be orthogonal"} — never sent

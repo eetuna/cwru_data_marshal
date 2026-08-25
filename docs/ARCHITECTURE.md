@@ -39,13 +39,13 @@ The CWRU Data Marshal is a persistent intermediary between the MRI scanner and t
 
 **Marshal → Scanner (return path):** Recon return messages are pushed back to the scanner on the SAME TCP socket the scanner connected on. This satisfies the requirement: "Marshall needs to push, and it must come over the existing connection that was established for the scan."
 
-**Marshal → slice_agent (slice control, optional):** the marshal keeps six absolute numbers (`tx ty tz` mm, `rx ry rz` deg, zero at scan start) exactly like Andrew's `slice_control` tool; UI slice commands (`/write/file_slice_translation`, `/write/slice_delta`, `/write/slice_reset`) add to them and `/write/slice_target` replaces them; after each change the six totals are sent as a 56-byte `SliceCommand` over a separate TCP connection to the scanner-side `slice_agent --listen` on `--slice-agent-host:9270` (the MARS), which publishes them to shared memory for the sequence. Off unless `--slice-agent-host` is set. See [SLICE_CONTROL_HANDOFF.md](SLICE_CONTROL_HANDOFF.md).
+**Marshal → slice_agent (slice control, optional):** the marshal keeps six absolute numbers (`tx ty tz` mm, `rx ry rz` deg, zero at scan start) exactly like Andrew's `slice_control` tool; UI slice commands (`/write/file_slice_translation`, `/write/slice_delta`) add to them and `/write/slice_target` replaces them; after each change the six totals are sent as a 56-byte `SliceCommand` over a separate TCP connection to the scanner-side `slice_agent --listen` on `--slice-agent-host:9270` (the MARS), which publishes them to shared memory for the sequence. Off unless `--slice-agent-host` is set. See [SLICE_CONTROL_HANDOFF.md](SLICE_CONTROL_HANDOFF.md).
 
 **Query/Control clients → Marshal:** HTTP on `--http` (default 0.0.0.0:8080). The
 webgl-client and any external consumer use it: `GET /status`, `GET /image/latest`,
 `GET /image/latest.h5`, the slice-command endpoints
 (`/write|read/file_slice_translation`, `/write|read/slice_delta`,
-`/write|read/slice_target`, `POST /write/slice_reset`, `GET /read/slice_geometry`, `GET /read/slice_commanded`), `GET/PUT /transform`,
+`/write|read/slice_target`, `GET /read/slice_geometry`), `GET/PUT /transform`,
 `POST/GET /pose`, `GET /health`, `GET /dump/scanner`, `GET /dump/recon`, and
 `/debug/*` diagnostics. Authoritative list: [API_REFERENCE.md](API_REFERENCE.md).
 

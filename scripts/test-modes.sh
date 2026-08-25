@@ -100,8 +100,6 @@ docker run -d --rm --name slice-agent-mock --network $NET $FP \
   python3 -c "$(cat scripts/slice_agent_mock.py)" --port 9270 --timeout 120 >/dev/null
 SLICE_AGENT_HOST=slice-agent-mock docker compose --profile test-recon up -d --force-recreate mri-marshal >/dev/null 2>&1
 for i in $(seq 1 30); do [ "$(mexec curl -s -o /dev/null -w '%{http_code}' localhost:8080/health 2>/dev/null)" = "200" ] && break; sleep 2; done
-chk "status: slice_agent enabled" \
-  "$(mexec curl -s localhost:8080/status | grep -o '"slice_agent":{[^}]*}' | field enabled)" '"enabled":true'
 # lazy connect: nothing reaches the agent until the first command
 chk "no connection before first command" "$(docker logs slice-agent-mock 2>&1 | grep -c CONNECTED)" "0"
 # first press from zero: +1 = PgUp -> tz=1 (six numbers start at zero, like slice_control)
@@ -122,14 +120,6 @@ chk "nudge +1 -> agent got tz=41" "$(docker logs slice-agent-mock 2>&1 | grep -q
 mexec curl -s -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,0.5]}' >/dev/null
 sleep 0.5
 chk "rotate 0.5rad -> rz=+28.65" "$(docker logs slice-agent-mock 2>&1 | grep -q '"rz": 28.64' && echo yes || echo no)" "yes"
-chk "over-clamp step (4 rad > 180 deg) = 400" \
-  "$(mexec curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/write/slice_delta -d '{"rotation_rad":[0,0,4.0]}')" "400"
-chk "commanded state readable" \
-  "$(mexec curl -s localhost:8080/read/slice_commanded | grep -o '"rz_deg":[0-9.]*' | cut -c1-14)" '"rz_deg":28.64'
-# reset = the '0' key: zeros sent
-mexec curl -s -X POST localhost:8080/write/slice_reset >/dev/null
-sleep 0.5
-chk "slice_reset -> agent got zeros" "$(docker logs slice-agent-mock 2>&1 | tail -1 | grep -q '"tz": 0.0, "rx": 0.0' && echo yes || echo no)" "yes"
 # graceful shutdown sends 0xDEAD (57005)
 docker compose --profile test-recon up -d --force-recreate mri-marshal >/dev/null 2>&1
 sleep 2

@@ -11,7 +11,7 @@
 #
 # Slice control (unset = off): SLICE_AGENT_HOST=<MARS ip running `slice_agent --listen`>
 # turns on the UI -> marshal -> slice_agent command channel; SLICE_AGENT_PORT (9270);
-# SLICE_AGENT_EXTRA for optional clamps, e.g. "--slice-max-step-deg 45"
+# SLICE_AGENT_EXTRA for optional flags, e.g. "--slice-resend-ms 3000"
 # (see docs/SLICE_CONTROL_HANDOFF.md).
 #   SLICE_AGENT_HOST=192.168.2.2 docker compose up -d
 #
