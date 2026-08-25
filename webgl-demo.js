@@ -889,7 +889,13 @@ initRotationSliders();
       }
 
       const result = await response.json();
-      updateStatus(`savedTransformStatus${slotIndex + 1}`, `Sent absolute position to slice_target (${result.delivered ? 'delivered' : 'cached'})`);
+      // The write-server wraps the marshal's reply under backend_response.
+      const marshalReply = (result && result.backend_response) || {};
+      let deliveryText = 'cached';
+      if (marshalReply.enabled === false) deliveryText = 'channel off';
+      else if (marshalReply.delivered) deliveryText = 'delivered';
+      else if (marshalReply.agent_connected === false) deliveryText = 'agent not connected';
+      updateStatus(`savedTransformStatus${slotIndex + 1}`, `Sent absolute position to slice_target (${deliveryText})`);
       updateStatus('debug', `Sent absolute slice target ${slotIndex + 1} pos=(${pos.map(v => v.toFixed(2)).join(', ')})`);
     } catch (error) {
       console.error('Error posting absolute position:', error);
