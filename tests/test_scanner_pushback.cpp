@@ -350,8 +350,8 @@ TEST_CASE("cancel() wakes a sender blocked on a recon that stopped reading",
     recon.start();
     std::atomic<int> failures{0};
     mrd::ReconForwarder fwd("127.0.0.1", recon.port(),
-                            [](uint16_t, const void*, size_t) {},
-                            [&] { failures.fetch_add(1); },
+                            [](uint64_t, uint16_t, const void*, size_t) {},
+                            [&](uint64_t) { failures.fetch_add(1); },
                             2000 /*connect ms*/, 60000 /*user timeout: not the bound here*/);
     // Small send buffer so the wedge happens quickly.
     REQUIRE(fwd.begin_session());
@@ -376,8 +376,8 @@ TEST_CASE("TCP_USER_TIMEOUT aborts a recon connection that stopped reading",
     recon.start();
     std::atomic<int> failures{0};
     mrd::ReconForwarder fwd("127.0.0.1", recon.port(),
-                            [](uint16_t, const void*, size_t) {},
-                            [&] { failures.fetch_add(1); },
+                            [](uint64_t, uint16_t, const void*, size_t) {},
+                            [&](uint64_t) { failures.fetch_add(1); },
                             2000, 1000 /*user timeout ms*/);
     REQUIRE(fwd.begin_session());
 
@@ -392,4 +392,55 @@ TEST_CASE("TCP_USER_TIMEOUT aborts a recon connection that stopped reading",
     // 1 s user timeout + probe scheduling slack; the untreated case never returns.
     CHECK(took < std::chrono::seconds(15));
     fwd.stop();
+}
+
+// Audit #1 follow-up: the epoch a callback reports is the one its CONNECTION
+// was opened with, not whatever the listener has stamped since.
+namespace {
+struct EchoRecon {   // accepts, then sends one IMAGE-tagged frame with an empty header? No: a TEXT frame.
+    net::io_context ioc;
+    tcp::acceptor acceptor{ioc, tcp::endpoint(tcp::v4(), 0)};
+    std::thread th;
+    uint16_t port() const { return acceptor.local_endpoint().port(); }
+    void start() {
+        th = std::thread([this] {
+            for (int i = 0; i < 2; ++i) {
+                tcp::socket s(ioc);
+                boost::system::error_code ec;
+                acceptor.accept(s, ec);
+                if (ec) return;
+                // [tag=TEXT][uint32 len=2]["x\0"]
+                uint16_t tag = mrd::MRD_MESSAGE_TEXT; uint32_t len = 2;
+                std::vector<uint8_t> f(2 + 4 + 2, 0);
+                std::memcpy(f.data(), &tag, 2); std::memcpy(f.data() + 2, &len, 4); f[6] = 'x';
+                net::write(s, net::buffer(f), ec);
+                // keep open until the client closes
+                uint8_t b; s.read_some(net::buffer(&b, 1), ec);
+            }
+        });
+    }
+    ~EchoRecon() { boost::system::error_code ig; acceptor.close(ig); if (th.joinable()) th.join(); }
+};
+} // namespace
+
+TEST_CASE("recon callbacks carry the epoch of the connection that produced them",
+          "[recon_forwarder][epoch]") {
+    EchoRecon recon;
+    recon.start();
+    std::mutex m; std::vector<uint64_t> seen;
+    mrd::ReconForwarder fwd("127.0.0.1", recon.port(),
+        [&](uint64_t e, uint16_t, const void*, size_t) { std::lock_guard<std::mutex> lk(m); seen.push_back(e); },
+        [&](uint64_t) {}, 2000);
+    REQUIRE(fwd.begin_session(7));
+    for (int i = 0; i < 100 && [&]{ std::lock_guard<std::mutex> lk(m); return seen.empty(); }(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    REQUIRE(fwd.begin_session(8));   // joins the old reader first
+    for (int i = 0; i < 100 && [&]{ std::lock_guard<std::mutex> lk(m); return seen.size() < 2; }(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    fwd.stop();
+    std::lock_guard<std::mutex> lk(m);
+    REQUIRE(seen.size() == 2);
+    CHECK(seen[0] == 7);
+    CHECK(seen[1] == 8);
+    // Epoch-checked CLOSE for a superseded epoch is a no-op (no failure, no send).
 }

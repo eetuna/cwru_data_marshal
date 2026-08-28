@@ -529,11 +529,10 @@ private:
             if (!session_active_.load() || !forwarder_->is_connected()) {
                 if (recon_attempted) return false;   // one-shot per scan
                 recon_attempted = true;
-                // Stamp ownership BEFORE begin_session(): a connect failure
-                // calls on_failure synchronously and must see this scan's
-                // epoch (see recon_session_epoch in marshal_state.hpp).
-                state_.recon_session_epoch.store(state_.scan_epoch.load());
-                session_active_.store(forwarder_->begin_session());
+                // The recon connection is bound to this scan's epoch for
+                // its whole life; every callback it ever produces carries
+                // it (see ReconForwarder::MessageCallback).
+                session_active_.store(forwarder_->begin_session(state_.scan_epoch.load()));
                 if (!session_active_.load()) return false;
                 for (const auto& [tag, body] : recon_preamble) {
                     forwarder_->post_frame(tag, body);
@@ -991,7 +990,9 @@ private:
                 if (forwarder_->is_connected()) {
                     const uint32_t flush_ms = state_.dump_enabled
                         ? 2000u : state_.recon_close_timeout_ms;
-                    forwarder_->post_close();
+                    // Epoch-checked: a new scan may already own the
+                    // forwarder; its recon must not get our CLOSE.
+                    forwarder_->post_close_for(epoch_at_eof);
                     forwarder_->wait_for_close(
                         std::chrono::milliseconds(flush_ms));
                 }

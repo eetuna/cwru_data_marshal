@@ -85,6 +85,10 @@ static auto text_response(const http::request<Body>& req,
 inline void handle_recon_image(MarshalState& state, const void* data, size_t size,
                                uint64_t require_epoch = mrd::kAnyEpoch)
 {
+    // Superseded-scan images must not touch anything — including the
+    // slice geometry the next slice command embeds.
+    if (require_epoch != mrd::kAnyEpoch && state.scan_epoch.load() != require_epoch)
+        return;
     // Track slice geometry in every mode (recon lane) — the slice-translation
     // command pushed to the scanner embeds it.
     mrd::update_slice_geometry(state, static_cast<const uint8_t*>(data), size);
@@ -93,8 +97,6 @@ inline void handle_recon_image(MarshalState& state, const void* data, size_t siz
     // purely on the mode flag so a missing dump_recorder does not silently
     // fall back to writing live output.
     if (state.dump_enabled) {
-        if (require_epoch != mrd::kAnyEpoch && state.scan_epoch.load() != require_epoch)
-            return;
         if (state.dump_recorder) {
             const auto* bytes = static_cast<const uint8_t*>(data);
             state.dump_recorder->append_recon_image(

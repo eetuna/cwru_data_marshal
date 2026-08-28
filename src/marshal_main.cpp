@@ -447,13 +447,12 @@ int main(int argc, char** argv)
         // abnormal scanner EOF the scanner slot is released before the old
         // recon session is torn down, so a NEW scan can already own
         // state/the scanner socket when the OLD recon emits a tail image
-        // or fails. recon_session_epoch is stamped by the listener right
-        // before begin_session(); if it no longer matches scan_epoch, the
-        // callback belongs to a superseded scan and must not touch the
-        // current one. The archive/latest paths re-check under scan_mtx /
+        // or fails. Each callback carries the epoch its recon CONNECTION was
+        // opened with (ReconForwarder::begin_session(epoch)); if it no
+        // longer matches scan_epoch, the callback belongs to a superseded
+        // scan and must not touch the current one. The archive/latest paths re-check under scan_mtx /
         // latest_image_mtx via require_epoch.
-        auto on_failure = [&state]() {
-            const uint64_t epoch = state.recon_session_epoch.load();
+        auto on_failure = [&state](uint64_t epoch) {
             if (state.scan_epoch.load() != epoch) {
                 LOG_WARN("Recon failure from a superseded scan (epoch " << epoch
                          << "); current scan " << state.scan_epoch.load()
@@ -502,8 +501,7 @@ int main(int argc, char** argv)
 
         // Recon return callback: archive IMAGE messages for non-scanner clients,
         // and push every MRD return message back to the scanner.
-        auto on_message = [&state](uint16_t tag, const void* data, size_t len) {
-            const uint64_t epoch = state.recon_session_epoch.load();
+        auto on_message = [&state](uint64_t epoch, uint16_t tag, const void* data, size_t len) {
             if (state.scan_epoch.load() != epoch) {
                 LOG_WARN("Dropping recon message tag=" << tag
                          << " from a superseded scan (epoch " << epoch << ")");

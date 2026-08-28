@@ -289,15 +289,6 @@ namespace mrd
     // and need no guard).
     constexpr uint64_t kAnyEpoch = ~uint64_t{0};
 
-    // Does the recon session that produced a callback still own the scan?
-    // Cheap pre-check for recon callbacks before pushing anything to the
-    // scanner socket. Not a substitute for the under-lock require_epoch
-    // checks in append_live_image / append_live_waveform.
-    inline bool recon_session_owns_scan(const MarshalState &state)
-    {
-        return state.recon_session_epoch.load() == state.scan_epoch.load();
-    }
-
     // require_epoch: if not kAnyEpoch, the append is dropped unless
     // scan_epoch still equals it — checked under scan_mtx, so a new scan's
     // METADATA cannot slip in between the caller's check and the append.

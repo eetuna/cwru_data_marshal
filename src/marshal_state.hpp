@@ -135,17 +135,6 @@ struct MarshalState {
     // (now stale) flush/mark — see mrd_tcp_listener.hpp done-path and the
     // *_at_epoch helpers in live_image_store.hpp.
     std::atomic<uint64_t> scan_epoch{0};
-    // scan_epoch value of the scan that owns the current recon forwarder
-    // session. Stamped by the MRD listener immediately before
-    // ReconForwarder::begin_session(). Every recon callback (returned
-    // images/waveforms, recon failure) compares it against scan_epoch and
-    // stands down on mismatch: after an abnormal scanner EOF the scanner
-    // slot is released before the old recon session is torn down, so a
-    // new scan's METADATA can bump scan_epoch while the old recon still
-    // emits tail images or fails — those must not be pushed to the new
-    // scanner socket, archived under the new XML, or allowed to finalize /
-    // error-mark the new scan's recon lane (audit blocker #1).
-    std::atomic<uint64_t> recon_session_epoch{0};
     std::string current_xml_header;
     std::string current_config;
     std::string current_scan_filename;

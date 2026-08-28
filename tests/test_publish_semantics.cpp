@@ -336,7 +336,7 @@ TEST_CASE("snapshot stamped with a superseded scan epoch is not advertised",
 // an abnormal scanner EOF the scanner slot is released before the old recon
 // session ends, so scan B's METADATA can bump scan_epoch while scan A's
 // recon still emits tail images or fails. Those callbacks carry scan A's
-// recon_session_epoch and must not archive/publish under scan B's state or
+// their connection's epoch and must not archive/publish under scan B's state or
 // replace scan B's latest image with the error marker.
 TEST_CASE("recon image carrying a superseded epoch is neither archived nor published",
           "[live_image_store][epoch][recon]") {
@@ -345,12 +345,9 @@ TEST_CASE("recon image carrying a superseded epoch is neither archived nor publi
     const auto snapshot = mrd::lane_latest_path(state, mrd::LiveLane::Recon);
 
     const uint64_t epoch_a = state.scan_epoch.load();
-    state.recon_session_epoch.store(epoch_a);
-    CHECK(mrd::recon_session_owns_scan(state));
 
     // Scan B's METADATA takes over.
     state.scan_epoch.fetch_add(1);
-    CHECK_FALSE(mrd::recon_session_owns_scan(state));
 
     auto wire = make_wire_image(1, 0);
     mrd::append_live_image(state, mrd::LiveLane::Recon, wire.data(), wire.size(), epoch_a);

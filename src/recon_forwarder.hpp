@@ -48,8 +48,16 @@ namespace mrd {
 
 class ReconForwarder {
 public:
-    using MessageCallback = std::function<void(uint16_t, const void*, size_t)>;
-    using FailureCallback = std::function<void()>;
+    // Every callback carries the IMMUTABLE epoch of the recon connection
+    // that produced it (the value passed to begin_session). The reader
+    // thread captures it at start and senders capture it under send_mtx_,
+    // so a callback from an old connection can never observe a newer
+    // epoch, whatever the listener has done since (audit #1 follow-up:
+    // a mutable global stamp left a window around the next scan's first
+    // ACQUISITION where an old callback read the new epoch).
+    using MessageCallback = std::function<void(uint64_t session_epoch, uint16_t,
+                                               const void*, size_t)>;
+    using FailureCallback = std::function<void(uint64_t session_epoch)>;
 
     // Liveness bound on the CONNECTED recon socket (audit 2026-08-28 #5).
     // The scanner session thread writes acquisitions to recon
@@ -88,8 +96,9 @@ public:
     // on default Linux); DNS resolution gets the same bound. The private
     // ioc_ is used only here — the reader/writer paths operate on the raw
     // native fd — so driving it with run_for on the calling thread is safe.
-    bool begin_session() {
+    bool begin_session(uint64_t session_epoch = 0) {
         end_session();  // clean up any previous session
+        session_epoch_.store(session_epoch);
         drop_logged_.store(false);
         failure_reported_.store(false);
         close_received_.store(false);
@@ -132,7 +141,7 @@ public:
                          << recon_port_ << " within " << connect_timeout_ms_
                          << " ms: " << result_ec.message());
                 connected_.store(false);
-                if (on_failure_) { try { on_failure_(); } catch (...) {} }
+                if (on_failure_) { try { on_failure_(session_epoch); } catch (...) {} }
                 return false;
             }
 
@@ -169,12 +178,12 @@ public:
 
             // Start reader thread for recon->scanner responses.
             reader_running_.store(true);
-            reader_ = std::thread(&ReconForwarder::read_loop, this);
+            reader_ = std::thread(&ReconForwarder::read_loop, this, session_epoch);
             return true;
         } catch (const std::exception& e) {
             LOG_WARN("Failed to connect to recon: " << e.what());
             connected_.store(false);
-            if (on_failure_) { try { on_failure_(); } catch (...) {} }
+            if (on_failure_) { try { on_failure_(session_epoch); } catch (...) {} }
             return false;
         }
     }
@@ -183,6 +192,10 @@ public:
     void end_session() {
         reader_running_.store(false);
         connected_.store(false);
+        // Serialise against an in-flight epoch-checked send: after this
+        // point no sender can have passed the require_epoch check for
+        // the old connection and still be writing.
+        { std::lock_guard<std::mutex> lk(send_mtx_); }
 
         // Shutdown wakes blocking send/recv. Close/reset only after the
         // reader thread has exited so the fd cannot be reused underneath it.
@@ -256,6 +269,18 @@ public:
     }
     void post_close() { send_close(); }
 
+    // CLOSE only if `epoch` still owns this forwarder's connection. For
+    // finalizers that run after the scanner slot was released: a newer
+    // scan may already have begun its own session, and its recon must
+    // not receive the old scan's CLOSE. Checked under send_mtx_, which
+    // begin_session's end_session() also serialises against.
+    void post_close_for(uint64_t epoch) {
+        uint16_t tag = MRD_MESSAGE_CLOSE;
+        send_message(&tag, 2, epoch);
+    }
+
+    uint64_t session_epoch() const { return session_epoch_.load(); }
+
     // Send a fully-assembled wire frame ([tag][body]) verbatim. Used by
     // the ACQUISITION hot path, whose bytes are already contiguous in the
     // listener's read buffer — avoids the per-message copy post_frame's
@@ -301,13 +326,14 @@ private:
     std::atomic<bool> drop_logged_{false};
     std::atomic<bool> failure_reported_{false};
     std::atomic<bool> close_received_{false};
+    std::atomic<uint64_t> session_epoch_{0};
     std::thread reader_;
     std::mutex close_mtx_;
     std::condition_variable close_cv_;
 
-    void report_failure_once() {
+    void report_failure_once(uint64_t session_epoch) {
         if (failure_reported_.exchange(true) == false && on_failure_) {
-            try { on_failure_(); } catch (...) {}
+            try { on_failure_(session_epoch); } catch (...) {}
         }
     }
 
@@ -319,7 +345,7 @@ private:
         }
     }
 
-    void fail_recon(const std::string& reason) {
+    void fail_recon(const std::string& reason, uint64_t session_epoch) {
         if (connected_.exchange(false)) {
             LOG_WARN(reason);
         } else if (drop_logged_.exchange(true) == false) {
@@ -327,10 +353,12 @@ private:
         }
         shutdown_socket();
         close_cv_.notify_all();
-        report_failure_once();
+        report_failure_once(session_epoch);
     }
 
-    void send_message(const void* data, size_t len) {
+    // require_epoch: if non-zero, send only while that epoch owns the
+    // connection (see post_close_for).
+    void send_message(const void* data, size_t len, uint64_t require_epoch = 0) {
         if (!connected_.load()) {
             // Only log once to avoid spam during shutdown
             if (drop_logged_.exchange(true) == false)
@@ -340,15 +368,17 @@ private:
 
         std::lock_guard<std::mutex> lk(send_mtx_);
         if (!connected_.load()) return;
+        const uint64_t epoch = session_epoch_.load();
+        if (require_epoch != 0 && epoch != require_epoch) return;
         if (!write_exact(data, len)) {
-            fail_recon("Write to recon failed");
+            fail_recon("Write to recon failed", epoch);
             return;
         }
     }
 
     // Reader thread: reads MRD messages from recon and forwards them upstream.
-    void read_loop() {
-        LOG_INFO("Recon reader started");
+    void read_loop(uint64_t session_epoch) {
+        LOG_INFO("Recon reader started (epoch " << session_epoch << ")");
         bool failure = false;
         try {
             while (reader_running_.load() && connected_.load()) {
@@ -367,7 +397,7 @@ private:
                 if (msg_id == MRD_MESSAGE_CLOSE) {
                     LOG_INFO("Recon sent CLOSE");
                     if (on_message_) {
-                        try { on_message_(msg_id, body.data(), body.size()); } catch (...) {}
+                        try { on_message_(session_epoch, msg_id, body.data(), body.size()); } catch (...) {}
                     }
                     close_received_.store(true);
                     close_cv_.notify_all();
@@ -380,7 +410,7 @@ private:
                 }
 
                 if (on_message_) {
-                    try { on_message_(msg_id, body.data(), body.size()); } catch (...) {}
+                    try { on_message_(session_epoch, msg_id, body.data(), body.size()); } catch (...) {}
                 }
             }
         } catch (const std::exception& e) {
@@ -390,7 +420,7 @@ private:
         connected_.store(false);
         if (failure) shutdown_socket();
         close_cv_.notify_all();
-        if (failure) report_failure_once();
+        if (failure) report_failure_once(session_epoch);
         LOG_INFO("Recon reader ended");
     }
 
