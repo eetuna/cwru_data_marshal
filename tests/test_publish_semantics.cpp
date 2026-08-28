@@ -281,3 +281,53 @@ TEST_CASE("finalize-after-EOF publishes a pre-header pending group",
     REQUIRE(fs::exists(snapshot));
     CHECK(latest_image_count(snapshot) == 1);
 }
+
+// 2026-08-28 audit blocker #2: the scan epoch used by the stale-publish
+// guard must be the one observed in the SAME scan_mtx critical section that
+// snapshotted the xml/images. publish_latest_snapshot used to load
+// scan_epoch itself, after append_live_image had already unlocked — so a
+// new scan's METADATA landing in that gap stamped scan-A pixels with
+// scan-B's epoch and the guard passed. The epoch is now an explicit
+// parameter captured under the lock; this pins that a snapshot carrying a
+// superseded epoch is discarded even though the epoch was "current" when
+// the publish was queued.
+TEST_CASE("snapshot stamped with a superseded scan epoch is not advertised",
+          "[live_image_store][epoch]") {
+    MarshalState state;
+    init_state(state, 1);
+    const auto snapshot = mrd::lane_latest_path(state, mrd::LiveLane::Recon);
+
+    // Scan A: snapshot + epoch captured together under scan_mtx.
+    uint64_t epoch_a = 0;
+    std::string xml_a;
+    {
+        std::lock_guard<std::mutex> lk(state.scan_mtx);
+        state.current_xml_header = "<scanA/>";
+        xml_a = state.current_xml_header;
+        epoch_a = state.scan_epoch.load();
+    }
+
+    // Scan B's METADATA arrives before scan A's publish runs.
+    {
+        std::lock_guard<std::mutex> lk(state.scan_mtx);
+        state.current_xml_header = "<scanB/>";
+        state.scan_epoch.fetch_add(1);
+    }
+
+    mrd::publish_latest_snapshot(state, mrd::LiveLane::Recon, xml_a,
+                                 {make_wire_image(1, 0)}, epoch_a);
+    CHECK(state.latest_image_generation.load() == 0);
+    {
+        std::lock_guard<std::mutex> lk(state.latest_image_mtx);
+        CHECK(state.latest_image_path.empty());
+    }
+
+    // The same payload carrying the live epoch is advertised normally.
+    mrd::publish_latest_snapshot(state, mrd::LiveLane::Recon, xml_a,
+                                 {make_wire_image(1, 0)}, state.scan_epoch.load());
+    CHECK(state.latest_image_generation.load() == 1);
+    {
+        std::lock_guard<std::mutex> lk(state.latest_image_mtx);
+        CHECK(state.latest_image_path == snapshot.string());
+    }
+}

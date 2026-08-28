@@ -123,10 +123,16 @@ namespace mrd
         state.latest_slice = hdr.slice;
     }
 
+    // `epoch` must be the scan_epoch observed under scan_mtx in the SAME
+    // critical section that snapshotted `xml`/`images`. Reading it here
+    // instead (after the caller unlocked) would let a new scan's METADATA
+    // slip in between and stamp an old scan's pixels with the new epoch,
+    // defeating the stale-publish guard below (audit blocker #2).
     inline void publish_latest_snapshot(MarshalState &state,
                                         LiveLane lane,
                                         std::string xml,
-                                        std::vector<std::vector<uint8_t>> images)
+                                        std::vector<std::vector<uint8_t>> images,
+                                        uint64_t epoch)
     {
         if (images.empty())
             return;
@@ -141,12 +147,11 @@ namespace mrd
         }
 
         auto dest = lane_latest_path(state, lane);
-        // Stale-publish guard: capture the scan epoch at enqueue time. If a
+        // Stale-publish guard: `epoch` was captured with the snapshot. If a
         // new scan's METADATA arrives while this publish is still in the
         // writer queue, reset_live_outputs_for_new_scan has already deleted
         // the snapshot the publish would advertise — discard it instead of
         // resurrecting a dead scan's path.
-        const auto epoch = state.scan_epoch.load();
         auto on_complete = [&state, epoch](const std::filesystem::path &path)
         {
             std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
@@ -204,7 +209,8 @@ namespace mrd
         {
             publish_latest_snapshot(state, LiveLane::Recon,
                                     state.current_xml_header,
-                                    std::move(group.images));
+                                    std::move(group.images),
+                                    state.scan_epoch.load());
         }
         group.reset();
     }
@@ -246,10 +252,14 @@ namespace mrd
         std::string filename;
         std::vector<uint8_t> image_bytes(data, data + size);
         std::vector<std::vector<uint8_t>> publish_images;
+        uint64_t publish_epoch = 0;
 
         {
             std::lock_guard<std::mutex> lk(state.scan_mtx);
             xml = state.current_xml_header;
+            // Same critical section as the xml/group snapshot — see
+            // publish_latest_snapshot.
+            publish_epoch = state.scan_epoch.load();
 
             if (state.current_scan_filename.empty())
             {
@@ -351,7 +361,8 @@ namespace mrd
 
         if (!publish_images.empty())
         {
-            publish_latest_snapshot(state, lane, std::move(xml), std::move(publish_images));
+            publish_latest_snapshot(state, lane, std::move(xml),
+                                    std::move(publish_images), publish_epoch);
         }
     }
 
