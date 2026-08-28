@@ -70,6 +70,17 @@ def latest_image_count(path):
     return ds.getNumberOfImages('image_0')
 
 
+def wait_for_h5(dirpath, timeout=10):
+    """Wait for at least one .h5 file to appear in dirpath (e.g. the dump
+    recorder's spool->H5 conversion, which runs at scan close)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.isdir(dirpath) and any(f.endswith('.h5') for f in os.listdir(dirpath)):
+            return True
+        time.sleep(0.1)
+    return False
+
+
 class TestMarshalIntegration(unittest.TestCase):
     marshal_proc = None
     recon_proc = None
@@ -212,18 +223,18 @@ class TestMarshalIntegration(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         self.assertIn("received", res.stdout)
 
-        latest = wait_for_latest_file(self.base())
-        self.assertIsNotNone(latest)
-        self.assertFalse(latest["error"])
-        self.assertTrue(os.path.exists(latest["path"]), latest)
-
-        scanner_dir = self.dump_scanner_dir()
-        recon_dir = self.dump_recon_dir()
-        self.assertGreater(len([f for f in os.listdir(scanner_dir) if f.endswith(".h5")]), 0)
-        self.assertGreater(len([f for f in os.listdir(recon_dir) if f.endswith(".h5")]), 0)
+        # Dump mode is dump-exclusive: /image/latest serves no live snapshot,
+        # so the roundtrip proof is the scanner's "received" output above.
+        # Wait for the dump recorder's spool->H5 conversion at scan close.
+        self.assertTrue(wait_for_h5(self.dump_scanner_dir()),
+                        "No scanner dump H5 after scan close")
+        self.assertTrue(wait_for_h5(self.dump_recon_dir()),
+                        "No recon dump H5 after scan close")
 
     def test_t2b_scanner_images_are_saved_not_forwarded_to_recon(self):
-        self.start_marshal(with_recon=True)
+        # Live mode: this test asserts on the live snapshot and live history,
+        # which --dump (dump-exclusive) disables entirely.
+        self.start_marshal(with_recon=True, dump=False)
         res = self.run_image_streamer(frames=3)
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
 
@@ -234,11 +245,12 @@ class TestMarshalIntegration(unittest.TestCase):
         self.assertIn("from_scanner", latest["path"])
 
         scanner_dir = self.live_scanner_dir()
-        recon_dir = self.dump_recon_dir()
         self.assertGreater(len([f for f in os.listdir(scanner_dir)
                                 if f.startswith("scan_") and f.endswith(".h5")]), 0)
-        self.assertEqual([f for f in os.listdir(recon_dir)
-                          if f.startswith("scan_") and f.endswith(".h5")], [])
+        for recon_dir in (self.live_recon_dir(), self.dump_recon_dir()):
+            files = os.listdir(recon_dir) if os.path.isdir(recon_dir) else []
+            self.assertEqual([f for f in files
+                              if f.startswith("scan_") and f.endswith(".h5")], [])
 
     def test_t3_dump_off_still_proxies_without_h5_archives(self):
         self.start_recon()
@@ -288,7 +300,9 @@ class TestMarshalIntegration(unittest.TestCase):
 
     def test_t5_recon_failure_pushes_mrd_error_image_to_scanner(self):
         self.start_recon()
-        self.start_marshal(with_recon=True)
+        # Live mode: the /image/latest error-marker assertion at the end needs
+        # the live snapshot path, which --dump (dump-exclusive) disables.
+        self.start_marshal(with_recon=True, dump=False)
         scanner = self.start_kspace_async()
         try:
             saw_normal_image = False
