@@ -361,3 +361,39 @@ TEST_CASE("LiveImageRecorder non-blocking close: next scan queues behind the con
     CHECK(xa == "<a/>");
     CHECK(xb == "<b/>");
 }
+
+// Audit 2026-08-28 #6: under sustained overload, complete volumes must not be
+// starved by the partial snapshots that follow them.
+TEST_CASE("LatestImageWriter evicts partial snapshots before complete volumes under overload",
+          "[latest][bounded][audit6]") {
+    auto dir = fs::temp_directory_path() / "test_bounded_latest_complete";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path dest = dir / "latest_image.h5";
+
+    std::mutex m;
+    int committed_complete = 0, committed_partial = 0, dropped = 0;
+    mrd::LatestImageWriter::PerfSnapshot perf;
+    {
+        mrd::LatestImageWriter writer;
+        // Pattern of a 5-slice incremental volume: 4 partials then 1 complete.
+        for (int i = 0; i < 2500; ++i) {
+            const bool complete = (i % 5 == 4);
+            writer.enqueue(dest, "<xml/>", {tiny_wire_image()},
+                [&, complete](const fs::path&, mrd::LatestWriteOutcome o) {
+                    std::lock_guard<std::mutex> lk(m);
+                    if (o != mrd::LatestWriteOutcome::Committed) { ++dropped; return; }
+                    if (complete) ++committed_complete; else ++committed_partial;
+                }, complete);
+        }
+        perf = writer.perf();
+    }
+    std::lock_guard<std::mutex> lk(m);
+    INFO("complete=" << committed_complete << " partial=" << committed_partial
+         << " evictions=" << perf.dropped_oldest << " evicted_complete=" << perf.evicted_complete);
+    REQUIRE(perf.dropped_oldest > 0);          // overload really happened
+    CHECK(dropped == 0);
+    // 4:1 partial:complete on input; with partial-first eviction the
+    // committed mix must invert. Plain drop-oldest keeps the 4:1 ratio.
+    CHECK(committed_complete > committed_partial);
+}

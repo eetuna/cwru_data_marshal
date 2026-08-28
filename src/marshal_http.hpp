@@ -856,6 +856,7 @@ static auto handle_get_debug_perf(const http::request<Body>& req, MarshalState& 
         j["latest_writer"]["completed"]         = p.completed;
         j["latest_writer"]["failed"]            = p.failed;
         j["latest_writer"]["retried"]           = p.retried;
+        j["latest_writer"]["evicted_complete"]  = p.evicted_complete;
         j["latest_writer"]["lost"]              = p.lost;
         j["latest_writer"]["max_queue_depth"]   = p.max_queue_depth;
         j["latest_writer"]["last_write_us"]     = p.last_write_us;

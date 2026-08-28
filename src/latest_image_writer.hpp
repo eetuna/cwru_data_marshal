@@ -36,10 +36,15 @@ public:
     LatestImageWriter(const LatestImageWriter&) = delete;
     LatestImageWriter& operator=(const LatestImageWriter&) = delete;
 
+    // complete: the snapshot is a whole volume (audit 2026-08-28 #6).
+    // Under overload the queue evicts superseded PARTIAL snapshots first,
+    // then the oldest superseded complete one, so complete volumes are
+    // what survives when the writer falls behind.
     void enqueue(std::filesystem::path dest,
                  std::string xml,
                  std::vector<std::vector<uint8_t>> images,
-                 Completion completion);
+                 Completion completion,
+                 bool complete = true);
 
     struct PerfSnapshot {
         uint64_t enqueued{0};
@@ -49,6 +54,9 @@ public:
         uint64_t failed{0};
         // Write attempts re-queued after a failure (newest job per dest only).
         uint64_t retried{0};
+        // Superseded COMPLETE volumes evicted under overload (partials are
+        // always evicted first; this counts the cases where none was left).
+        uint64_t evicted_complete{0};
         // Snapshots that never reached disk: newest-per-dest jobs dropped
         // with nothing to supersede them, or failed on every attempt.
         uint64_t lost{0};

@@ -134,6 +134,7 @@ struct LatestImageWriter::Job {
     std::chrono::steady_clock::time_point enqueued_at{};
     uint64_t seq{0};
     unsigned attempts{0};
+    bool complete{true};
 };
 
 struct LatestImageWriter::Impl {
@@ -167,6 +168,7 @@ struct LatestImageWriter::Impl {
     std::atomic<uint64_t> perf_completed{0};
     std::atomic<uint64_t> perf_failed{0};
     std::atomic<uint64_t> perf_retried{0};
+    std::atomic<uint64_t> perf_evicted_complete{0};
     std::atomic<uint64_t> perf_lost{0};
     std::atomic<uint64_t> perf_max_queue_depth{0};
     std::atomic<uint64_t> perf_last_write_us{0};
@@ -213,11 +215,20 @@ struct LatestImageWriter::Impl {
                     LOG_WARN("LatestImageWriter queue exceeded " << kMaxQueuedJobs
                              << " jobs; evicting superseded pending snapshots");
                 }
+                // Eviction order: oldest superseded partial → oldest
+                // superseded complete → (last resort) the newest.
                 auto victim = std::find_if(jobs.begin(), jobs.end(), [&](const Job& j) {
-                    return !is_newest_locked(j);
+                    return !is_newest_locked(j) && !j.complete;
                 });
+                if (victim == jobs.end()) {
+                    victim = std::find_if(jobs.begin(), jobs.end(), [&](const Job& j) {
+                        return !is_newest_locked(j);
+                    });
+                    if (victim != jobs.end())
+                        perf_evicted_complete.fetch_add(1, std::memory_order_relaxed);
+                }
                 if (victim != jobs.end()) {
-                    jobs.erase(victim);   // superseded: latest-wins, nothing lost
+                    jobs.erase(victim);   // superseded: latest-wins
                 } else {
                     evicted_newest = std::move(jobs.front());
                     evicted_newest_set = true;
@@ -318,10 +329,13 @@ LatestImageWriter::~LatestImageWriter() = default;
 void LatestImageWriter::enqueue(std::filesystem::path dest,
                                 std::string xml,
                                 std::vector<std::vector<uint8_t>> images,
-                                Completion completion)
+                                Completion completion,
+                                bool complete)
 {
-    impl_->enqueue(Job{std::move(dest), std::move(xml), std::move(images),
-                       std::move(completion), {}});
+    Job job{std::move(dest), std::move(xml), std::move(images),
+            std::move(completion), {}};
+    job.complete = complete;
+    impl_->enqueue(std::move(job));
 }
 
 LatestImageWriter::PerfSnapshot LatestImageWriter::perf() const
@@ -333,6 +347,7 @@ LatestImageWriter::PerfSnapshot LatestImageWriter::perf() const
     s.completed         = impl_->perf_completed.load(std::memory_order_relaxed);
     s.failed            = impl_->perf_failed.load(std::memory_order_relaxed);
     s.retried           = impl_->perf_retried.load(std::memory_order_relaxed);
+    s.evicted_complete  = impl_->perf_evicted_complete.load(std::memory_order_relaxed);
     s.lost              = impl_->perf_lost.load(std::memory_order_relaxed);
     s.max_queue_depth   = impl_->perf_max_queue_depth.load(std::memory_order_relaxed);
     s.last_write_us     = impl_->perf_last_write_us.load(std::memory_order_relaxed);

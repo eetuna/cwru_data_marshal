@@ -129,11 +129,14 @@ namespace mrd
     // instead (after the caller unlocked) would let a new scan's METADATA
     // slip in between and stamp an old scan's pixels with the new epoch,
     // defeating the stale-publish guard below (audit blocker #2).
+    // complete: whole volume (vs. an incremental partial) — see
+    // LatestImageWriter::enqueue.
     inline void publish_latest_snapshot(MarshalState &state,
                                         LiveLane lane,
                                         std::string xml,
                                         std::vector<std::vector<uint8_t>> images,
-                                        uint64_t epoch)
+                                        uint64_t epoch,
+                                        bool complete = true)
     {
         if (images.empty())
             return;
@@ -191,7 +194,8 @@ namespace mrd
 
         if (state.latest_writer)
         {
-            state.latest_writer->enqueue(dest, std::move(xml), std::move(images), std::move(on_complete));
+            state.latest_writer->enqueue(dest, std::move(xml), std::move(images),
+                                         std::move(on_complete), complete);
             return;
         }
 
@@ -223,7 +227,8 @@ namespace mrd
             publish_latest_snapshot(state, LiveLane::Recon,
                                     state.current_xml_header,
                                     std::move(group.images),
-                                    state.scan_epoch.load());
+                                    state.scan_epoch.load(),
+                                    /*complete=*/false);
         }
         group.reset();
     }
@@ -314,6 +319,7 @@ namespace mrd
         std::vector<uint8_t> image_bytes(data, data + size);
         std::vector<std::vector<uint8_t>> publish_images;
         uint64_t publish_epoch = 0;
+        bool publish_complete = true;   // scanner-lane and 3D images are whole volumes
 
         {
             std::lock_guard<std::mutex> lk(state.scan_mtx);
@@ -441,13 +447,15 @@ namespace mrd
                 // XML header. They surface via the EOF flush
                 // (flush_pending_recon_group_locked) if the header never
                 // arrives.
+                const bool group_complete = recon_group_is_complete(state, recon_group);
                 if (state.header_received.load(std::memory_order_acquire))
                 {
                     publish_images = recon_group.images;
+                    publish_complete = group_complete;
                     recon_group.published = true;
                 }
 
-                if (recon_group_is_complete(state, recon_group))
+                if (group_complete)
                 {
                     // Volume complete: START A NEW GROUP. Without the reset, a
                     // recon that keeps image_series_index constant for the
@@ -464,7 +472,8 @@ namespace mrd
         if (!publish_images.empty())
         {
             publish_latest_snapshot(state, lane, std::move(xml),
-                                    std::move(publish_images), publish_epoch);
+                                    std::move(publish_images), publish_epoch,
+                                    publish_complete);
         }
     }
 
