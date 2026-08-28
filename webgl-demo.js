@@ -744,6 +744,15 @@ initRotationSliders();
     }
   }
 
+  // Human-readable verdict from the marshal's slice reply
+  // ({enabled, delivered, superseded}; see docs/API_REFERENCE.md).
+  function describeSliceDelivery(marshalReply) {
+    if (marshalReply.enabled === false) return 'channel off';
+    if (marshalReply.delivered === true) return 'delivered';
+    if (marshalReply.superseded === true) return 'superseded by a newer command';
+    return 'NOT delivered (agent unreachable)';
+  }
+
   // POST relative slice delta command to MRI marshal via backend write proxy.
   // Payload contract:
   // {"translation_mm": [dx,dy,dz], "rotation_rad": [rx,ry,rz]}
@@ -772,7 +781,13 @@ initRotationSliders();
       });
 
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      updateStatus('debug', `Sent slice_delta t=[${translationMm.map(v => v.toFixed(2)).join(', ')}] r=[${rotationRad.map(v => v.toFixed(3)).join(', ')}]`);
+      // The write-server wraps the marshal's reply under backend_response.
+      // A 200 only means the proxy reached the marshal; whether the
+      // command reached the slice_agent is in the reply.
+      const result = await response.json();
+      const marshalReply = (result && result.backend_response) || {};
+      const deliveryText = describeSliceDelivery(marshalReply);
+      updateStatus('debug', `slice_delta t=[${translationMm.map(v => v.toFixed(2)).join(', ')}] r=[${rotationRad.map(v => v.toFixed(3)).join(', ')}] (${deliveryText})`);
     } catch (error) {
       console.error('Error posting slice_delta:', error);
       updateStatus('debug', `✗ Failed to post slice_delta: ${error.message}`);
@@ -787,36 +802,6 @@ initRotationSliders();
 
     // Preserve legacy button semantics: ±1 mm along slice axis.
     await postSliceDeltaToServer([0, 0, direction], [0, 0, 0]);
-  }
-
-  // POST slice thickness command [1..15] to file_slice_thickness endpoint
-  async function postSliceThicknessToServer(thickness) {
-    if (!Number.isFinite(thickness) || thickness < 1 || thickness > 15) {
-      return;
-    }
-
-    try {
-      const payload = {
-        client_id: clientId,
-        sent_at: Date.now(),
-        values: [thickness]
-      };
-
-      const response = await fetch(`${writeServerUrl}/api/write/${clientId}/13`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-
-      updateStatus('debug', `Sent slice thickness ${thickness}`);
-    } catch (error) {
-      console.error('Error posting slice thickness:', error);
-      updateStatus('debug', `✗ Failed to post slice thickness: ${error.message}`);
-    }
   }
 
   const savedTransformWriteFileKeys = [14, 16, 18];
@@ -914,10 +899,7 @@ initRotationSliders();
       const result = await response.json();
       // The write-server wraps the marshal's reply under backend_response.
       const marshalReply = (result && result.backend_response) || {};
-      let deliveryText = 'cached';
-      if (marshalReply.enabled === false) deliveryText = 'channel off';
-      else if (marshalReply.delivered) deliveryText = 'delivered';
-      else if (marshalReply.agent_connected === false) deliveryText = 'agent not connected';
+      const deliveryText = describeSliceDelivery(marshalReply);
       updateStatus(`savedTransformStatus${slotIndex + 1}`, `Sent absolute position to slice_target (${deliveryText})`);
       updateStatus('debug', `Sent absolute slice target ${slotIndex + 1} pos=(${pos.map(v => v.toFixed(2)).join(', ')})`);
     } catch (error) {
@@ -2035,11 +2017,9 @@ initRotationSliders();
   const rotXSlider = document.getElementById('sliderRotX');
   const rotYSlider = document.getElementById('sliderRotY');
   const rotZSlider = document.getElementById('sliderRotZ');
-  const sliceThicknessSlider = document.getElementById('sliderSliceThickness');
   const rotXVal = document.getElementById('valRotX');
   const rotYVal = document.getElementById('valRotY');
   const rotZVal = document.getElementById('valRotZ');
-  const sliceThicknessVal = document.getElementById('valSliceThickness');
 
   if (slicePlusBtn) {
     slicePlusBtn.addEventListener('click', () => {
@@ -2069,19 +2049,6 @@ initRotationSliders();
         await postSavedTransformToSliceTarget(i, savedTransformDataBySlot[i]);
       });
     }
-  }
-
-  if (sliceThicknessSlider && sliceThicknessVal) {
-    sliceThicknessVal.textContent = sliceThicknessSlider.value;
-
-    sliceThicknessSlider.addEventListener('input', () => {
-      sliceThicknessVal.textContent = sliceThicknessSlider.value;
-    });
-
-    sliceThicknessSlider.addEventListener('change', () => {
-      const thickness = parseInt(sliceThicknessSlider.value, 10);
-      postSliceThicknessToServer(thickness);
-    });
   }
 
   if (rotXSlider) {

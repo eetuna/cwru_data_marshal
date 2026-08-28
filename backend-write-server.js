@@ -120,21 +120,16 @@ app.post('/api/write/:clientId/:fileKey', async (req, res) => {
       return res.status(404).json({ error: `File mapping not found for fileKey: ${fileKey}` });
     }
 
+    // Exactly the write routes the MRI marshal serves (marshal_http.hpp):
+    // /write/file_slice_translation, /write/slice_delta, /write/slice_target.
+    // Per-axis rotation, pose-transform and slice-thickness routes were
+    // removed from the marshal; the UI's rotation sliders go through
+    // slice_delta.
     const mriWriteKeys = new Set([
       'slice_delta',
       'slice_delta.json',
       'file_slice_translation',
       'file_slice_translation.json',
-      'file_x_rotation',
-      'file_x_rotation.json',
-      'file_y_rotation',
-      'file_y_rotation.json',
-      'file_z_rotation',
-      'file_z_rotation.json',
-      'file_slice_pose_transform',
-      'file_slice_pose_transform.json',
-      'file_slice_thickness',
-      'file_slice_thickness.json',
       'slice_target'
     ]);
     const isMriWrite = mriWriteKeys.has(fileName);
