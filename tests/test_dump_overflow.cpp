@@ -871,3 +871,32 @@ TEST_CASE("DumpRecorder enqueue returns Stopped after destruction",
     REQUIRE(mrd::DumpEnqueueResult::Stopped != mrd::DumpEnqueueResult::Accepted);
     REQUIRE(mrd::DumpEnqueueResult::Stopped != mrd::DumpEnqueueResult::Dropped);
 }
+
+// Audit 2026-08-28 #11: dump status said "complete" after records were
+// dropped on disk-write failure. A regular file where the dump root should
+// be makes every spool open fail, so every record is dropped.
+TEST_CASE("DumpRecorder reports Incomplete, not Complete, after dropped records",
+          "[dump][overflow][status]") {
+    namespace fs = std::filesystem;
+    auto base = fs::temp_directory_path() / "test_dump_incomplete";
+    fs::remove_all(base);
+    fs::create_directories(base);
+    const auto root = base / "dump_root";
+    mrd::DumpRecorder rec(root.string());
+    // The constructor created the lane directories; replace each with a
+    // regular file so the worker's spool open fails for every record.
+    std::vector<fs::path> lane_dirs;
+    for (const auto& e : fs::recursive_directory_iterator(root)) {
+        if (e.is_directory() && fs::is_empty(e.path())) lane_dirs.push_back(e.path());
+    }
+    REQUIRE_FALSE(lane_dirs.empty());
+    for (const auto& d : lane_dirs) {
+        fs::remove_all(d);
+        std::ofstream(d) << "not a directory";
+    }
+    dump_start_scan(rec, "lost.h5", "<ismrmrdHeader/>");
+    rec.close_scan();
+    CHECK(rec.dropped_record_count() > 0);
+    CHECK(rec.counters().status == mrd::DumpRecorder::ConversionStatus::Incomplete);
+    CHECK(std::string(mrd::DumpRecorder::status_name(rec.counters().status)) == "incomplete");
+}

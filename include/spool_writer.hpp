@@ -30,7 +30,16 @@ public:
     explicit SpoolWriter(const std::filesystem::path& path)
         : path_(path)
     {
-        std::filesystem::create_directories(path.parent_path());
+        // Error-code overload: this runs on a recorder worker thread, and
+        // a throwing create_directories (e.g. a stray file where the lane
+        // directory belongs) would terminate the process instead of
+        // surfacing as an unhealthy spool.
+        std::error_code dir_ec;
+        std::filesystem::create_directories(path.parent_path(), dir_ec);
+        if (dir_ec) {
+            last_error_ = "create_directories failed: " + dir_ec.message();
+            return;
+        }
         fp_ = std::fopen(path.c_str(), "wb");
         if (!fp_) {
             last_error_ = std::string("fopen failed: ") + std::strerror(errno);

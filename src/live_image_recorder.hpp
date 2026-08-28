@@ -108,6 +108,7 @@ private:
     std::unique_ptr<SpoolWriter> spool_;
     std::string current_filename_;
     std::string current_xml_;
+    bool xml_spooled_{false};   // worker-owned
 
     // Atomics published by the worker for HTTP-thread reads.
     std::atomic<uint32_t> pub_acq_count_{0};
@@ -122,6 +123,7 @@ private:
     void worker_loop();
     void ensure_spool_on_worker();
     void close_and_convert_on_worker();
+    void spool_xml_once_on_worker();
 };
 
 } // namespace mrd

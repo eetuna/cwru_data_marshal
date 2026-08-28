@@ -792,15 +792,7 @@ static auto handle_get_debug_sinks(const http::request<Body>& req, MarshalState&
         j["dump"]["dropped_records"] = c.dropped_records;
         j["dump"]["dropped_bytes"]   = c.dropped_bytes;
         j["dump"]["had_overflow"]    = c.had_overflow;
-        const char* status = "idle";
-        switch (c.status) {
-            case mrd::DumpRecorder::ConversionStatus::Idle:       status = "idle"; break;
-            case mrd::DumpRecorder::ConversionStatus::Spooling:   status = "spooling"; break;
-            case mrd::DumpRecorder::ConversionStatus::Converting: status = "converting"; break;
-            case mrd::DumpRecorder::ConversionStatus::Complete:   status = "complete"; break;
-            case mrd::DumpRecorder::ConversionStatus::Failed:     status = "failed"; break;
-        }
-        j["dump"]["conversion_status"] = status;
+        j["dump"]["conversion_status"] = mrd::DumpRecorder::status_name(c.status);
     }
     if (!state.dump_enabled) {
         auto live_lane_json = [](const mrd::LiveImageRecorder::CounterSnapshot& c,

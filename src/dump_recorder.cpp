@@ -381,9 +381,8 @@ void DumpRecorder::close_scan()
         }
     }
 
-    const bool ok = scanner_.conversion_ok && recon_.conversion_ok;
-    status_.store(ok ? ConversionStatus::Complete : ConversionStatus::Failed);
-    LOG_INFO("Dump conversion " << (ok ? "complete" : "FAILED"));
+    status_.store(final_status());
+    LOG_INFO("Dump conversion " << status_name(status_.load()));
 }
 
 void DumpRecorder::close_lane(DumpLane lane_id)
@@ -419,8 +418,7 @@ void DumpRecorder::close_lane(DumpLane lane_id)
     }
 
     if (all_closed) {
-        const bool ok = scanner_.conversion_ok && recon_.conversion_ok;
-        status_.store(ok ? ConversionStatus::Complete : ConversionStatus::Failed);
+        status_.store(final_status());
     } else {
         status_.store(ConversionStatus::Spooling);
     }
@@ -487,6 +485,29 @@ void DumpRecorder::convert_lane(Lane& lane, const std::string& stem,
         std::error_code ec;
         std::filesystem::remove(spool_path, ec);
     }
+}
+
+DumpRecorder::ConversionStatus DumpRecorder::final_status() const noexcept
+{
+    const bool ok = scanner_.conversion_ok && recon_.conversion_ok;
+    if (!ok) return ConversionStatus::Failed;
+    // A successful conversion of a spool that is missing records is not a
+    // complete archive; say so instead of reporting Complete.
+    if (dropped_record_count() > 0) return ConversionStatus::Incomplete;
+    return ConversionStatus::Complete;
+}
+
+const char* DumpRecorder::status_name(ConversionStatus s) noexcept
+{
+    switch (s) {
+        case ConversionStatus::Idle:       return "idle";
+        case ConversionStatus::Spooling:   return "spooling";
+        case ConversionStatus::Converting: return "converting";
+        case ConversionStatus::Complete:   return "complete";
+        case ConversionStatus::Incomplete: return "incomplete";
+        case ConversionStatus::Failed:     return "failed";
+    }
+    return "unknown";
 }
 
 // ----- Post-hoc accessors -----

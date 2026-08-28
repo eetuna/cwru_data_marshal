@@ -112,9 +112,14 @@ public:
         Idle,        // no scan seen
         Spooling,    // scan in progress
         Converting,  // close_scan underway
-        Complete,    // last scan converted successfully
+        Complete,    // last scan converted successfully AND nothing was dropped
+        Incomplete,  // converted, but records were dropped on the way in
+                     // (disk-write failure): the H5 is a valid prefix, not
+                     // the whole scan (audit 2026-08-28 #11)
         Failed,      // last scan conversion failed
     };
+    ConversionStatus final_status() const noexcept;
+    static const char* status_name(ConversionStatus s) noexcept;
 
     struct LaneSnapshot {
         uint64_t spool_records{0};

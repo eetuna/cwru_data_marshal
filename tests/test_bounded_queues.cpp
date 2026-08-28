@@ -29,6 +29,7 @@
 #include <vector>
 
 #include <ismrmrd/ismrmrd.h>
+#include <ismrmrd/dataset.h>
 
 #include "latest_image_writer.hpp"
 #include "live_image_recorder.hpp"
@@ -206,7 +207,9 @@ TEST_CASE("LiveImageRecorder is lossless past the old 4096-job cap",
     // converted counts after close_scan runs convert.
     auto snap = rec.counters();
     CHECK(snap.img == static_cast<uint32_t>(kEnqueueCount));
-    CHECK(snap.spool_records == static_cast<uint64_t>(kEnqueueCount));
+    // +1: the scan XML header is spooled once as a METADATA_XML_TEXT
+    // record (audit 2026-08-28 #11) ahead of the images.
+    CHECK(snap.spool_records == static_cast<uint64_t>(kEnqueueCount) + 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -303,4 +306,30 @@ TEST_CASE("LatestImageWriter retries the newest snapshot on write failure, then 
     CHECK(perf.retried == 2);
     CHECK(perf.lost == 1);
     CHECK(perf.completed == 0);
+}
+
+// Audit 2026-08-28 #11: live per-scan H5 files carried no MRD XML header.
+TEST_CASE("LiveImageRecorder writes the scan XML header into the converted H5",
+          "[live][recorder][xml]") {
+    auto dir = fs::temp_directory_path() / "test_live_recorder_xml";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string xml = "<?xml version=\"1.0\"?><ismrmrdHeader><experimentalConditions>"
+                            "<H1resonanceFrequency_Hz>63870000</H1resonanceFrequency_Hz>"
+                            "</experimentalConditions></ismrmrdHeader>";
+    {
+        mrd::LiveImageRecorder rec(dir);
+        // Header known only from the second record (recon lane: first image
+        // can precede METADATA).
+        rec.append_image("scan_xml.h5", "", tiny_wire_image());
+        rec.append_image("scan_xml.h5", xml, tiny_wire_image());
+        rec.close_scan();
+    }
+    const auto h5 = dir / "scan_xml.h5";
+    REQUIRE(fs::exists(h5));
+    ISMRMRD::Dataset ds(h5.c_str(), "/dataset", false);
+    std::string read_back;
+    ds.readHeader(read_back);
+    CHECK(read_back == xml);
+    CHECK(ds.getNumberOfImages("image_0") == 2);
 }

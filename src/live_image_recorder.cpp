@@ -118,7 +118,8 @@ void LiveImageRecorder::ensure_spool_on_worker()
     if (spool_) return;
     if (current_filename_.empty()) return; // wait for first record
     auto spool_path = lane_dir_ / (current_filename_ + ".spool");
-    std::filesystem::create_directories(lane_dir_);
+    std::error_code dir_ec;
+    std::filesystem::create_directories(lane_dir_, dir_ec);   // SpoolWriter reports failure
     spool_ = std::make_unique<SpoolWriter>(spool_path);
     if (!spool_->healthy()) {
         LOG_ERROR("Live spool open failed on lane=" << component_tag_
@@ -128,9 +129,39 @@ void LiveImageRecorder::ensure_spool_on_worker()
         LOG_INFO("Opened live spool lane=" << component_tag_
                  << " path=" << spool_path.string());
         pub_sink_open_.store(true);
+        xml_spooled_ = false;
         pub_spool_records_.store(0);
         pub_spool_bytes_.store(0);
     }
+}
+
+// Audit 2026-08-28 #11: the MRD XML header was remembered (current_xml_)
+// but never reached the converter, so live per-scan H5 files carried
+// images/waveforms with no header. Spool it once as a METADATA_XML_TEXT
+// record ([uint32 len][xml NUL], the wire body the converter already
+// understands) as soon as both the spool and the header exist — the
+// header can arrive after the first image on the recon lane.
+void LiveImageRecorder::spool_xml_once_on_worker()
+{
+    if (xml_spooled_ || !spool_ || !spool_->healthy()) return;
+    std::string xml;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        xml = current_xml_;
+    }
+    if (xml.empty()) return;
+    const uint32_t inner = static_cast<uint32_t>(xml.size() + 1);
+    std::vector<uint8_t> body(sizeof(uint32_t) + inner);
+    std::memcpy(body.data(), &inner, sizeof(inner));
+    std::memcpy(body.data() + sizeof(inner), xml.data(), xml.size());
+    body[body.size() - 1] = '\0';
+    if (!spool_->append(MRD_MESSAGE_METADATA_XML_TEXT, body.data(),
+                        static_cast<uint32_t>(body.size()))) {
+        LOG_ERROR("Live spool XML append failed on lane=" << component_tag_
+                  << ": " << spool_->last_error());
+        return;
+    }
+    xml_spooled_ = true;
 }
 
 void LiveImageRecorder::close_and_convert_on_worker()
@@ -189,6 +220,7 @@ void LiveImageRecorder::close_and_convert_on_worker()
     // Reset for next scan.
     current_filename_.clear();
     current_xml_.clear();
+    xml_spooled_ = false;
     high_watermark_hit_.store(false);
 }
 
@@ -211,6 +243,7 @@ void LiveImageRecorder::worker_loop()
         }
 
         ensure_spool_on_worker();
+        spool_xml_once_on_worker();
         if (!spool_ || !spool_->healthy()) {
             // Disk failure: count as dropped so it shows up in
             // /debug/sinks. Contract keeps us from failing the
