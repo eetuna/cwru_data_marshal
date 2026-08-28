@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <regex>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -245,6 +246,44 @@ namespace mrd
         return group.seen_slices.size() >= state.recon_expected_slices;
     }
 
+    // Largest slice count we accept from an MRD XML header. ISMRMRD slice
+    // is a uint16 (<maximum>65535</maximum> is representable) but the
+    // group would be pathological long before that; anything above this
+    // is treated as "unknown" (1) so the group falls back to the
+    // repeated-slice / series-change boundaries.
+    constexpr unsigned long kMaxSlicesPerVolume = 4096;
+
+    // Expected slices per recon volume from the MRD XML header:
+    // encodingLimits/slice/maximum + 1, else encodedSpace z, else 1.
+    // Validates the value BEFORE narrowing (audit 2026-08-28 #7:
+    // <maximum>65535</maximum> used to wrap maximum+1 to 0 in uint16_t).
+    inline uint16_t expected_slices_from_xml(const std::string &xml)
+    {
+        unsigned long n = 1;
+        std::smatch m;
+        static const std::regex re_slice(
+            R"(<slice>\s*<minimum>\d+</minimum>\s*<maximum>(\d+)</maximum>)");
+        static const std::regex re_z(R"(<z>(\d+)</z>)");
+        try
+        {
+            if (std::regex_search(xml, m, re_slice))
+                n = std::stoul(m[1].str()) + 1;
+            else if (std::regex_search(xml, m, re_z))
+                n = std::stoul(m[1].str());
+        }
+        catch (const std::exception &)
+        {
+            n = kMaxSlicesPerVolume + 1;   // unparseable digits string: reject below
+        }
+        if (n == 0 || n > kMaxSlicesPerVolume)
+        {
+            LOG_WARN("METADATA_XML slice count " << n << " out of range [1,"
+                     << kMaxSlicesPerVolume << "]; treating as unknown (1)");
+            return 1;
+        }
+        return static_cast<uint16_t>(n);
+    }
+
     // "No epoch requirement" sentinel for the require_epoch parameters below
     // (scanner-lane appends run on the session thread that owns the scan
     // and need no guard).
@@ -326,7 +365,15 @@ namespace mrd
             else
             {
                 auto &recon_group = state.recon_latest_group;
-                if (recon_group.active && recon_group.image_series_index != parsed.header.image_series_index)
+                const bool volume_identity_changed =
+                    recon_group.active &&
+                    (recon_group.image_series_index != parsed.header.image_series_index ||
+                     recon_group.repetition != parsed.header.repetition ||
+                     recon_group.contrast != parsed.header.contrast ||
+                     recon_group.set != parsed.header.set ||
+                     recon_group.phase != parsed.header.phase ||
+                     recon_group.average != parsed.header.average);
+                if (volume_identity_changed)
                 {
                     // New series supersedes the current volume. Its content
                     // (if any) already reached /image/latest via the
@@ -346,14 +393,40 @@ namespace mrd
                     // already published incrementally; start a fresh group.
                     recon_group.reset();
                 }
+                else if (recon_group.active &&
+                         (recon_group.images.size() >= state.recon_group_max_images ||
+                          recon_group.bytes + image_bytes.size() > state.recon_group_max_bytes))
+                {
+                    // Bound the group regardless of what the header
+                    // promised. Everything accumulated so far was already
+                    // published incrementally; start over.
+                    if (!recon_group.cap_logged)
+                    {
+                        LOG_WARN("Recon latest-group cap reached (images="
+                                 << recon_group.images.size() << " bytes="
+                                 << recon_group.bytes << ", expected_slices="
+                                 << state.recon_expected_slices
+                                 << "); starting a new volume");
+                    }
+                    recon_group.reset();
+                    recon_group.cap_logged = true;
+                }
 
                 if (!recon_group.active)
                 {
+                    const bool keep_log = recon_group.cap_logged;
                     recon_group.reset();
+                    recon_group.cap_logged = keep_log;
                     recon_group.active = true;
                     recon_group.image_series_index = parsed.header.image_series_index;
+                    recon_group.repetition = parsed.header.repetition;
+                    recon_group.contrast = parsed.header.contrast;
+                    recon_group.set = parsed.header.set;
+                    recon_group.phase = parsed.header.phase;
+                    recon_group.average = parsed.header.average;
                 }
 
+                recon_group.bytes += image_bytes.size();
                 recon_group.images.push_back(std::move(image_bytes));
                 if (std::find(recon_group.seen_slices.begin(),
                               recon_group.seen_slices.end(),

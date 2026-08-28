@@ -632,20 +632,7 @@ private:
                     auto nul = xml.find('\0');
                     if (nul != std::string::npos) xml.resize(nul);
                     LOG_INFO("METADATA_XML: " << xml.size() << " bytes");
-                    uint16_t nz = 1;
-                    {
-                        std::regex re_slice(R"(<slice>\s*<minimum>\d+</minimum>\s*<maximum>(\d+)</maximum>)");
-                        std::smatch m;
-                        if (std::regex_search(xml, m, re_slice)) {
-                            nz = static_cast<uint16_t>(std::stoi(m[1].str()) + 1);
-                        } else {
-                            std::regex re_z(R"(<z>(\d+)</z>)");
-                            if (std::regex_search(xml, m, re_z)) {
-                                nz = static_cast<uint16_t>(std::stoi(m[1].str()));
-                            }
-                        }
-                        if (nz == 0) nz = 1;
-                    }
+                    const uint16_t nz = expected_slices_from_xml(xml);
                     std::string scan_file;
                     {
                         std::lock_guard<std::mutex> lk(state_.scan_mtx);

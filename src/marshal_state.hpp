@@ -43,15 +43,29 @@ struct ReconLatestGroupState {
     bool active{false};
     bool published{false};
     uint16_t image_series_index{0};
+    // Volume identity beyond the series index (audit 2026-08-28 #7): a
+    // recon that interleaves repetitions/contrasts/sets without bumping
+    // the series (rep0/s0, rep1/s0, rep0/s1 ...) must not have its
+    // images mixed into one volume. Any change starts a new group.
+    uint16_t repetition{0};
+    uint16_t contrast{0};
+    uint16_t set{0};
+    uint16_t phase{0};
+    uint16_t average{0};
     std::vector<std::vector<uint8_t>> images;
     std::vector<uint16_t> seen_slices;
+    size_t bytes{0};
+    bool cap_logged{false};
 
     void reset() {
         active = false;
         published = false;
         image_series_index = 0;
+        repetition = contrast = set = phase = average = 0;
         images.clear();
         seen_slices.clear();
+        bytes = 0;
+        cap_logged = false;
     }
 };
 
@@ -136,6 +150,13 @@ struct MarshalState {
     std::string current_config;
     std::string current_scan_filename;
     uint16_t recon_expected_slices{0};
+    // Hard bounds on the recon latest-group (audit 2026-08-28 #7): a
+    // declared slice count larger than reality, with unique increasing
+    // slice indices, would otherwise let the group grow to 65,536
+    // images and republish (copy) all of them per image. Fields rather
+    // than constants so tests can lower them.
+    size_t recon_group_max_images{4096};
+    size_t recon_group_max_bytes{512ULL * 1024 * 1024};
     bool scanner_lane_finalized{false};
     bool recon_lane_finalized{false};
 

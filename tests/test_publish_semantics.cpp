@@ -401,3 +401,70 @@ TEST_CASE("recon failure marker carrying a superseded epoch leaves the current i
     }
     CHECK(state.latest_image_generation.load() == 2);
 }
+
+// 2026-08-28 audit #7: volume grouping bounds and identity.
+TEST_CASE("expected_slices_from_xml validates before narrowing", "[live_image_store][xml]") {
+    CHECK(mrd::expected_slices_from_xml("<slice><minimum>0</minimum><maximum>4</maximum></slice>") == 5);
+    CHECK(mrd::expected_slices_from_xml("<encodedSpace><matrixSize><z>3</z></matrixSize></encodedSpace>") == 3);
+    CHECK(mrd::expected_slices_from_xml("<nothing/>") == 1);
+    // Used to wrap 65535+1 -> 0 -> forced to 1 silently; now rejected explicitly.
+    CHECK(mrd::expected_slices_from_xml("<slice><minimum>0</minimum><maximum>65535</maximum></slice>") == 1);
+    CHECK(mrd::expected_slices_from_xml("<slice><minimum>0</minimum><maximum>99999999999999999999</maximum></slice>") == 1);
+    CHECK(mrd::expected_slices_from_xml("<z>0</z>") == 1);
+    CHECK(mrd::expected_slices_from_xml("<z>4096</z>") == 4096);
+    CHECK(mrd::expected_slices_from_xml("<z>4097</z>") == 1);
+}
+
+static std::vector<uint8_t> make_wire_image_rep(uint16_t series, uint16_t slice, uint16_t rep) {
+    auto wire = make_wire_image(series, slice);
+    ISMRMRD::ImageHeader hdr;
+    std::memcpy(&hdr, wire.data(), mrd::IMAGE_HEADER_BYTES);
+    hdr.repetition = rep;
+    std::memcpy(wire.data(), &hdr, mrd::IMAGE_HEADER_BYTES);
+    return wire;
+}
+
+TEST_CASE("repetition change starts a fresh group even with the same series",
+          "[live_image_store][group]") {
+    MarshalState state;
+    init_state(state, 3);
+    const auto snapshot = mrd::lane_latest_path(state, mrd::LiveLane::Recon);
+
+    auto a = make_wire_image_rep(1, 0, 0);
+    auto b = make_wire_image_rep(1, 1, 0);
+    auto c = make_wire_image_rep(1, 0, 1);   // rep 1 slice 0: not the same volume
+    mrd::append_live_image(state, mrd::LiveLane::Recon, a.data(), a.size());
+    mrd::append_live_image(state, mrd::LiveLane::Recon, b.data(), b.size());
+    CHECK(latest_image_count(snapshot) == 2);
+    mrd::append_live_image(state, mrd::LiveLane::Recon, c.data(), c.size());
+    CHECK(latest_image_count(snapshot) == 1);
+    auto d = make_wire_image_rep(1, 1, 1);
+    mrd::append_live_image(state, mrd::LiveLane::Recon, d.data(), d.size());
+    CHECK(latest_image_count(snapshot) == 2);   // rep 1 accumulates on its own
+}
+
+TEST_CASE("recon group is bounded by image count and bytes regardless of the header",
+          "[live_image_store][group][cap]") {
+    MarshalState state;
+    init_state(state, 100);   // header promises far more slices than arrive
+    const auto snapshot = mrd::lane_latest_path(state, mrd::LiveLane::Recon);
+
+    SECTION("image cap") {
+        state.recon_group_max_images = 3;
+        for (uint16_t s = 0; s < 3; ++s) append_recon(state, 1, s);
+        CHECK(latest_image_count(snapshot) == 3);
+        append_recon(state, 1, 3);   // would be the 4th: group restarts
+        CHECK(latest_image_count(snapshot) == 1);
+        append_recon(state, 1, 4);
+        CHECK(latest_image_count(snapshot) == 2);
+    }
+    SECTION("byte cap") {
+        const size_t one = make_wire_image(1, 0).size();
+        state.recon_group_max_bytes = one * 2 + one / 2;   // room for two, not three
+        append_recon(state, 1, 0);
+        append_recon(state, 1, 1);
+        CHECK(latest_image_count(snapshot) == 2);
+        append_recon(state, 1, 2);
+        CHECK(latest_image_count(snapshot) == 1);
+    }
+}
