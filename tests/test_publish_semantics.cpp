@@ -201,7 +201,7 @@ TEST_CASE("EOF flush does not republish an incrementally-published group",
 
     // Everything the group holds already reached /image/latest: EOF must
     // not double-publish.
-    mrd::flush_live_lane(state, mrd::LiveLane::Recon);
+    mrd::flush_live_lane(state, mrd::LiveLane::Recon, /*wait=*/true);
     CHECK(state.latest_image_generation.load() == 2);
     CHECK(latest_image_count(snapshot) == 2);
 }
@@ -218,13 +218,13 @@ TEST_CASE("EOF flush publishes pre-header images that never published",
     CHECK(state.latest_image_generation.load() == 0);
     CHECK_FALSE(fs::exists(snapshot));
 
-    mrd::flush_live_lane(state, mrd::LiveLane::Recon);
+    mrd::flush_live_lane(state, mrd::LiveLane::Recon, /*wait=*/true);
     CHECK(state.latest_image_generation.load() == 1);
     REQUIRE(fs::exists(snapshot));
     CHECK(latest_image_count(snapshot) == 2);
 
     // A second flush has nothing pending: no double publish.
-    mrd::flush_live_lane(state, mrd::LiveLane::Recon);
+    mrd::flush_live_lane(state, mrd::LiveLane::Recon, /*wait=*/true);
     CHECK(state.latest_image_generation.load() == 1);
 }
 

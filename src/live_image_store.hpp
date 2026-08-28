@@ -527,13 +527,16 @@ namespace mrd
         return true;
     }
 
-    inline void flush_live_lane(MarshalState &state, LiveLane lane)
+    // wait: block until the spool->H5 conversion finished (shutdown) or
+    // just enqueue it (scan boundary on a live session — never hold
+    // scan_mtx / the session thread across a multi-second conversion).
+    inline void flush_live_lane(MarshalState &state, LiveLane lane, bool wait)
     {
         std::lock_guard<std::mutex> lk(state.scan_mtx);
         auto &lane_store = lane_state(state, lane);
         if (lane_store.recorder)
         {
-            lane_store.recorder->close_scan();
+            lane_store.recorder->close_scan(wait);
         }
         if (lane == LiveLane::Recon)
         {
@@ -541,10 +544,10 @@ namespace mrd
         }
     }
 
-    inline void flush_all_live_lanes(MarshalState &state)
+    inline void flush_all_live_lanes(MarshalState &state, bool wait = true)
     {
-        flush_live_lane(state, LiveLane::Scanner);
-        flush_live_lane(state, LiveLane::Recon);
+        flush_live_lane(state, LiveLane::Scanner, wait);
+        flush_live_lane(state, LiveLane::Recon, wait);
     }
 
     // Epoch-guarded variant for the abnormal-EOF finalizer. With the
@@ -564,7 +567,7 @@ namespace mrd
         auto &lane_store = lane_state(state, lane);
         if (lane_store.recorder)
         {
-            lane_store.recorder->close_scan();
+            lane_store.recorder->close_scan(/*wait=*/false);
         }
         if (lane == LiveLane::Recon)
         {
@@ -617,6 +620,23 @@ namespace mrd
         if (state.scan_epoch.load() != epoch)
             return;
         mark_lane_finalized_after_eof_locked(state, lane);
+    }
+
+    // A new scanner TCP session is a new scan even before (or without) its
+    // METADATA (audit #1 image-only follow-up): bump scan_epoch so every
+    // still-pending publish, finalizer or recon callback of the previous
+    // session stands down, and in live mode retire its outputs exactly as
+    // METADATA would. Idempotent with the METADATA reset that follows.
+    inline void reset_live_outputs_for_new_scan(MarshalState &state);
+
+    inline void begin_scanner_session(MarshalState &state)
+    {
+        {
+            std::lock_guard<std::mutex> lk(state.scan_mtx);
+            state.scan_epoch.fetch_add(1);
+        }
+        if (!state.dump_enabled)
+            reset_live_outputs_for_new_scan(state);
     }
 
     inline void reset_live_outputs_for_new_scan(MarshalState &state)

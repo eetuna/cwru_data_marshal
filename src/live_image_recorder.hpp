@@ -51,7 +51,14 @@ public:
     void append_waveform(std::string filename,
                          std::string xml,
                          std::vector<uint8_t> body);
-    void close_scan();
+    // Enqueue the end-of-scan barrier (flush + spool->H5 convert on the
+    // worker). wait=true blocks until conversion is done (shutdown, tests);
+    // wait=false returns immediately (audit 2026-08-28 #9: a 10-30 s
+    // conversion used to run on the scanner session thread under
+    // scan_mtx, so a scanner that closed and reconnected right after
+    // CLOSE was rejected as concurrent for the whole conversion). Records
+    // for the next scan queue behind the barrier and land in a new spool.
+    void close_scan(bool wait = true);
 
     // Retained for backwards compat. With the spool design, drops
     // only happen on disk-write failure (not queue pressure).
@@ -85,6 +92,11 @@ private:
     struct Record {
         uint16_t tag{0};
         std::vector<uint8_t> body;
+        // Scan identity travels with the record so a record enqueued
+        // while the previous scan is still converting adopts its own
+        // filename/xml once the worker gets to it.
+        std::string filename;
+        std::string xml;
         // Non-droppable barrier used by close_scan to synchronously
         // drive flush + convert on the worker thread.
         bool barrier{false};

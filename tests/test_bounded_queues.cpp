@@ -333,3 +333,31 @@ TEST_CASE("LiveImageRecorder writes the scan XML header into the converted H5",
     CHECK(read_back == xml);
     CHECK(ds.getNumberOfImages("image_0") == 2);
 }
+
+// Audit 2026-08-28 #9: close_scan(wait=false) must return immediately and
+// the next scan's records must land in their own file behind the barrier.
+TEST_CASE("LiveImageRecorder non-blocking close: next scan queues behind the conversion",
+          "[live][recorder][async_close]") {
+    auto dir = fs::temp_directory_path() / "test_live_recorder_async_close";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    {
+        mrd::LiveImageRecorder rec(dir);
+        for (int i = 0; i < 3000; ++i) rec.append_image("scan_a.h5", "<a/>", tiny_wire_image());
+        const auto t0 = std::chrono::steady_clock::now();
+        rec.close_scan(/*wait=*/false);
+        const auto took = std::chrono::steady_clock::now() - t0;
+        CHECK(took < std::chrono::milliseconds(50));
+        // Next scan, enqueued while scan_a is still converting.
+        rec.append_image("scan_b.h5", "<b/>", tiny_wire_image());
+        rec.append_image("scan_b.h5", "<b/>", tiny_wire_image());
+        rec.close_scan(/*wait=*/true);
+    }
+    ISMRMRD::Dataset a((dir / "scan_a.h5").c_str(), "/dataset", false);
+    ISMRMRD::Dataset b((dir / "scan_b.h5").c_str(), "/dataset", false);
+    CHECK(a.getNumberOfImages("image_0") == 3000);
+    CHECK(b.getNumberOfImages("image_0") == 2);
+    std::string xa, xb; a.readHeader(xa); b.readHeader(xb);
+    CHECK(xa == "<a/>");
+    CHECK(xb == "<b/>");
+}

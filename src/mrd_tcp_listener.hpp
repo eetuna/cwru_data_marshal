@@ -462,6 +462,7 @@ private:
 
     void handle_session(std::shared_ptr<tcp::socket> sock) {
         LOG_INFO("MRD session started");
+        begin_scanner_session(state_);
         close_sent_to_scanner_.store(false);
         std::vector<std::pair<uint16_t, std::vector<uint8_t>>> recon_preamble;
         bool normal_close_seen = false;
@@ -744,7 +745,10 @@ private:
                                  << state_.dump_recorder->dropped_byte_count()
                                  << " bytes during this scan");
                     }
-                    flush_all_live_lanes(state_);
+                    // Non-blocking: conversion runs on the recorder
+                    // workers; this thread goes straight back to reading
+                    // (next scan on this connection, or EOF → slot free).
+                    flush_all_live_lanes(state_, /*wait=*/false);
                     state_.close_scan();
                     session_active_.store(false);
                     normal_close_seen = true;

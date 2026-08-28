@@ -57,13 +57,8 @@ void LiveImageRecorder::enqueue_record(uint16_t tag,
     {
         std::lock_guard<std::mutex> lk(mtx_);
         if (stopping_) return;
-        if (current_filename_.empty() && !filename.empty()) {
-            current_filename_ = std::move(filename);
-        }
-        if (current_xml_.empty() && !xml.empty()) {
-            current_xml_ = std::move(xml);
-        }
-        queue_.push_back(Record{tag, std::move(body), /*barrier=*/false, nullptr});
+        queue_.push_back(Record{tag, std::move(body), std::move(filename),
+                                std::move(xml), /*barrier=*/false, nullptr});
         size_after = queue_.size();
     }
     cv_.notify_one();
@@ -94,7 +89,7 @@ void LiveImageRecorder::append_waveform(std::string filename,
                    std::move(filename), std::move(xml), std::move(body));
 }
 
-void LiveImageRecorder::close_scan()
+void LiveImageRecorder::close_scan(bool wait)
 {
     auto signal = std::make_shared<std::promise<void>>();
     auto fut = signal->get_future();
@@ -110,7 +105,7 @@ void LiveImageRecorder::close_scan()
         queue_.push_back(std::move(barrier));
     }
     cv_.notify_one();
-    fut.wait();
+    if (wait) fut.wait();
 }
 
 void LiveImageRecorder::ensure_spool_on_worker()
@@ -144,11 +139,7 @@ void LiveImageRecorder::ensure_spool_on_worker()
 void LiveImageRecorder::spool_xml_once_on_worker()
 {
     if (xml_spooled_ || !spool_ || !spool_->healthy()) return;
-    std::string xml;
-    {
-        std::lock_guard<std::mutex> lk(mtx_);
-        xml = current_xml_;
-    }
+    const std::string& xml = current_xml_;   // worker-owned
     if (xml.empty()) return;
     const uint32_t inner = static_cast<uint32_t>(xml.size() + 1);
     std::vector<uint8_t> body(sizeof(uint32_t) + inner);
@@ -242,6 +233,13 @@ void LiveImageRecorder::worker_loop()
             continue;
         }
 
+        // Worker-owned scan identity: first record of a scan defines it.
+        if (current_filename_.empty() && !rec.filename.empty()) {
+            current_filename_ = std::move(rec.filename);
+        }
+        if (current_xml_.empty() && !rec.xml.empty()) {
+            current_xml_ = std::move(rec.xml);
+        }
         ensure_spool_on_worker();
         spool_xml_once_on_worker();
         if (!spool_ || !spool_->healthy()) {

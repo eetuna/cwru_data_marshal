@@ -85,3 +85,33 @@ TEST_CASE("Second concurrent scanner is rejected; first stays connected",
     ioc.stop();
     if (ioc_thread.joinable()) ioc_thread.join();
 }
+
+// Audit #1 image-only follow-up: a new scanner TCP session bumps scan_epoch
+// even without METADATA, so stale callbacks/publishes of the previous
+// session cannot be attributed to it.
+TEST_CASE("Each accepted scanner session bumps scan_epoch", "[mrd][epoch]") {
+    MarshalState state;
+    state.dump_dir = "/tmp/test_scanner_session_epoch";
+    net::io_context ioc;
+    uint16_t port = get_ephemeral_port();
+    mrd::MrdTcpListener listener(ioc, port, state, nullptr);
+    std::thread ioc_thread([&] { ioc.run(); });
+
+    const uint64_t e0 = state.scan_epoch.load();
+    for (int i = 1; i <= 2; ++i) {
+        tcp::socket s(ioc);
+        s.connect(tcp::endpoint(net::ip::make_address("127.0.0.1"), port));
+        for (int t = 0; t < 100 && state.scan_epoch.load() < e0 + i; ++t)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK(state.scan_epoch.load() == e0 + i);
+        boost::system::error_code ig;
+        s.shutdown(tcp::socket::shutdown_both, ig);
+        s.close(ig);
+        for (int t = 0; t < 100 && listener.has_scanner(); ++t)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        REQUIRE_FALSE(listener.has_scanner());
+    }
+    listener.stop();
+    ioc.stop();
+    ioc_thread.join();
+}

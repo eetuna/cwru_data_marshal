@@ -32,9 +32,12 @@
 struct LiveImageLaneState {
     std::unique_ptr<mrd::LiveImageRecorder> recorder;
 
+    // Scan boundary: enqueue the convert, do not wait (see
+    // LiveImageRecorder::close_scan). Shutdown drains via the recorder
+    // destructor.
     void close() {
         if (recorder) {
-            recorder->close_scan();
+            recorder->close_scan(/*wait=*/false);
         }
     }
 };
