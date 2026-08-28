@@ -20,6 +20,9 @@
 
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <map>
+#include <mutex>
 #include <memory>
 #include <string>
 #include <thread>
@@ -204,4 +207,100 @@ TEST_CASE("LiveImageRecorder is lossless past the old 4096-job cap",
     auto snap = rec.counters();
     CHECK(snap.img == static_cast<uint32_t>(kEnqueueCount));
     CHECK(snap.spool_records == static_cast<uint64_t>(kEnqueueCount));
+}
+
+// ---------------------------------------------------------------------------
+// Audit 2026-08-28 #3: "published" used to mean "queued". The newest snapshot
+// per destination must survive overload (superseded jobs are evicted
+// instead) and must be retried on write failure; genuine loss is reported
+// through the completion outcome rather than swallowed.
+// ---------------------------------------------------------------------------
+namespace {
+std::vector<uint8_t> tiny_wire_image() {
+    ISMRMRD::ImageHeader hdr{};
+    hdr.version = 1;
+    hdr.data_type = ISMRMRD::ISMRMRD_FLOAT;
+    hdr.matrix_size[0] = 2; hdr.matrix_size[1] = 2; hdr.matrix_size[2] = 1;
+    hdr.channels = 1;
+    std::vector<uint8_t> body(mrd::IMAGE_HEADER_BYTES + 8 + 4 * sizeof(float), 0);
+    std::memcpy(body.data(), &hdr, mrd::IMAGE_HEADER_BYTES);
+    return body;
+}
+} // namespace
+
+TEST_CASE("LatestImageWriter keeps the newest snapshot per destination under overload",
+          "[latest][bounded][audit3]") {
+    auto dir = fs::temp_directory_path() / "test_bounded_latest_newest";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path dests[2] = {dir / "a" / "latest_image.h5", dir / "b" / "latest_image.h5"};
+
+    std::mutex m;
+    std::map<std::string, std::pair<int, mrd::LatestWriteOutcome>> last_outcome;  // dest -> (idx, outcome)
+    int committed = 0, dropped = 0;
+    mrd::LatestImageWriter::PerfSnapshot perf;
+    {
+        mrd::LatestImageWriter writer;
+        const int N = 2000;   // >> 64-job cap; each H5 write is ~ms, so overload is certain
+        for (int i = 0; i < N; ++i) {
+            const auto& dest = dests[i % 2];
+            writer.enqueue(dest, "<xml/>", {tiny_wire_image()},
+                [&, i, dest](const fs::path&, mrd::LatestWriteOutcome o) {
+                    std::lock_guard<std::mutex> lk(m);
+                    if (o == mrd::LatestWriteOutcome::Committed) ++committed; else ++dropped;
+                    auto& slot = last_outcome[dest.string()];
+                    if (i >= slot.first) slot = {i, o};
+                });
+        }
+        perf = writer.perf();
+        // destructor drains the queue
+    }
+    std::lock_guard<std::mutex> lk(m);
+    INFO("committed=" << committed << " dropped=" << dropped
+         << " evictions=" << perf.dropped_oldest);
+    REQUIRE(perf.dropped_oldest > 0);        // overload really happened
+    CHECK(dropped == 0);                     // superseded jobs are evicted silently, never the newest
+    for (const auto& d : dests) {
+        auto it = last_outcome.find(d.string());
+        REQUIRE(it != last_outcome.end());
+        CHECK(it->second.first == (d == dests[0] ? 1998 : 1999));   // the final enqueue for that dest
+        CHECK(it->second.second == mrd::LatestWriteOutcome::Committed);
+        CHECK(fs::exists(d));
+    }
+}
+
+TEST_CASE("LatestImageWriter retries the newest snapshot on write failure, then reports Failed",
+          "[latest][bounded][audit3]") {
+    auto dir = fs::temp_directory_path() / "test_bounded_latest_fail";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    // A regular file where the parent directory should be: every write
+    // attempt throws (create_directories fails, H5 open fails).
+    { std::ofstream(dir / "blocker") << "x"; }
+    const fs::path dest = dir / "blocker" / "latest_image.h5";
+
+    std::mutex m;
+    std::vector<mrd::LatestWriteOutcome> outcomes;
+    mrd::LatestImageWriter::PerfSnapshot perf;
+    {
+        mrd::LatestImageWriter writer;
+        writer.enqueue(dest, "<xml/>", {tiny_wire_image()},
+            [&](const fs::path&, mrd::LatestWriteOutcome o) {
+                std::lock_guard<std::mutex> lk(m);
+                outcomes.push_back(o);
+            });
+        // Wait for the retries to run out.
+        for (int i = 0; i < 200; ++i) {
+            { std::lock_guard<std::mutex> lk(m); if (!outcomes.empty()) break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        perf = writer.perf();
+    }
+    std::lock_guard<std::mutex> lk(m);
+    REQUIRE(outcomes.size() == 1);
+    CHECK(outcomes[0] == mrd::LatestWriteOutcome::Failed);
+    CHECK(perf.failed == 3);
+    CHECK(perf.retried == 2);
+    CHECK(perf.lost == 1);
+    CHECK(perf.completed == 0);
 }

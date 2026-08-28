@@ -11,7 +11,9 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <algorithm>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -130,6 +132,8 @@ struct LatestImageWriter::Job {
     std::vector<std::vector<uint8_t>> images;
     Completion completion;
     std::chrono::steady_clock::time_point enqueued_at{};
+    uint64_t seq{0};
+    unsigned attempts{0};
 };
 
 struct LatestImageWriter::Impl {
@@ -138,10 +142,21 @@ struct LatestImageWriter::Impl {
     // older pending job for that destination. If the cap is hit and no
     // coalesce opportunity exists, drop the oldest and log once.
     static constexpr size_t kMaxQueuedJobs = 64;
+    // Audit 2026-08-28 #3: the NEWEST job per destination is the one the
+    // viewer will see last, so it must not be lost silently. Under
+    // overload we evict the oldest job that a newer job for the same
+    // dest already supersedes (latest-wins; nothing visible is lost).
+    // Only if every queued job is the newest for its dest do we fall
+    // back to dropping the oldest and report it as Dropped. A newest job
+    // whose write fails (ENOSPC, transient I/O) is re-queued up to
+    // kMaxWriteAttempts times before being reported as Failed.
+    static constexpr unsigned kMaxWriteAttempts = 3;
 
     std::mutex mtx;
     std::condition_variable cv;
     std::deque<Job> jobs;
+    uint64_t next_seq{1};
+    std::map<std::string, uint64_t> newest_seq;   // dest -> seq
     bool stopping{false};
     std::atomic<bool> drop_logged{false};
     std::atomic<uint64_t> dropped_count{0};
@@ -151,6 +166,8 @@ struct LatestImageWriter::Impl {
     std::atomic<uint64_t> perf_coalesced{0};
     std::atomic<uint64_t> perf_completed{0};
     std::atomic<uint64_t> perf_failed{0};
+    std::atomic<uint64_t> perf_retried{0};
+    std::atomic<uint64_t> perf_lost{0};
     std::atomic<uint64_t> perf_max_queue_depth{0};
     std::atomic<uint64_t> perf_last_write_us{0};
     std::atomic<uint64_t> perf_max_write_us{0};
@@ -176,22 +193,38 @@ struct LatestImageWriter::Impl {
     {
         job.enqueued_at = std::chrono::steady_clock::now();
         perf_enqueued.fetch_add(1, std::memory_order_relaxed);
+        Job evicted_newest;   // completion runs outside the lock
+        bool evicted_newest_set = false;
         {
             std::lock_guard<std::mutex> lk(mtx);
+            job.seq = next_seq++;
+            newest_seq[job.dest.string()] = job.seq;
             // No same-dest coalescing: silently replacing a pending payload
             // with a newer one skips published snapshots between viz polls,
             // which violates the losslessness contract. Writer stalls (seen
             // as multi-second max_write_us on Docker bind mounts) used to
             // make coalesce fire on ~34% of attempts, invisibly dropping
             // frames. Instead, queue each publish and rely on the 64-entry
-            // bound + drop-oldest as overload backstop. Under normal load
+            // bound + eviction as overload backstop. Under normal load
             // the writer drains fast and depth stays near 1.
             if (jobs.size() >= kMaxQueuedJobs) {
-                jobs.pop_front();
                 dropped_count.fetch_add(1);
                 if (!drop_logged.exchange(true)) {
                     LOG_WARN("LatestImageWriter queue exceeded " << kMaxQueuedJobs
-                             << " jobs; dropping oldest pending");
+                             << " jobs; evicting superseded pending snapshots");
+                }
+                auto victim = std::find_if(jobs.begin(), jobs.end(), [&](const Job& j) {
+                    return !is_newest_locked(j);
+                });
+                if (victim != jobs.end()) {
+                    jobs.erase(victim);   // superseded: latest-wins, nothing lost
+                } else {
+                    evicted_newest = std::move(jobs.front());
+                    evicted_newest_set = true;
+                    jobs.pop_front();
+                    perf_lost.fetch_add(1, std::memory_order_relaxed);
+                    LOG_WARN("LatestImageWriter overload: dropping newest snapshot for "
+                             << evicted_newest.dest);
                 }
             }
             jobs.push_back(std::move(job));
@@ -202,6 +235,15 @@ struct LatestImageWriter::Impl {
                        prev, depth, std::memory_order_relaxed)) {}
         }
         cv.notify_one();
+        if (evicted_newest_set && evicted_newest.completion) {
+            evicted_newest.completion(evicted_newest.dest, LatestWriteOutcome::Dropped);
+        }
+    }
+
+    bool is_newest_locked(const Job& j) const
+    {
+        auto it = newest_seq.find(j.dest.string());
+        return it != newest_seq.end() && it->second == j.seq;
     }
 
     void run()
@@ -229,9 +271,10 @@ struct LatestImageWriter::Impl {
                            prev, drain_lag_us, std::memory_order_relaxed)) {}
             }
             try {
+                ++job.attempts;
                 write_latest_image_h5_file(job.dest, job.xml, job.images);
                 auto t1 = clk::now();
-                if (job.completion) job.completion(job.dest);
+                if (job.completion) job.completion(job.dest, LatestWriteOutcome::Committed);
                 const auto write_us = static_cast<uint64_t>(
                     std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
                 perf_last_write_us.store(write_us, std::memory_order_relaxed);
@@ -244,7 +287,23 @@ struct LatestImageWriter::Impl {
                 perf_completed.fetch_add(1, std::memory_order_relaxed);
             } catch (const std::exception& e) {
                 perf_failed.fetch_add(1, std::memory_order_relaxed);
-                LOG_WARN("Latest H5 write failed: " << e.what());
+                LOG_WARN("Latest H5 write failed (attempt " << job.attempts
+                         << "/" << kMaxWriteAttempts << "): " << e.what());
+                bool requeued = false;
+                if (job.attempts < kMaxWriteAttempts) {
+                    std::lock_guard<std::mutex> lk(mtx);
+                    // Only the newest snapshot for this dest is worth
+                    // retrying; a superseded one would be evicted anyway.
+                    if (!stopping && is_newest_locked(job)) {
+                        perf_retried.fetch_add(1, std::memory_order_relaxed);
+                        jobs.push_back(std::move(job));
+                        requeued = true;
+                    }
+                }
+                if (!requeued) {
+                    perf_lost.fetch_add(1, std::memory_order_relaxed);
+                    if (job.completion) job.completion(job.dest, LatestWriteOutcome::Failed);
+                }
             }
         }
     }
@@ -273,6 +332,8 @@ LatestImageWriter::PerfSnapshot LatestImageWriter::perf() const
     s.dropped_oldest    = impl_->dropped_count.load(std::memory_order_relaxed);
     s.completed         = impl_->perf_completed.load(std::memory_order_relaxed);
     s.failed            = impl_->perf_failed.load(std::memory_order_relaxed);
+    s.retried           = impl_->perf_retried.load(std::memory_order_relaxed);
+    s.lost              = impl_->perf_lost.load(std::memory_order_relaxed);
     s.max_queue_depth   = impl_->perf_max_queue_depth.load(std::memory_order_relaxed);
     s.last_write_us     = impl_->perf_last_write_us.load(std::memory_order_relaxed);
     s.max_write_us      = impl_->perf_max_write_us.load(std::memory_order_relaxed);

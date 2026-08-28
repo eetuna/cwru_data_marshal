@@ -258,6 +258,10 @@ struct MarshalState {
     std::atomic<uint64_t> perf_scanner_waveforms_received{0};
     std::atomic<uint64_t> perf_publish_attempts_scanner{0};
     std::atomic<uint64_t> perf_publish_attempts_recon{0};
+    // Snapshots the async writer reported as Dropped/Failed after its own
+    // eviction/retry policy (audit 2026-08-28 #3). Non-zero means the
+    // viewer missed at least one published image.
+    std::atomic<uint64_t> perf_publish_lost{0};
 
     // WS emit hook (set by WsServer on init, optional)
     std::function<void(const std::string&)> ws_emit = [](const std::string&) {};

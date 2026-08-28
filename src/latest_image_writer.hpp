@@ -19,9 +19,16 @@ void write_latest_image_h5_file(const std::filesystem::path& dest,
                                 const std::string& xml,
                                 const std::vector<std::vector<uint8_t>>& images);
 
+// Final outcome of one enqueued snapshot. Committed: the H5 is on disk at
+// dest. Dropped: evicted under queue overload. Failed: every write attempt
+// threw. (Audit 2026-08-28 #3: publishers used to learn only of success,
+// so a dropped/failed FINAL snapshot vanished silently.)
+enum class LatestWriteOutcome { Committed, Dropped, Failed };
+
 class LatestImageWriter {
 public:
-    using Completion = std::function<void(const std::filesystem::path&)>;
+    using Completion =
+        std::function<void(const std::filesystem::path&, LatestWriteOutcome)>;
 
     LatestImageWriter();
     ~LatestImageWriter();
@@ -40,6 +47,11 @@ public:
         uint64_t dropped_oldest{0};
         uint64_t completed{0};
         uint64_t failed{0};
+        // Write attempts re-queued after a failure (newest job per dest only).
+        uint64_t retried{0};
+        // Snapshots that never reached disk: newest-per-dest jobs dropped
+        // with nothing to supersede them, or failed on every attempt.
+        uint64_t lost{0};
         uint64_t max_queue_depth{0};
         uint64_t last_write_us{0};
         uint64_t max_write_us{0};

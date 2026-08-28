@@ -848,6 +848,7 @@ static auto handle_get_debug_perf(const http::request<Body>& req, MarshalState& 
     j["recv"]["scanner_waveforms"] = state.perf_scanner_waveforms_received.load();
     j["publish_attempts"]["scanner"] = state.perf_publish_attempts_scanner.load();
     j["publish_attempts"]["recon"]   = state.perf_publish_attempts_recon.load();
+    j["publish_lost"]                = state.perf_publish_lost.load();
 
     if (state.latest_writer) {
         auto p = state.latest_writer->perf();
@@ -856,6 +857,8 @@ static auto handle_get_debug_perf(const http::request<Body>& req, MarshalState& 
         j["latest_writer"]["dropped_oldest"]    = p.dropped_oldest;
         j["latest_writer"]["completed"]         = p.completed;
         j["latest_writer"]["failed"]            = p.failed;
+        j["latest_writer"]["retried"]           = p.retried;
+        j["latest_writer"]["lost"]              = p.lost;
         j["latest_writer"]["max_queue_depth"]   = p.max_queue_depth;
         j["latest_writer"]["last_write_us"]     = p.last_write_us;
         j["latest_writer"]["max_write_us"]      = p.max_write_us;

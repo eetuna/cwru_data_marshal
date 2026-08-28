@@ -152,8 +152,20 @@ namespace mrd
         // writer queue, reset_live_outputs_for_new_scan has already deleted
         // the snapshot the publish would advertise — discard it instead of
         // resurrecting a dead scan's path.
-        auto on_complete = [&state, epoch](const std::filesystem::path &path)
+        auto on_complete = [&state, epoch, lane](const std::filesystem::path &path,
+                                                  LatestWriteOutcome outcome)
         {
+            if (outcome != LatestWriteOutcome::Committed)
+            {
+                // The writer already retried/evicted per its policy; this
+                // is a genuine loss. Count it so /status shows it, and say
+                // so loudly — the viewer will not see this snapshot.
+                state.perf_publish_lost.fetch_add(1, std::memory_order_relaxed);
+                LOG_WARN("Latest snapshot for " << lane_name(lane) << " lost ("
+                         << (outcome == LatestWriteOutcome::Dropped ? "dropped" : "failed")
+                         << "): " << path);
+                return;
+            }
             std::lock_guard<std::mutex> img_lk(state.latest_image_mtx);
             // Epoch check under latest_image_mtx: the scan reset clears the
             // path under this same mutex strictly after bumping the epoch,
@@ -185,7 +197,7 @@ namespace mrd
         try
         {
             write_latest_image_h5_file(dest, xml, images);
-            on_complete(dest);
+            on_complete(dest, LatestWriteOutcome::Committed);
         }
         catch (const std::exception &e)
         {
