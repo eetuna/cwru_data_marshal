@@ -558,7 +558,8 @@ int main(int argc, char** argv)
             return slice_agent ? slice_agent->post(c) : 0u;
         };
         state.slice_agent_wait = [&slice_agent](uint64_t gen) {
-            return slice_agent && slice_agent->wait(gen);
+            return slice_agent ? slice_agent->verdict(gen)
+                               : slice_math::Delivery::NotDelivered;
         };
         state.slice_agent_connected = [&slice_agent] {
             return slice_agent && slice_agent->connected();

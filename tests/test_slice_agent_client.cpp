@@ -323,3 +323,32 @@ TEST_CASE("Command submitted before the agent is up is delivered once it appears
     }));
     client.stop();
 }
+
+// Audit 2026-08-28 #8: wait(gen) used to return true whenever ANY later
+// generation had been sent, so a command overwritten before the worker
+// picked it up was reported as delivered although its (absolute) values
+// never reached the agent.
+TEST_CASE("A command overwritten before it is sent is reported Superseded, not delivered",
+          "[slice][client][verdict]") {
+    FakeAgent agent;
+    mrd::SliceAgentClient client(fast_cfg(agent.port()));
+    // Post both BEFORE starting the worker so the overwrite is deterministic:
+    // the worker wakes to a single pending command (the newest).
+    const uint64_t gA = client.post(cmd(5.0));
+    const uint64_t gB = client.post(cmd(9.0));
+    REQUIRE(gA == 1);
+    REQUIRE(gB == 2);
+    client.start();
+
+    CHECK(client.wait(gB));
+    CHECK(client.verdict(gB) == slice_math::Delivery::Delivered);
+    CHECK(client.verdict(gA) == slice_math::Delivery::Superseded);
+    CHECK_FALSE(client.wait(gA));
+
+    // The agent only ever saw B.
+    REQUIRE(agent.wait_for([&] { return !agent.commands().empty(); }));
+    for (const auto& c : agent.commands()) CHECK(c.tz == Catch::Approx(9.0));
+
+    CHECK(client.verdict(0) == slice_math::Delivery::NotDelivered);
+    client.stop();
+}

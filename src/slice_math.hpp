@@ -258,4 +258,14 @@ inline WireCommand from_wire(const uint8_t* p) {
     return c;
 }
 
+// Verdict on one posted slice command (audit 2026-08-28 #8).
+//   Delivered   — this exact command was written to a connected agent.
+//   Superseded  — a newer command was posted before the worker sent this
+//                 one; the newer one was sent instead. Commands are
+//                 absolute (six totals), so the superseded values were
+//                 never applied.
+//   NotDelivered— nothing written within the wait budget (agent
+//                 unreachable, disabled, stopping, or gen 0).
+enum class Delivery { Delivered, Superseded, NotDelivered };
+
 } // namespace slice_math

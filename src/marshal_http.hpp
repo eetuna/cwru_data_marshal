@@ -335,7 +335,11 @@ static auto send_response(const http::request<Body>& req, MarshalState& state,
 {
     nlohmann::json out = extra;
     out["file"] = file;
-    out["delivered"] = state.slice_agent_wait(gen);
+    const auto verdict = state.slice_agent_wait(gen);
+    out["delivered"] = (verdict == slice_math::Delivery::Delivered);
+    // A newer command was posted before this one was sent; the newer one
+    // went out instead and these values were never applied.
+    out["superseded"] = (verdict == slice_math::Delivery::Superseded);
     out["enabled"] = state.slice_agent_cfg.enabled;
     out["state"] = state_to_json(s);
     return json_response(req, http::status::ok, out);

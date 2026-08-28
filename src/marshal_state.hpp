@@ -227,7 +227,8 @@ struct MarshalState {
     // disabled / not connected / nothing sent.
     std::function<uint64_t(const slice_math::WireCommand&)> slice_agent_post =
         [](const slice_math::WireCommand&) { return uint64_t{0}; };   // 0 = not queued
-    std::function<bool(uint64_t)> slice_agent_wait = [](uint64_t) { return false; };
+    std::function<slice_math::Delivery(uint64_t)> slice_agent_wait =
+        [](uint64_t) { return slice_math::Delivery::NotDelivered; };
     std::function<bool()> slice_agent_connected = [] { return false; };
 
     // Scan start / scan close: the six numbers go back to zero and the agent

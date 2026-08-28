@@ -40,6 +40,7 @@
 #include <cstring>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -109,14 +110,22 @@ public:
     // socket; false if the write did not happen in time (agent unreachable —
     // the command is kept and sent as soon as a connection exists), or if
     // disabled/stopped. A refused connection returns immediately.
-    bool wait(uint64_t gen) {
-        if (gen == 0) return false;
+    bool wait(uint64_t gen) { return verdict(gen) == slice_math::Delivery::Delivered; }
+
+    // Exact per-generation verdict. Only a generation the worker actually
+    // wrote counts as Delivered; ack >= gen alone is NOT proof, because the
+    // worker always sends the newest posted command and skips any older
+    // ones posted in between (those are Superseded).
+    slice_math::Delivery verdict(uint64_t gen) {
+        if (gen == 0) return slice_math::Delivery::NotDelivered;
         std::unique_lock<std::mutex> lk(mtx_);
         const auto budget = std::chrono::milliseconds(cfg_.connect_timeout_ms + 500);
         cv_.wait_for(lk, budget, [&] {
             return stopping_ || sent_gen_ack_ >= gen || failed_gen_ack_ >= gen;
         });
-        return sent_gen_ack_ >= gen;
+        if (sent_gens_.count(gen)) return slice_math::Delivery::Delivered;
+        if (sent_gen_ack_ >= gen) return slice_math::Delivery::Superseded;
+        return slice_math::Delivery::NotDelivered;
     }
 
     bool submit(const slice_math::WireCommand& cmd) { return wait(post(cmd)); }
@@ -275,6 +284,9 @@ private:
             std::lock_guard<std::mutex> lk(mtx_);
             if (gen > sent_gen_) sent_gen_ = gen;
             if (gen > sent_gen_ack_) sent_gen_ack_ = gen;
+            sent_gens_.insert(gen);
+            // Bounded: waiters only ever ask about recent generations.
+            while (sent_gens_.size() > kSentHistory) sent_gens_.erase(sent_gens_.begin());
         }
         cv_.notify_all();
     }
@@ -443,6 +455,8 @@ private:
     uint64_t generation_{0};           // last posted
     uint64_t sent_gen_{0};             // last generation the worker considers delivered (0 = resend)
     uint64_t sent_gen_ack_{0};         // highest generation written (for wait())
+    static constexpr size_t kSentHistory = 1024;
+    std::set<uint64_t> sent_gens_;     // generations actually written (exact verdicts)
     uint64_t failed_gen_ack_{0};       // highest generation whose send/connect failed
     std::optional<slice_math::WireCommand> last_cmd_;
     std::thread worker_;

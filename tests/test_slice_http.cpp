@@ -64,7 +64,10 @@ struct AgentStub {
             sent.push_back(c);
             return ++gen;
         };
-        state.slice_agent_wait = [this](uint64_t g) { return g != 0 && deliver; };
+        state.slice_agent_wait = [this](uint64_t g) {
+            return (g != 0 && deliver) ? slice_math::Delivery::Delivered
+                                       : slice_math::Delivery::NotDelivered;
+        };
     }
 };
 
@@ -190,7 +193,7 @@ TEST_CASE("Agent unreachable / channel off", "[http][slice]") {
 
     MarshalState off; AgentStub none; none.install(off, /*enabled=*/false);
     off.slice_agent_post = [](const slice_math::WireCommand&) { return uint64_t{0}; };
-    off.slice_agent_wait = [](uint64_t) { return false; };
+    off.slice_agent_wait = [](uint64_t) { return slice_math::Delivery::NotDelivered; };
     int scanner_pushes = 0;
     off.mrd_push_message = [&](uint16_t, const void*, size_t) { ++scanner_pushes; return true; };
     auto r2 = post(off, "/write/file_slice_translation", nudge(1));
