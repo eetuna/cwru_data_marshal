@@ -188,12 +188,14 @@ namespace mrd
         }
     }
 
-    // Publish a pending, non-empty recon group and reset it. Caller holds
-    // scan_mtx. Used when a recon stream ends (normal EOF or abnormal-EOF
-    // finalize): a group still buffering at that point will never complete,
-    // so surface the partial result on /image/latest instead of silently
-    // dropping it. publish_latest_snapshot only enqueues to the async writer
-    // (no lock conflict), and its scan_epoch guard discards the publish if a
+    // Publish a pending, never-published recon group and reset it. Caller
+    // holds scan_mtx. Used when a recon stream ends (normal EOF or
+    // abnormal-EOF finalize). With incremental publishing, post-header
+    // groups have published=true and this is a no-op for them; the one
+    // genuinely unpublished case is images buffered before the XML header
+    // arrived — surface those on /image/latest instead of silently dropping
+    // them. publish_latest_snapshot only enqueues to the async writer (no
+    // lock conflict), and its scan_epoch guard discards the publish if a
     // new scan has already taken over.
     inline void flush_pending_recon_group_locked(MarshalState &state)
     {
@@ -278,10 +280,11 @@ namespace mrd
                 auto &recon_group = state.recon_latest_group;
                 if (recon_group.active && recon_group.image_series_index != parsed.header.image_series_index)
                 {
-                    if (!recon_group.published && !recon_group.images.empty())
-                    {
-                        publish_images = recon_group.images;
-                    }
+                    // New series supersedes the current volume. Its content
+                    // (if any) already reached /image/latest via the
+                    // incremental publish below, so no flush is needed —
+                    // just start a fresh group with this image. Latest-wins:
+                    // the viewer immediately sees the new partial volume.
                     recon_group.reset();
                 }
                 else if (recon_group.active &&
@@ -289,23 +292,10 @@ namespace mrd
                                    recon_group.seen_slices.end(),
                                    parsed.header.slice) != recon_group.seen_slices.end())
                 {
-                    // Repeat of a slice already in the buffered group: the
-                    // recon has started a new pass over the same prescription
-                    // without bumping the series index. Flush the buffered
-                    // group so it reaches /image/latest instead of buffering
-                    // forever (the "frozen during scan, burst after" failure
-                    // when same-orientation slices repeat), and start a new
-                    // group with this image. One edge overlaps the
-                    // group-complete publish below: images that arrived
-                    // BEFORE the XML header buffer under an unknown slice
-                    // count, and if the header then declares <= 1 slice the
-                    // fresh group completes instantly and its assignment
-                    // overwrites this flush. That is deliberate latest-wins:
-                    // the newest volume supersedes the pre-header partial.
-                    if (!recon_group.published && !recon_group.images.empty())
-                    {
-                        publish_images = recon_group.images;
-                    }
+                    // Repeat of a slice already in the group: the recon has
+                    // started a new pass over the same prescription without
+                    // bumping the series index. The accumulated volume was
+                    // already published incrementally; start a fresh group.
                     recon_group.reset();
                 }
 
@@ -324,19 +314,36 @@ namespace mrd
                     recon_group.seen_slices.push_back(parsed.header.slice);
                 }
 
+                // Incremental publish: every recon image republishes the
+                // volume accumulated so far, so /image/latest updates per
+                // image instead of freezing until the header's full slice
+                // count has been seen (the dry-run "no images until scan
+                // complete" failure when each slice arrives only once).
+                // Copy, not move — the group keeps accumulating until the
+                // volume boundary. Per-volume write cost is O(N^2) bytes,
+                // fine for clinical N; the LatestImageWriter's 64-entry
+                // drop-oldest bound is the overload backstop.
+                //
+                // Pre-header images still buffer unpublished: the expected
+                // slice count is unknown and the snapshot would carry no
+                // XML header. They surface via the EOF flush
+                // (flush_pending_recon_group_locked) if the header never
+                // arrives.
+                if (state.header_received.load(std::memory_order_acquire))
+                {
+                    publish_images = recon_group.images;
+                    recon_group.published = true;
+                }
+
                 if (recon_group_is_complete(state, recon_group))
                 {
-                    // Volume complete: publish it and START A NEW GROUP. Without
-                    // the reset, a recon that keeps image_series_index constant
-                    // for the whole scan (e.g. python-ismrmrd-server
-                    // invertcontrast) appends every subsequent image to this same
-                    // still-"complete" group, so each new image republishes the
-                    // ENTIRE accumulated history — latest_image.h5 grows without
-                    // bound and per-publish write cost grows linearly with scan
-                    // length. Recons that DO bump the series index per volume are
-                    // unaffected (the series-change path above still flushes
-                    // partial groups).
-                    publish_images = recon_group.images;
+                    // Volume complete: START A NEW GROUP. Without the reset, a
+                    // recon that keeps image_series_index constant for the
+                    // whole scan (e.g. python-ismrmrd-server invertcontrast)
+                    // appends every subsequent image to this same
+                    // still-"complete" group, so latest_image.h5 grows without
+                    // bound and per-publish write cost grows linearly with
+                    // scan length.
                     recon_group.reset();
                 }
             }

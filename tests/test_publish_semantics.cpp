@@ -16,6 +16,13 @@
  *
  *  - A partial group still buffering at end-of-stream was silently dropped.
  *    Post-fix flush_live_lane / mark_lane_finalized publish it.
+ *
+ * 2026-08-28 (dry-run "no images until scan complete"): the recon group now
+ * publishes INCREMENTALLY — every recon image republishes the volume
+ * accumulated so far, so /image/latest never waits for the header's full
+ * expected slice count. Volume boundaries (series change, repeated slice,
+ * completeness) reset the group; EOF flush only covers pre-header images
+ * that were never published.
  */
 
 #include <catch2/catch_all.hpp>
@@ -112,24 +119,35 @@ TEST_CASE("generation bumps once per successful publish", "[live_image_store][ge
     CHECK(latest_image_count(snapshot) == 1);   // rewritten, not appended
 }
 
-TEST_CASE("multislice group buffers without publishing until complete",
+TEST_CASE("multislice group publishes incrementally as slices arrive",
           "[live_image_store][group]") {
     MarshalState state;
     init_state(state, 3);
     const auto snapshot = mrd::lane_latest_path(state, mrd::LiveLane::Recon);
 
+    // Every image republishes the volume accumulated so far — the viewer
+    // is never left waiting for the header's full slice count.
     append_recon(state, 1, 0);
-    append_recon(state, 1, 1);
-    CHECK(state.latest_image_generation.load() == 0);
-    CHECK_FALSE(fs::exists(snapshot));
-
-    append_recon(state, 1, 2);   // completes the group
     CHECK(state.latest_image_generation.load() == 1);
     REQUIRE(fs::exists(snapshot));
+    CHECK(latest_image_count(snapshot) == 1);
+
+    append_recon(state, 1, 1);
+    CHECK(state.latest_image_generation.load() == 2);
+    CHECK(latest_image_count(snapshot) == 2);
+
+    append_recon(state, 1, 2);   // completes the volume
+    CHECK(state.latest_image_generation.load() == 3);
     CHECK(latest_image_count(snapshot) == 3);
+
+    // The completed volume reset the group: the next image starts a fresh
+    // volume and the snapshot drops back to one slice (latest-wins).
+    append_recon(state, 1, 0);
+    CHECK(state.latest_image_generation.load() == 4);
+    CHECK(latest_image_count(snapshot) == 1);
 }
 
-TEST_CASE("repeated slice index flushes the buffered group",
+TEST_CASE("repeated slice index starts a fresh group",
           "[live_image_store][group]") {
     MarshalState state;
     init_state(state, 3);
@@ -137,23 +155,23 @@ TEST_CASE("repeated slice index flushes the buffered group",
 
     append_recon(state, 1, 0);
     append_recon(state, 1, 1);
-    CHECK_FALSE(fs::exists(snapshot));
+    CHECK(state.latest_image_generation.load() == 2);
+    CHECK(latest_image_count(snapshot) == 2);
 
     // Same series, slice 0 again: a new pass over the same prescription.
-    // Pre-fix this buffered forever; post-fix the two-image group flushes.
+    // The old group was already published incrementally; the repeat starts
+    // a fresh single-image volume.
     append_recon(state, 1, 0);
-    CHECK(state.latest_image_generation.load() == 1);
-    REQUIRE(fs::exists(snapshot));
-    CHECK(latest_image_count(snapshot) == 2);
+    CHECK(state.latest_image_generation.load() == 3);
+    CHECK(latest_image_count(snapshot) == 1);
 
-    // The repeated image started a fresh group; completing it publishes.
     append_recon(state, 1, 1);
     append_recon(state, 1, 2);
-    CHECK(state.latest_image_generation.load() == 2);
+    CHECK(state.latest_image_generation.load() == 5);
     CHECK(latest_image_count(snapshot) == 3);
 }
 
-TEST_CASE("series index change still flushes a partial group",
+TEST_CASE("series index change starts a fresh group",
           "[live_image_store][group]") {
     MarshalState state;
     init_state(state, 3);
@@ -161,13 +179,16 @@ TEST_CASE("series index change still flushes a partial group",
 
     append_recon(state, 1, 0);
     append_recon(state, 1, 1);
-    append_recon(state, 2, 0);   // new series flushes the two buffered images
-    CHECK(state.latest_image_generation.load() == 1);
-    REQUIRE(fs::exists(snapshot));
+    CHECK(state.latest_image_generation.load() == 2);
     CHECK(latest_image_count(snapshot) == 2);
+
+    append_recon(state, 2, 0);   // new series supersedes the partial volume
+    CHECK(state.latest_image_generation.load() == 3);
+    REQUIRE(fs::exists(snapshot));
+    CHECK(latest_image_count(snapshot) == 1);
 }
 
-TEST_CASE("EOF flush publishes a pending partial group instead of dropping it",
+TEST_CASE("EOF flush does not republish an incrementally-published group",
           "[live_image_store][group][eof]") {
     MarshalState state;
     init_state(state, 3);
@@ -175,6 +196,26 @@ TEST_CASE("EOF flush publishes a pending partial group instead of dropping it",
 
     append_recon(state, 1, 0);
     append_recon(state, 1, 1);
+    CHECK(state.latest_image_generation.load() == 2);
+    CHECK(latest_image_count(snapshot) == 2);
+
+    // Everything the group holds already reached /image/latest: EOF must
+    // not double-publish.
+    mrd::flush_live_lane(state, mrd::LiveLane::Recon);
+    CHECK(state.latest_image_generation.load() == 2);
+    CHECK(latest_image_count(snapshot) == 2);
+}
+
+TEST_CASE("EOF flush publishes pre-header images that never published",
+          "[live_image_store][group][eof]") {
+    MarshalState state;
+    init_state(state, 3);
+    state.header_received.store(false);   // images arrive before METADATA_XML
+    const auto snapshot = mrd::lane_latest_path(state, mrd::LiveLane::Recon);
+
+    append_recon(state, 1, 0);
+    append_recon(state, 1, 1);
+    CHECK(state.latest_image_generation.load() == 0);
     CHECK_FALSE(fs::exists(snapshot));
 
     mrd::flush_live_lane(state, mrd::LiveLane::Recon);
@@ -211,13 +252,30 @@ TEST_CASE("recon-failure error marker survives a queued publish",
     CHECK(state.latest_image_path == "/tmp/latest_error.png");
 }
 
-TEST_CASE("finalize-after-EOF also publishes a pending partial group",
+TEST_CASE("finalize-after-EOF does not republish, but flushes pre-header images",
           "[live_image_store][group][eof]") {
     MarshalState state;
     init_state(state, 3);
     const auto snapshot = mrd::lane_latest_path(state, mrd::LiveLane::Recon);
 
+    // Post-header image published incrementally: finalize must not re-publish.
     append_recon(state, 1, 0);
+    CHECK(state.latest_image_generation.load() == 1);
+    mrd::mark_lane_finalized_after_eof(state, mrd::LiveLane::Recon);
+    CHECK(state.latest_image_generation.load() == 1);
+    REQUIRE(fs::exists(snapshot));
+    CHECK(latest_image_count(snapshot) == 1);
+}
+
+TEST_CASE("finalize-after-EOF publishes a pre-header pending group",
+          "[live_image_store][group][eof]") {
+    MarshalState state;
+    init_state(state, 3);
+    state.header_received.store(false);
+    const auto snapshot = mrd::lane_latest_path(state, mrd::LiveLane::Recon);
+
+    append_recon(state, 1, 0);
+    CHECK(state.latest_image_generation.load() == 0);
     mrd::mark_lane_finalized_after_eof(state, mrd::LiveLane::Recon);
     CHECK(state.latest_image_generation.load() == 1);
     REQUIRE(fs::exists(snapshot));

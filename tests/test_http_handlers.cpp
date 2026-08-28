@@ -230,9 +230,11 @@ TEST_CASE("Latest recon multislice grows within one series", "[http][latest][mul
     auto first = make_wire_image(7, 0, 1.0f);
     auto second = make_wire_image(7, 1, 2.0f);
 
+    // Incremental publish: the first image of the series is already visible.
     handle_recon_image(state, first.data(), first.size());
     auto latest_path = mrd::live_recon_dir(state.dump_dir) / "latest_image.h5";
-    CHECK_FALSE(fs::exists(latest_path));
+    REQUIRE(fs::exists(latest_path));
+    CHECK(latest_image_count(latest_path) == 1);
 
     handle_recon_image(state, second.data(), second.size());
     REQUIRE(fs::exists(latest_path));
@@ -261,11 +263,12 @@ TEST_CASE("Latest recon series rollover replaces the prior logical result", "[ht
     REQUIRE(fs::exists(latest_path));
     CHECK(latest_image_count(latest_path) == 2);
 
+    // New series supersedes the completed volume immediately (latest-wins):
+    // the snapshot shows the new partial series, not the stale series 7.
     handle_recon_image(state, third.data(), third.size());
     REQUIRE(fs::exists(latest_path));
-    CHECK(latest_image_count(latest_path) == 2);
-    CHECK(latest_image_series_at(latest_path, 0) == 7);
-    CHECK(latest_image_series_at(latest_path, 1) == 7);
+    CHECK(latest_image_count(latest_path) == 1);
+    CHECK(latest_image_series_at(latest_path, 0) == 8);
 
     auto fourth = make_wire_image(8, 1, 4.0f);
     handle_recon_image(state, fourth.data(), fourth.size());

@@ -332,12 +332,22 @@ class TestMarshalIntegration(unittest.TestCase):
         finally:
             self.stop_proc(scanner)
 
-    def test_t6_multislice_latest_stays_on_completed_stack(self):
+    def test_t6_multislice_latest_grows_then_completes(self):
+        # Incremental publish contract: the latest snapshot updates on every
+        # recon image, holding the volume accumulated so far (1..5 slices for
+        # the 5-slice mock scan). It must reach the full 5-slice stack, never
+        # exceed it, and the publish generation must climb during streaming —
+        # not stay flat until scan end.
         self.start_recon()
-        self.start_marshal(with_recon=True)
+        # Live mode (dump=False): --dump is dump-exclusive and disables the
+        # /image/latest snapshot entirely, which this test exists to observe.
+        self.start_marshal(with_recon=True, dump=False)
         scanner = self.start_kspace_async()
         try:
             saw_completed_stack = False
+            first_generation = None
+            last_generation = None
+            generation_samples = 0
             deadline = time.time() + 15
             while time.time() < deadline:
                 latest = wait_for_latest_file(self.base(), timeout=1)
@@ -347,19 +357,26 @@ class TestMarshalIntegration(unittest.TestCase):
                 if not path or not os.path.exists(path):
                     continue
                 count = latest_image_count(path)
+                self.assertGreaterEqual(count, 1)
+                self.assertLessEqual(
+                    count, 5, f'Latest stack exceeded the 5-slice volume: {count}')
+                gen = latest.get('generation')
+                if gen is not None:
+                    generation_samples += 1
+                    if first_generation is None:
+                        first_generation = gen
+                    if last_generation is not None:
+                        self.assertGreaterEqual(
+                            gen, last_generation, 'publish generation went backwards')
+                    last_generation = gen
                 if count == 5:
                     saw_completed_stack = True
                     break
             self.assertTrue(saw_completed_stack, 'Never observed a completed 5-slice latest stack')
-
-            stable_deadline = time.time() + 3
-            while time.time() < stable_deadline:
-                latest = wait_for_latest_file(self.base(), timeout=1)
-                self.assertIsNotNone(latest)
-                self.assertFalse(latest['error'])
-                count = latest_image_count(latest['path'])
-                self.assertEqual(count, 5, f'Latest stack regressed to partial size {count}')
-                time.sleep(0.2)
+            if generation_samples >= 2:
+                self.assertGreater(
+                    last_generation, first_generation,
+                    'publish generation stayed flat while the stack was streaming')
         finally:
             self.stop_proc(scanner)
 
