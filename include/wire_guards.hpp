@@ -113,6 +113,43 @@ inline bool compute_image_body_total(std::size_t image_header_bytes,
     return true;
 }
 
+// ACQUISITION payload: traj (traj_dims * samples * 4) + samples
+// (samples * channels * 8), overflow-checked and capped at
+// kMaxImageFrameBytes. All three header fields are uint16 so the products
+// cannot overflow size_t, but the checked path keeps this true if the
+// wire format ever widens — and the cap is the real defence: max fields
+// give ~34 GiB. Used for scanner-origin and recon-returned acquisitions.
+inline bool compute_acquisition_payload_bytes(std::size_t traj_dims,
+                                              std::size_t samples,
+                                              std::size_t channels,
+                                              std::size_t& traj_bytes,
+                                              std::size_t& sample_bytes) noexcept {
+    std::size_t t = 0, s = 0, total = 0;
+    if (!checked_mul(traj_dims, samples, t)) return false;
+    if (!checked_mul(t, sizeof(float), t)) return false;
+    if (!checked_mul(samples, channels, s)) return false;
+    if (!checked_mul(s, 8 /* complex<float> */, s)) return false;
+    if (!checked_add(t, s, total)) return false;
+    if (total > kMaxImageFrameBytes) return false;
+    traj_bytes = t;
+    sample_bytes = s;
+    return true;
+}
+
+// WAVEFORM payload: samples * channels * 4 bytes, overflow-checked and
+// capped at kMaxImageFrameBytes. Used for scanner-origin and recon-returned
+// waveforms (audit 2026-08-28 #4: neither was capped).
+inline bool compute_waveform_data_bytes(std::size_t samples,
+                                        std::size_t channels,
+                                        std::size_t& out) noexcept {
+    std::size_t d = 0;
+    if (!checked_mul(samples, channels, d)) return false;
+    if (!checked_mul(d, sizeof(std::uint32_t), d)) return false;
+    if (d > kMaxImageFrameBytes) return false;
+    out = d;
+    return true;
+}
+
 // Validate a length-prefix body size: 4 (length field) + len, with cap.
 inline bool validate_len_prefix_body(std::uint32_t len, std::size_t& out) noexcept {
     if (len > kMaxLenPrefixBodyBytes) return false;

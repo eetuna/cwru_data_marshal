@@ -443,10 +443,16 @@ private:
         ISMRMRD::AcquisitionHeader hdr;
         if (!read_exact(&hdr, ACQUISITION_HEADER_BYTES)) return false;
 
-        const size_t traj_bytes = size_t(hdr.trajectory_dimensions)
-                                * hdr.number_of_samples * sizeof(float);
-        const size_t sample_bytes = size_t(hdr.number_of_samples)
-                                  * hdr.active_channels * sizeof(complex_float_t);
+        size_t traj_bytes = 0, sample_bytes = 0;
+        if (!compute_acquisition_payload_bytes(
+                hdr.trajectory_dimensions, hdr.number_of_samples,
+                hdr.active_channels, traj_bytes, sample_bytes)) {
+            LOG_WARN("Recon ACQUISITION rejected: implausible size (traj_dims="
+                     << hdr.trajectory_dimensions << " samples="
+                     << hdr.number_of_samples << " channels="
+                     << hdr.active_channels << ")");
+            return false;
+        }
         body.resize(ACQUISITION_HEADER_BYTES + traj_bytes + sample_bytes);
         std::memcpy(body.data(), &hdr, ACQUISITION_HEADER_BYTES);
         size_t off = ACQUISITION_HEADER_BYTES;
@@ -506,7 +512,12 @@ private:
     bool read_waveform_body(std::vector<uint8_t>& body) {
         ISMRMRD::WaveformHeader hdr;
         if (!read_exact(&hdr, WAVEFORM_HEADER_BYTES)) return false;
-        const size_t data_bytes = size_t(hdr.number_of_samples) * hdr.channels * sizeof(uint32_t);
+        size_t data_bytes = 0;
+        if (!compute_waveform_data_bytes(hdr.number_of_samples, hdr.channels, data_bytes)) {
+            LOG_WARN("Recon WAVEFORM rejected: implausible size (samples="
+                     << hdr.number_of_samples << " channels=" << hdr.channels << ")");
+            return false;
+        }
         body.resize(WAVEFORM_HEADER_BYTES + data_bytes);
         std::memcpy(body.data(), &hdr, WAVEFORM_HEADER_BYTES);
         if (data_bytes > 0 && !read_exact(body.data() + WAVEFORM_HEADER_BYTES, data_bytes)) return false;

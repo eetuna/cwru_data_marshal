@@ -807,18 +807,20 @@ private:
                     if (!rd.ensure(2 + ACQUISITION_HEADER_BYTES)) goto done;
                     ISMRMRD::AcquisitionHeader ahdr;
                     std::memcpy(&ahdr, rd.cur() + 2, ACQUISITION_HEADER_BYTES);
-                    const size_t traj_bytes = size_t(ahdr.trajectory_dimensions)
-                                            * ahdr.number_of_samples * sizeof(float);
-                    const size_t sample_bytes = size_t(ahdr.number_of_samples)
-                                              * ahdr.active_channels * sizeof(complex_float_t);
-                    const size_t total = 2 + ACQUISITION_HEADER_BYTES
-                                       + traj_bytes + sample_bytes;
                     // Sanity cap (same ceiling as the IMAGE path) so a corrupt
                     // header cannot demand a multi-GB buffer.
-                    if (total > kMaxImageFrameBytes) {
-                        LOG_WARN("ACQUISITION rejected: implausible size " << total);
+                    size_t traj_bytes = 0, sample_bytes = 0;
+                    if (!compute_acquisition_payload_bytes(
+                            ahdr.trajectory_dimensions, ahdr.number_of_samples,
+                            ahdr.active_channels, traj_bytes, sample_bytes)) {
+                        LOG_WARN("ACQUISITION rejected: implausible size (traj_dims="
+                                 << ahdr.trajectory_dimensions << " samples="
+                                 << ahdr.number_of_samples << " channels="
+                                 << ahdr.active_channels << ")");
                         goto done;
                     }
+                    const size_t total = 2 + ACQUISITION_HEADER_BYTES
+                                       + traj_bytes + sample_bytes;
                     if (!rd.ensure(total)) goto done;
 
                     if (state_.dump_enabled && state_.dump_recorder) {
@@ -909,9 +911,14 @@ private:
                     if (!rd.ensure(2 + WAVEFORM_HEADER_BYTES)) goto done;
                     ISMRMRD::WaveformHeader whdr;
                     std::memcpy(&whdr, rd.cur() + 2, WAVEFORM_HEADER_BYTES);
-                    // LOW/NIT #21: use sizeof(uint32_t) to match marshal_http.hpp:95
-                    // and make any future wire-format change stand out.
-                    size_t data_bytes = size_t(whdr.number_of_samples) * whdr.channels * sizeof(uint32_t);
+                    size_t data_bytes = 0;
+                    if (!compute_waveform_data_bytes(whdr.number_of_samples,
+                                                     whdr.channels, data_bytes)) {
+                        LOG_WARN("WAVEFORM rejected: implausible size (samples="
+                                 << whdr.number_of_samples << " channels="
+                                 << whdr.channels << ")");
+                        goto done;
+                    }
                     if (!rd.ensure(2 + WAVEFORM_HEADER_BYTES + data_bytes)) goto done;
                     // Owned copy: this body may be buffered in the recon
                     // preamble, which outlives the read buffer's next refill.
