@@ -98,14 +98,17 @@ the marshal — measured 2026-07-06, see
 lowers this one-for-one. Judge pipeline speed by recon images/s
 (`/debug/perf` recv.recon_images), not the sender's fps heartbeat.
 
-**Verify multislice while streaming** (snapshot = exactly one volume; 3D read = all slices):
+**Verify multislice while streaming** (snapshot = the volume accumulated so
+far — it grows 1→N within a volume and resets at the next; 3D read = all
+slices):
 ```bash
 docker exec cwru-webgl-client python3 -c "
 import h5py,os; os.environ['HDF5_USE_FILE_LOCKING']='FALSE'
 print(h5py.File('/latest/live/from_reconstruction/latest_image.h5','r')['dataset/image_0/data'].shape)"
 # (default RAM snapshot path; with MARSHAL_LATEST= (disk) use
 #  /session-data/live/from_reconstruction/latest_image.h5)
-#   -> (5, 1, 1, 128, 128)  = 5 slices, not growing over time
+#   -> (1..5, 1, 1, 128, 128)  = cycles 1→5 per volume while streaming,
+#      never exceeds the volume's slice count; (5, ...) after the scan ends
 docker exec cwru-webgl-client sh -c 'curl -s localhost:3000/api/read/client-webgl/1 | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[\"width\"],d[\"height\"],\"depth\",d[\"depth\"])"'
 #   -> 128 128 depth 5
 ```
@@ -180,9 +183,9 @@ T='curl -s localhost:3000/api/read/client-webgl/0'             # what the viewer
 |---|---|---|
 | **No re-render loop when idle** | after any scan: `$T \| python3 -c "import sys,json;print(json.load(sys.stdin)['timestamp'])"` three times, 1 s apart | the same token every time (e.g. `0:18 0:18 0:18`). Pre-fix this changed on every poll — the "infinite loop". |
 | **3D feed quiet when idle** | `curl -s localhost:3000/api/read/client-webgl/1 \| md5sum` twice | identical (served from cache; no repeated HDF5 reads / "Error loading 3D volume" churn) |
-| **Updates *during* a multislice scan** | `eval $S --slices 3 --frames 24 --fps 3 &` then `for i in 1 2 3 4 5 6 7; do sleep 1; $G; done` | `generation` climbs while the scan runs (e.g. 48 50 53 57 60 63) — not flat until the end. Pre-fix: frozen during the scan, burst after. |
-| **Parallel same-orientation stack, no black planes** | `eval $S --slices 3 --frames 5` then `$T \| python3 -c "import sys,json;d=json.load(sys.stdin);print(len(d['slices']),[max(s['values']) for s in d['slices']])"` | `3 [4095, 4095, 4095]` — three slices, all non-black; the 3-D panel shows all three |
-| **Slice count changes between scans** | `eval $S --slices 2 --frames 3`; `$G`; `eval $S --slices 4 --frames 3`; `$G` | snapshot goes 2 → 4 slices (`docker exec cwru-webgl-client python3 -c "import h5py;print(h5py.File('/latest/live/from_reconstruction/latest_image.h5','r')['dataset/image_0/data'].shape)"`), counter advanced |
+| **Updates *during* a multislice scan** | `eval $S --slices 3 --frames 24 --fps 3 &` then `for i in 1 2 3 4 5 6 7; do sleep 1; $G; done` | `generation` climbs while the scan runs, roughly one bump per recon image (e.g. 48 57 66 75 84 93) — not flat until the end. Pre-fix: frozen during the scan (waiting for the header's full slice count), burst after. |
+| **Parallel same-orientation stack, no black planes** | `eval $S --slices 3 --frames 5`, wait for the scan to finish, then `$T \| python3 -c "import sys,json;d=json.load(sys.stdin);print(len(d['slices']),[max(s['values']) for s in d['slices']])"` | `3 [4095, 4095, 4095]` — three slices, all non-black; the 3-D panel shows all three. Mid-scan a partial (1- or 2-slice) read is normal — sample after the volume completes. |
+| **Slice count changes between scans** | `eval $S --slices 2 --frames 3`; `$G`; `eval $S --slices 4 --frames 3`; `$G` | snapshot goes 2 → 4 slices once each scan's volume completes (`docker exec cwru-webgl-client python3 -c "import h5py;print(h5py.File('/latest/live/from_reconstruction/latest_image.h5','r')['dataset/image_0/data'].shape)"`), counter advanced; transient 1..3-slice shapes mid-scan are the incremental publish, not a regression |
 | **3-plane view: last 3 distinct planes, across scans** | `eval $S --orient tra --frames 5`; `eval $S --orient sag --frames 5`; `eval $S --orient cor --frames 5` | after the third scan the viewer's 3-D panel shows one transverse, one sagittal, one coronal plane (three separate scans!). Then `eval $S --orient sag --frames 5` again: only the sagittal plane refreshes; the other two stay — "one new slice and two older ones". |
 | **Nothing there yet** | `curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/image/latest` on a fresh marshal | `204` — not an error |
 | **"Recon does nothing"** | start with an unreachable recon: `RECON_HOST=10.255.255.1 docker compose up -d --force-recreate mri-marshal`, run any k-space scan | `docker logs cwru-mri-marshal \| grep -i recon` shows `Failed to connect to recon at 10.255.255.1:9002 …`; `$G` returns `"error":true` with the `latest_error.png` marker; `/health` stays 200. This is the signature to look for when the recon "does nothing" at the scanner (wrong/unset `RECON_HOST`). |

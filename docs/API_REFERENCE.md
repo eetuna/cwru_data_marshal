@@ -32,7 +32,7 @@ Health check. Returns `{"status": "ok", "uptime_s": 95}`.
 
 #### GET /image/latest
 
-**Live mode (default, no `--dump`):** returns a pointer to the closed companion snapshot — a stable path holding the most recently published live image update (2D slice, multi-slice stack image, or 3D volume image):
+**Live mode (default, no `--dump`):** returns a pointer to the closed companion snapshot — a stable path holding the most recently published live image update (2D slice, multi-slice stack image, or 3D volume image). Both lanes publish per incoming image; for a multislice recon the snapshot holds the volume accumulated so far (1→N slices, resetting at each volume boundary), so readers must not assume a fixed slice count:
 ```json
 {
   "path": "/latest/live/from_reconstruction/latest_image.h5",
