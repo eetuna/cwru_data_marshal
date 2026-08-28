@@ -80,7 +80,10 @@ static auto text_response(const http::request<Body>& req,
 // Called from ReconForwarder callback (MRD TCP path). Scanner return is handled
 // by the callback in marshal_main.cpp and must not wait on latest-file HDF5 I/O.
 // ---------------------------------------------------------------------------
-inline void handle_recon_image(MarshalState& state, const void* data, size_t size)
+// require_epoch (see live_image_store.hpp): the recon session's epoch; the
+// image is dropped if a newer scan owns the state.
+inline void handle_recon_image(MarshalState& state, const void* data, size_t size,
+                               uint64_t require_epoch = mrd::kAnyEpoch)
 {
     // Track slice geometry in every mode (recon lane) — the slice-translation
     // command pushed to the scanner embeds it.
@@ -90,6 +93,8 @@ inline void handle_recon_image(MarshalState& state, const void* data, size_t siz
     // purely on the mode flag so a missing dump_recorder does not silently
     // fall back to writing live output.
     if (state.dump_enabled) {
+        if (require_epoch != mrd::kAnyEpoch && state.scan_epoch.load() != require_epoch)
+            return;
         if (state.dump_recorder) {
             const auto* bytes = static_cast<const uint8_t*>(data);
             state.dump_recorder->append_recon_image(
@@ -99,16 +104,19 @@ inline void handle_recon_image(MarshalState& state, const void* data, size_t siz
     }
 
     mrd::append_live_image(state, mrd::LiveLane::Recon,
-                           static_cast<const uint8_t*>(data), size);
+                           static_cast<const uint8_t*>(data), size, require_epoch);
 }
 
-inline void handle_recon_waveform(MarshalState& state, const void* data, size_t size)
+inline void handle_recon_waveform(MarshalState& state, const void* data, size_t size,
+                                  uint64_t require_epoch = mrd::kAnyEpoch)
 {
     if (size < mrd::WAVEFORM_HEADER_BYTES) return;
     const auto* whdr = static_cast<const ISMRMRD::WaveformHeader*>(data);
     size_t data_bytes = size_t(whdr->number_of_samples) * whdr->channels * sizeof(uint32_t);
     if (size < mrd::WAVEFORM_HEADER_BYTES + data_bytes) return;
     if (state.dump_enabled) {
+        if (require_epoch != mrd::kAnyEpoch && state.scan_epoch.load() != require_epoch)
+            return;
         if (state.dump_recorder) {
             const auto* bytes = static_cast<const uint8_t*>(data);
             state.dump_recorder->append_recon_waveform(
@@ -119,7 +127,7 @@ inline void handle_recon_waveform(MarshalState& state, const void* data, size_t 
     // Live mode: persist recon-side waveforms via the per-lane history
     // recorder so default-mode runs capture ECG too (not just images).
     mrd::append_live_waveform(state, mrd::LiveLane::Recon,
-                              static_cast<const uint8_t*>(data), size);
+                              static_cast<const uint8_t*>(data), size, require_epoch);
 }
 
 // ---------------------------------------------------------------------------

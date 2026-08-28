@@ -233,7 +233,26 @@ namespace mrd
         return group.seen_slices.size() >= state.recon_expected_slices;
     }
 
-    inline void append_live_image(MarshalState &state, LiveLane lane, const uint8_t *data, size_t size)
+    // "No epoch requirement" sentinel for the require_epoch parameters below
+    // (scanner-lane appends run on the session thread that owns the scan
+    // and need no guard).
+    constexpr uint64_t kAnyEpoch = ~uint64_t{0};
+
+    // Does the recon session that produced a callback still own the scan?
+    // Cheap pre-check for recon callbacks before pushing anything to the
+    // scanner socket. Not a substitute for the under-lock require_epoch
+    // checks in append_live_image / append_live_waveform.
+    inline bool recon_session_owns_scan(const MarshalState &state)
+    {
+        return state.recon_session_epoch.load() == state.scan_epoch.load();
+    }
+
+    // require_epoch: if not kAnyEpoch, the append is dropped unless
+    // scan_epoch still equals it — checked under scan_mtx, so a new scan's
+    // METADATA cannot slip in between the caller's check and the append.
+    inline void append_live_image(MarshalState &state, LiveLane lane,
+                                  const uint8_t *data, size_t size,
+                                  uint64_t require_epoch = kAnyEpoch)
     {
         ParsedWireImage parsed;
         if (!parse_wire_image(data, size, parsed))
@@ -256,10 +275,17 @@ namespace mrd
 
         {
             std::lock_guard<std::mutex> lk(state.scan_mtx);
-            xml = state.current_xml_header;
             // Same critical section as the xml/group snapshot — see
             // publish_latest_snapshot.
             publish_epoch = state.scan_epoch.load();
+            if (require_epoch != kAnyEpoch && publish_epoch != require_epoch)
+            {
+                LOG_WARN("Dropping " << lane_name(lane)
+                         << " image from a superseded scan (epoch "
+                         << require_epoch << " != " << publish_epoch << ")");
+                return;
+            }
+            xml = state.current_xml_header;
 
             if (state.current_scan_filename.empty())
             {
@@ -367,7 +393,8 @@ namespace mrd
     }
 
     inline void append_live_waveform(MarshalState &state, LiveLane lane,
-                                     const uint8_t *data, size_t size)
+                                     const uint8_t *data, size_t size,
+                                     uint64_t require_epoch = kAnyEpoch)
     {
         if (size < WAVEFORM_HEADER_BYTES)
             return;
@@ -383,6 +410,8 @@ namespace mrd
 
         {
             std::lock_guard<std::mutex> lk(state.scan_mtx);
+            if (require_epoch != kAnyEpoch && state.scan_epoch.load() != require_epoch)
+                return;
             xml = state.current_xml_header;
 
             if (state.current_scan_filename.empty())
@@ -400,6 +429,26 @@ namespace mrd
 
             lane_store.recorder->append_waveform(filename, xml, std::move(wf_bytes));
         }
+    }
+
+    // Point /image/latest at the recon-failure marker. Epoch-guarded like
+    // publish_latest_snapshot's on_complete: an old recon session failing
+    // after a new scan took over must not replace the NEW scan's latest
+    // image with an error marker. Returns true if the marker was applied.
+    inline bool set_latest_image_error_at_epoch(MarshalState &state,
+                                                const std::filesystem::path &png_path,
+                                                uint64_t epoch)
+    {
+        std::lock_guard<std::mutex> lk(state.latest_image_mtx);
+        if (state.scan_epoch.load() != epoch)
+            return false;
+        state.latest_image_path = png_path.string();
+        state.latest_image_error = true;
+        // The error transition is a publish too: bump so generation-gated
+        // pollers (and the latest.h5 ETag) see a change and re-read
+        // instead of sitting on the last image.
+        state.latest_image_generation.fetch_add(1);
+        return true;
     }
 
     inline void flush_live_lane(MarshalState &state, LiveLane lane)

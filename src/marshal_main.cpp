@@ -443,16 +443,34 @@ int main(int argc, char** argv)
     // Recon forwarder via MRD TCP (optional)
     std::unique_ptr<mrd::ReconForwarder> forwarder;
     if (!recon_host.empty()) {
+        // Both callbacks are epoch-guarded (audit blocker #1): after an
+        // abnormal scanner EOF the scanner slot is released before the old
+        // recon session is torn down, so a NEW scan can already own
+        // state/the scanner socket when the OLD recon emits a tail image
+        // or fails. recon_session_epoch is stamped by the listener right
+        // before begin_session(); if it no longer matches scan_epoch, the
+        // callback belongs to a superseded scan and must not touch the
+        // current one. The archive/latest paths re-check under scan_mtx /
+        // latest_image_mtx via require_epoch.
         auto on_failure = [&state]() {
+            const uint64_t epoch = state.recon_session_epoch.load();
+            if (state.scan_epoch.load() != epoch) {
+                LOG_WARN("Recon failure from a superseded scan (epoch " << epoch
+                         << "); current scan " << state.scan_epoch.load()
+                         << " is unaffected");
+                return;
+            }
             LOG_INFO("Finalizing recon lane after recon socket ended");
             if (state.dump_enabled) {
                 if (state.dump_recorder) {
                     state.dump_recorder->close_lane(mrd::DumpLane::Recon);
                 }
+                mrd::mark_lane_finalized_after_eof(state, mrd::LiveLane::Recon);
             } else {
-                mrd::flush_live_lane(state, mrd::LiveLane::Recon);
+                mrd::flush_live_lane_at_epoch(state, mrd::LiveLane::Recon, epoch);
+                mrd::mark_lane_finalized_after_eof_at_epoch(state, mrd::LiveLane::Recon,
+                                                            epoch);
             }
-            mrd::mark_lane_finalized_after_eof(state, mrd::LiveLane::Recon);
 
             // Live mode only: write the latest_error.png snapshot under
             // live/from_reconstruction so /image/latest can return an error
@@ -462,15 +480,12 @@ int main(int argc, char** argv)
                 const auto latest_root = mrd::latest_base_dir(state);
                 write_error_png(latest_root);
                 auto png_path = mrd::live_recon_dir(latest_root) / "latest_error.png";
-                std::lock_guard<std::mutex> lk(state.latest_image_mtx);
-                state.latest_image_path = png_path.string();
-                state.latest_image_error = true;
-                // The error transition is a publish too: bump so
-                // generation-gated pollers (and the latest.h5 ETag) see a
-                // change and re-read instead of sitting on the last image.
-                state.latest_image_generation.fetch_add(1);
+                if (!mrd::set_latest_image_error_at_epoch(state, png_path, epoch)) {
+                    return;   // a new scan took over mid-failure: leave it alone
+                }
             }
 
+            if (state.scan_epoch.load() != epoch) return;
             if (state.recon_failure_reported.exchange(true) == false) {
                 auto body = build_recon_failure_image_body();
                 // MEDIUM #18: log exceptions instead of silently swallowing.
@@ -488,6 +503,12 @@ int main(int argc, char** argv)
         // Recon return callback: archive IMAGE messages for non-scanner clients,
         // and push every MRD return message back to the scanner.
         auto on_message = [&state](uint16_t tag, const void* data, size_t len) {
+            const uint64_t epoch = state.recon_session_epoch.load();
+            if (state.scan_epoch.load() != epoch) {
+                LOG_WARN("Dropping recon message tag=" << tag
+                         << " from a superseded scan (epoch " << epoch << ")");
+                return;
+            }
             // MEDIUM #18: log exceptions instead of silently swallowing.
             try { state.mrd_push_message(tag, data, len); }
             catch (const std::exception& e) {
@@ -497,9 +518,9 @@ int main(int argc, char** argv)
             }
 
             if (tag == mrd::MRD_MESSAGE_ISMRMRD_IMAGE) {
-                handle_recon_image(state, data, len);
+                handle_recon_image(state, data, len, epoch);
             } else if (tag == mrd::MRD_MESSAGE_ISMRMRD_WAVEFORM) {
-                handle_recon_waveform(state, data, len);
+                handle_recon_waveform(state, data, len, epoch);
             } else if (tag == mrd::MRD_MESSAGE_TEXT && state.dump_enabled && state.dump_recorder) {
                 // Pass the full wire body verbatim ([uint32 len][text+NUL])
                 // so dump's byte-exact guarantee holds for recon TEXT too.

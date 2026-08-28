@@ -331,3 +331,73 @@ TEST_CASE("snapshot stamped with a superseded scan epoch is not advertised",
         CHECK(state.latest_image_path == snapshot.string());
     }
 }
+
+// 2026-08-28 audit blocker #1: recon callbacks from a superseded scan. After
+// an abnormal scanner EOF the scanner slot is released before the old recon
+// session ends, so scan B's METADATA can bump scan_epoch while scan A's
+// recon still emits tail images or fails. Those callbacks carry scan A's
+// recon_session_epoch and must not archive/publish under scan B's state or
+// replace scan B's latest image with the error marker.
+TEST_CASE("recon image carrying a superseded epoch is neither archived nor published",
+          "[live_image_store][epoch][recon]") {
+    MarshalState state;
+    init_state(state, 1);
+    const auto snapshot = mrd::lane_latest_path(state, mrd::LiveLane::Recon);
+
+    const uint64_t epoch_a = state.scan_epoch.load();
+    state.recon_session_epoch.store(epoch_a);
+    CHECK(mrd::recon_session_owns_scan(state));
+
+    // Scan B's METADATA takes over.
+    state.scan_epoch.fetch_add(1);
+    CHECK_FALSE(mrd::recon_session_owns_scan(state));
+
+    auto wire = make_wire_image(1, 0);
+    mrd::append_live_image(state, mrd::LiveLane::Recon, wire.data(), wire.size(), epoch_a);
+    CHECK(state.latest_image_generation.load() == 0);
+    CHECK_FALSE(fs::exists(snapshot));
+    {
+        std::lock_guard<std::mutex> lk(state.scan_mtx);
+        CHECK_FALSE(state.recon_latest_group.active);
+        CHECK(state.recon_live.recorder == nullptr);   // no archive touched
+    }
+
+    // The same image stamped with the live epoch goes through.
+    mrd::append_live_image(state, mrd::LiveLane::Recon, wire.data(), wire.size(),
+                           state.scan_epoch.load());
+    CHECK(state.latest_image_generation.load() == 1);
+    CHECK(fs::exists(snapshot));
+}
+
+TEST_CASE("recon failure marker carrying a superseded epoch leaves the current image alone",
+          "[live_image_store][epoch][recon][error]") {
+    MarshalState state;
+    init_state(state, 1);
+    const auto snapshot = mrd::lane_latest_path(state, mrd::LiveLane::Recon);
+    const uint64_t epoch_a = state.scan_epoch.load();
+
+    // Scan B publishes a healthy image.
+    state.scan_epoch.fetch_add(1);
+    auto wire = make_wire_image(1, 0);
+    mrd::append_live_image(state, mrd::LiveLane::Recon, wire.data(), wire.size());
+    REQUIRE(state.latest_image_generation.load() == 1);
+
+    // Scan A's recon fails late.
+    const fs::path png = fs::path(state.dump_dir) / "latest_error.png";
+    CHECK_FALSE(mrd::set_latest_image_error_at_epoch(state, png, epoch_a));
+    {
+        std::lock_guard<std::mutex> lk(state.latest_image_mtx);
+        CHECK(state.latest_image_path == snapshot.string());
+        CHECK_FALSE(state.latest_image_error);
+    }
+    CHECK(state.latest_image_generation.load() == 1);
+
+    // Scan B's own recon failing is still reported.
+    CHECK(mrd::set_latest_image_error_at_epoch(state, png, state.scan_epoch.load()));
+    {
+        std::lock_guard<std::mutex> lk(state.latest_image_mtx);
+        CHECK(state.latest_image_path == png.string());
+        CHECK(state.latest_image_error);
+    }
+    CHECK(state.latest_image_generation.load() == 2);
+}

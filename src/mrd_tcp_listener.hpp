@@ -529,6 +529,10 @@ private:
             if (!session_active_.load() || !forwarder_->is_connected()) {
                 if (recon_attempted) return false;   // one-shot per scan
                 recon_attempted = true;
+                // Stamp ownership BEFORE begin_session(): a connect failure
+                // calls on_failure synchronously and must see this scan's
+                // epoch (see recon_session_epoch in marshal_state.hpp).
+                state_.recon_session_epoch.store(state_.scan_epoch.load());
                 session_active_.store(forwarder_->begin_session());
                 if (!session_active_.load()) return false;
                 for (const auto& [tag, body] : recon_preamble) {
