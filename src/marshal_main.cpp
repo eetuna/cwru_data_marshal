@@ -653,6 +653,8 @@ int main(int argc, char** argv)
     //   1. stop accepting new connections (HTTP + MRD)
     //   1b. stop the slice-agent client (sends 0xDEAD while the network is
     //       still up; later submit() calls return false harmlessly)
+    //   1c. abort the recon socket (no join) so a scanner session thread
+    //       blocked writing to a hung recon can unwind in step 2
     //   2. cancel + join in-flight sessions so they stop touching MarshalState
     //   3. stop the recon forwarder (joins its reader thread)
     //   4. flush live lanes + close scan state
@@ -662,6 +664,7 @@ int main(int argc, char** argv)
         LOG_INFO("Received signal " << signum << ", shutting down...");
         acceptor.close();
         if (slice_agent) slice_agent->stop();
+        if (forwarder) forwarder->cancel();
         if (mrd_listener) mrd_listener->stop();
         http_sessions.shutdown_and_join();
         if (forwarder) forwarder->stop();
@@ -688,6 +691,7 @@ int main(int argc, char** argv)
     // In case ioc.run() returned without the signal handler firing (e.g.
     // acceptor error), still drain HTTP sessions before state destructs.
     if (slice_agent) slice_agent->stop();
+    if (forwarder) forwarder->cancel();
     http_sessions.shutdown_and_join();
     if (mrd_listener) mrd_listener->stop();
 

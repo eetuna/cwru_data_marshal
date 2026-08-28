@@ -30,6 +30,7 @@
 #include <thread>
 #include <vector>
 
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -50,11 +51,29 @@ public:
     using MessageCallback = std::function<void(uint16_t, const void*, size_t)>;
     using FailureCallback = std::function<void()>;
 
+    // Liveness bound on the CONNECTED recon socket (audit 2026-08-28 #5).
+    // The scanner session thread writes acquisitions to recon
+    // synchronously; a recon that accepts the connection but stops
+    // reading (stuck GPU, paused process, wedged thread — socket still
+    // open) fills its receive window and that write blocks forever,
+    // which in turn stops the marshal consuming scanner input and blocks
+    // shutdown. Keepalive covers the idle case; TCP_USER_TIMEOUT bounds
+    // both unACKed data and the zero-window-probe state, so the kernel
+    // aborts the connection (send/recv return an error → fail_recon)
+    // once the peer has made no progress for this long. Same rationale
+    // and values as configure_scanner_socket in mrd_tcp_listener.hpp.
+    static constexpr int      kKeepIdleSec          = 30;
+    static constexpr int      kKeepIntvlSec         = 10;
+    static constexpr int      kKeepCnt              = 3;
+    static constexpr uint32_t kDefaultUserTimeoutMs = 60000;
+
     ReconForwarder(const std::string& host, uint16_t port,
                    MessageCallback on_message, FailureCallback on_failure,
-                   uint32_t connect_timeout_ms = 5000)
+                   uint32_t connect_timeout_ms = 5000,
+                   uint32_t user_timeout_ms = kDefaultUserTimeoutMs)
         : recon_host_(host), recon_port_(port),
           connect_timeout_ms_(connect_timeout_ms),
+          user_timeout_ms_(user_timeout_ms),
           on_message_(std::move(on_message)), on_failure_(std::move(on_failure)) {}
 
     ~ReconForwarder() { end_session(); }
@@ -119,6 +138,18 @@ public:
 
             boost::system::error_code opt_ec;
             sock->set_option(tcp::no_delay(true), opt_ec);
+            sock->set_option(net::socket_base::keep_alive(true), opt_ec);
+            {
+                const int fd = sock->native_handle();
+                int v = kKeepIdleSec;
+                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &v, sizeof(v));
+                v = kKeepIntvlSec;
+                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &v, sizeof(v));
+                v = kKeepCnt;
+                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &v, sizeof(v));
+                unsigned ut = user_timeout_ms_;
+                ::setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &ut, sizeof(ut));
+            }
             // async_connect leaves the native fd in non-blocking mode
             // (synchronous net::connect did not). The reader/writer
             // paths issue raw blocking recv/send on the native fd and
@@ -240,6 +271,16 @@ public:
         });
     }
 
+    // Abort the recon socket WITHOUT joining: wakes any thread blocked in
+    // send/recv on it (including a scanner session thread stuck writing
+    // to a hung recon). Shutdown calls this before joining scanner
+    // sessions; end_session()/stop() still do the join afterwards.
+    void cancel() {
+        connected_.store(false);
+        shutdown_socket();
+        close_cv_.notify_all();
+    }
+
     // Called by marshal to stop everything
     void stop() { end_session(); }
 
@@ -247,6 +288,7 @@ private:
     std::string recon_host_;
     uint16_t recon_port_;
     uint32_t connect_timeout_ms_{5000};
+    uint32_t user_timeout_ms_{kDefaultUserTimeoutMs};
     MessageCallback on_message_;
     FailureCallback on_failure_;
 

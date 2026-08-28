@@ -296,3 +296,100 @@ TEST_CASE("push_message_to_scanner serializes concurrent senders",
     ioc.stop();
     if (ioc_thread.joinable()) ioc_thread.join();
 }
+
+// ---------------------------------------------------------------------------
+// Audit 2026-08-28 #5: a recon that accepts the connection but never reads
+// must not hold a sender hostage. Two bounds:
+//   - cancel() (shutdown path) wakes a thread blocked in send() immediately;
+//   - TCP_USER_TIMEOUT aborts the wedged connection on its own.
+// The fake recon shrinks its receive buffer and never calls recv, so the
+// forwarder's blocking send() wedges after a few hundred KB.
+// ---------------------------------------------------------------------------
+namespace {
+struct HungRecon {
+    net::io_context ioc;
+    tcp::acceptor acceptor{ioc, tcp::endpoint(tcp::v4(), 0)};
+    std::unique_ptr<tcp::socket> peer;   // accepted, never read
+    std::thread th;
+    uint16_t port() const { return acceptor.local_endpoint().port(); }
+    void start() {
+        th = std::thread([this] {
+            auto s = std::make_unique<tcp::socket>(ioc);
+            boost::system::error_code ec;
+            acceptor.accept(*s, ec);
+            if (!ec) {
+                net::socket_base::receive_buffer_size rb(4096);
+                s->set_option(rb, ec);
+                peer = std::move(s);
+            }
+        });
+    }
+    ~HungRecon() {
+        boost::system::error_code ignore;
+        acceptor.close(ignore);
+        if (th.joinable()) th.join();
+        if (peer) peer->close(ignore);
+    }
+};
+
+// Push frames until send() blocks; returns once send fails (socket aborted).
+std::thread wedge_sender(mrd::ReconForwarder& fwd, std::atomic<bool>& returned) {
+    return std::thread([&] {
+        std::vector<uint8_t> chunk(64 * 1024, 0xAB);
+        while (fwd.is_connected()) {
+            fwd.post_frame(mrd::MRD_MESSAGE_ISMRMRD_ACQUISITION, chunk);
+        }
+        returned.store(true);
+    });
+}
+} // namespace
+
+TEST_CASE("cancel() wakes a sender blocked on a recon that stopped reading",
+          "[recon_forwarder][hung_recon]") {
+    HungRecon recon;
+    recon.start();
+    std::atomic<int> failures{0};
+    mrd::ReconForwarder fwd("127.0.0.1", recon.port(),
+                            [](uint16_t, const void*, size_t) {},
+                            [&] { failures.fetch_add(1); },
+                            2000 /*connect ms*/, 60000 /*user timeout: not the bound here*/);
+    // Small send buffer so the wedge happens quickly.
+    REQUIRE(fwd.begin_session());
+
+    std::atomic<bool> returned{false};
+    auto sender = wedge_sender(fwd, returned);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    CHECK_FALSE(returned.load());   // sender is wedged in send()
+
+    const auto t0 = std::chrono::steady_clock::now();
+    fwd.cancel();
+    sender.join();
+    const auto took = std::chrono::steady_clock::now() - t0;
+    CHECK(returned.load());
+    CHECK(took < std::chrono::seconds(2));
+    fwd.stop();
+}
+
+TEST_CASE("TCP_USER_TIMEOUT aborts a recon connection that stopped reading",
+          "[recon_forwarder][hung_recon]") {
+    HungRecon recon;
+    recon.start();
+    std::atomic<int> failures{0};
+    mrd::ReconForwarder fwd("127.0.0.1", recon.port(),
+                            [](uint16_t, const void*, size_t) {},
+                            [&] { failures.fetch_add(1); },
+                            2000, 1000 /*user timeout ms*/);
+    REQUIRE(fwd.begin_session());
+
+    std::atomic<bool> returned{false};
+    auto sender = wedge_sender(fwd, returned);
+    const auto t0 = std::chrono::steady_clock::now();
+    sender.join();   // returns only when the kernel aborts the connection
+    const auto took = std::chrono::steady_clock::now() - t0;
+    CHECK(returned.load());
+    CHECK_FALSE(fwd.is_connected());
+    CHECK(failures.load() == 1);
+    // 1 s user timeout + probe scheduling slack; the untreated case never returns.
+    CHECK(took < std::chrono::seconds(15));
+    fwd.stop();
+}
