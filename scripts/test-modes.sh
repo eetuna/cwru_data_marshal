@@ -1,5 +1,6 @@
 #!/bin/bash
-# End-to-end mode test: live/dump x k-space/image, through the real stack.
+# End-to-end test: k-space/image pushes + slice commands, through the real stack.
+# (There is one marshal mode: archives and viewer snapshot are always on.)
 #
 #   ./scripts/test-modes.sh
 #
@@ -38,43 +39,27 @@ push_image(){ docker run --rm --network $NET -v "$DATA:/data" $FP \
 
 mkdir -p session-data
 
-echo "== bring up stack (live) with bundled test recon =="
+echo "== bring up stack with bundled test recon =="
 docker compose --profile test-recon up -d >/dev/null 2>&1
 for i in $(seq 1 30); do [ "$(mexec curl -s -o /dev/null -w '%{http_code}' localhost:8080/health 2>/dev/null)" = "200" ] && break; sleep 2; done
 
 echo "== generate phantom (k-space) =="
 docker run --rm -v "$DATA:/data" $FP python3 generate_cartesian_shepp_logan_dataset.py -o /data/phantom.h5 >/dev/null 2>&1
 
-echo "[1] LIVE + k-space (recon reconstructs)"
+echo "[1] k-space (recon reconstructs)"
 push_kspace
 chk "/image/latest=200" "$(code)" "200"
 chk "latest lane = recon" "$(lane)" "from_reconstruction"
 snap snap_recon.h5   # keep the recon image as input for [2]
 
-echo "[2] LIVE + image (bypass recon)"
+echo "[2] image"
 push_image /data/snap_recon.h5
 chk "/image/latest=200" "$(code)" "200"
-chk "latest lane = scanner" "$(lane)" "from_scanner"
-snap snap_scanner.h5 # keep the scanner-lane image as input for [4]
+# Scanner images go to recon like everything else; the viewer shows recon output.
+chk "latest lane = recon" "$(lane)" "from_reconstruction"
+snap snap_scanner.h5 # (was the input for the removed dump test [4])
 
-echo "== switch marshal to DUMP =="
-MARSHAL_DUMP=--dump docker compose --profile test-recon up -d --force-recreate mri-marshal >/dev/null 2>&1
-for i in $(seq 1 30); do [ "$(mexec curl -s -o /dev/null -w '%{http_code}' localhost:8080/health 2>/dev/null)" = "200" ] && break; sleep 2; done
-
-echo "[3] DUMP + k-space"
-push_kspace
-chk "/image/latest=404" "$(code)" "404"
-chk "dump recon archive"   "$(exists 'dump/from_reconstruction/scan_*.h5')" "yes"
-chk "dump scanner archive" "$(exists 'dump/from_scanner/scan_*.h5')" "yes"
-
-echo "[4] DUMP + image"
-push_image /data/snap_scanner.h5
-chk "/image/latest=404" "$(code)" "404"
-chk "dump scanner archive (image)" "$(exists 'dump/from_scanner/scan_*.h5')" "yes"
-
-echo "== restore LIVE mode =="
-docker compose --profile test-recon up -d --force-recreate mri-marshal >/dev/null 2>&1
-for i in $(seq 1 30); do [ "$(mexec curl -s -o /dev/null -w '%{http_code}' localhost:8080/health 2>/dev/null)" = "200" ] && break; sleep 2; done
+# [3]/[4] (dump-mode variants) removed: the --dump mode no longer exists.
 
 echo "[5] SLICE COMMANDS (marshal -> scanner-side slice_agent, channel OFF)"
 TGT='{"position":[12.5,-3,40],"read_dir":[1,0,0],"phase_dir":[0,1,0],"slice_dir":[0,0,1]}'

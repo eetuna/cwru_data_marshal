@@ -2,7 +2,7 @@
 
 ## Overview
 
-The CWRU Data Marshal is a persistent intermediary between the MRI scanner and the reconstruction service. It forwards scanner MRD messages to recon, receives recon MRD return messages back, pushes scanner-relevant return messages to the scanner, optionally records canonical H5 dumps, and serves query endpoints for visualization and control clients.
+The CWRU Data Marshal is a persistent intermediary between the MRI scanner and the reconstruction service. It forwards scanner MRD messages to recon, receives recon MRD return messages back, relays every recon return message to the scanner, always records canonical H5 archives of both sides, and serves query endpoints for visualization and control clients.
 
 ## Transport Map
 
@@ -33,9 +33,9 @@ The CWRU Data Marshal is a persistent intermediary between the MRI scanner and t
                          └────────────────────────────────────────────────┘
 ```
 
-**Scanner → Marshal:** MRD TCP on `--mrd-port` (default 9100). The scanner opens a persistent TCP connection and sends MRD messages using python-ismrmrd-server's 2-byte message ID framing.
+**Scanner → Marshal:** MRD TCP on `--mrd-port` (default 9100). The scanner opens a TCP connection per scan and sends MRD messages using python-ismrmrd-server's 2-byte message ID framing. A second scanner connection is not rejected: it waits its turn and is served when the current scan ends.
 
-**Marshal → Recon:** MRD TCP to `--recon-host:--recon-port`. The marshal opens a TCP connection to the recon service and forwards scanner messages using the same framing. Recon sends return messages back on this connection.
+**Marshal → Recon:** MRD TCP to `--recon-host:--recon-port` (`--recon-host` is required with `--mrd-port`). As soon as the scanner connects, the marshal opens its own connection to the recon service and forwards scanner messages using the same framing. Recon sends return messages back on this connection.
 
 **Marshal → Scanner (return path):** Recon return messages are pushed back to the scanner on the SAME TCP socket the scanner connected on. This satisfies the requirement: "Marshall needs to push, and it must come over the existing connection that was established for the scan."
 
@@ -50,10 +50,12 @@ webgl-client and any external consumer use it: `GET /status`, `GET /image/latest
 `/debug/*` diagnostics. Authoritative list: [API_REFERENCE.md](API_REFERENCE.md).
 
 **Image client (webgl-client):** Polls `GET /image/latest` over HTTP, receives
-`{path, error}` pointing at a closed companion HDF5 file, and opens it with default
-ISMRMRD / h5py settings. Marshal atomically renames a new companion snapshot on each
-incoming live IMAGE, so readers always see a closed file. `GET /image/latest` returns
-`204 No Content` before the first IMAGE, and `404 Not Found` in dump mode.
+`{path, images, generation, status, status_detail}` (always `200`; `path` is `null`
+until the current scan has an image) pointing at a closed companion HDF5 file, and opens
+it with default ISMRMRD / h5py settings. Marshal atomically renames a new companion
+snapshot on each change, so readers always see a closed file. The viewer uses the address
+the page was opened from, so it works from other machines, and shows the marshal's status
+in words while there is no image.
 
 ## MRD TCP Wire Protocol
 
@@ -106,6 +108,7 @@ Scanner connects to marshal MRD TCP port
   → CONFIG_FILE(1) or CONFIG_TEXT(2)     select recon handler
   → METADATA_XML_TEXT(3)                 ISMRMRD XML header
   → ACQUISITION(1008) × N               k-space lines
+  → IMAGE(1022) × K (optional)          scanner-made images (also forwarded)
   → WAVEFORM(1026) × M (optional)       ECG / physio (waveform_id=0 = ECG)
   → CLOSE(4)                            end of scan
   ← IMAGE/TEXT/etc.                     recon return messages pushed back
@@ -117,18 +120,19 @@ Scanner connects to marshal MRD TCP port
 These guarantees define how marshal routes messages and how it protects the
 scanner/recon path. They are contractual — clients and recon depend on them.
 
-**Recon is engaged only for k-space.** Marshal opens a recon session lazily: the
-recon connection is established when the **first ACQUISITION(1008) arrives**.
-CONFIG_FILE/CONFIG_TEXT, METADATA_XML_TEXT, TEXT, and WAVEFORM are buffered until
-then (and replayed into the session once it opens). A scanner-sent IMAGE(1022) is
-**not** sent to recon — it is published directly to the live lane / `latest_image.h5`
-snapshot. This means an image/metadata-only scan never touches recon.
+**Pass-through, like python-ismrmrd-server.** One scan per scanner connection. When
+the scanner connects, the marshal immediately opens its own recon connection. Every
+scanner message (config, metadata XML, text, acquisitions, images, waveforms) is
+archived and forwarded to recon verbatim and in order — scanner IMAGE(1022) messages
+included. Every recon message (images, text, waveforms, close) is archived and relayed
+back to the scanner.
 
-**Scan-completion CLOSE.** On end of scan:
-- **k-space scan** (recon session was opened): recon's CLOSE(4) is relayed back to
-  the scanner, so the scanner learns the scan is done from recon.
-- **image/metadata-only scan** (no recon session): marshal emits **its own** CLOSE(4)
-  to the scanner so it is never left waiting on a recon that was never engaged.
+**Scan-completion CLOSE.** On the scanner's CLOSE(4) the marshal forwards CLOSE to
+recon, then waits — with no time limit — until recon sends its CLOSE or its connection
+ends, relays it, and closes the scanner connection. A slow recon is simply waited for;
+a dead recon host is detected by TCP keepalive. If recon cannot be reached or its
+connection fails, the scanner gets a `RECON FAILED` IMAGE(1022) and a CLOSE(4), so the
+scan still finalizes.
 
 **Archival never blocks the protocol path.** HDF5 writes and the spool→H5 conversion
 run off the scanner/recon forwarding path and must never stall it. TCP flow control on
@@ -138,13 +142,18 @@ recon.
 
 ## Docker Compose Topology
 
-There is a single `docker-compose.yml`. Env knobs: `MARSHAL_DUMP` (`""` = live,
-`--dump` = dump/archival), `MARSHAL_LATEST` (default `--latest-dir /latest` = RAM
-snapshot on host `/dev/shm/cwru-latest`; set empty for the legacy on-disk snapshot
-under `session-data/live/`), `RECON_HOST`/`RECON_PORT` (recon target, default
-`recon:9002`), `SESSION_DATA_DIR` (data path), and the exposed ports
-(`HTTP_PORT`/`MRD_PORT`/`ROBOT_PORT`/`UI_PORT`/`WRITE_PORT`). The bundled test recon is
-off by default and enabled with `--profile test-recon`. The scanner is **not** a
+There is a single `docker-compose.yml`; settings live in `.env` (template `.env.example`
+in the repo root). Env knobs: `MARSHAL_LATEST` (default `--latest-dir /latest` = RAM
+snapshot on host `/dev/shm/cwru-latest`; set empty for the on-disk snapshot
+under `session-data/live/`), `RECON_HOST`/`RECON_PORT` (recon target; `RECON_HOST` has
+no default — compose stops with `RECON_HOST is not set - copy .env.example to .env and
+set it`), `SLICE_AGENT_HOST`/`SLICE_AGENT_PORT`, `SESSION_DATA_DIR` (data path), and the
+exposed ports (`HTTP_PORT`/`MRD_PORT`/`ROBOT_PORT`/`UI_PORT`/`WRITE_PORT`). The bundled
+test recon is off by default and enabled with `RECON_HOST=recon` in `.env` plus
+`--profile test-recon`. `mri-marshal` and `robot-marshal` have `restart: unless-stopped`.
+The marshal also writes its log to `session-data/marshal.log` (`MARSHAL_LOG_FILE`), and
+image builds bake its version (`MARSHAL_VERSION` = `<branch> @ <commit>`) into the log
+and `/status`. The scanner is **not** a
 compose service — it is external and drives `mri-marshal:9100` over raw MRD TCP (a real
 scanner, or python-ismrmrd-server's `client.py`).
 
@@ -152,7 +161,7 @@ scanner, or python-ismrmrd-server's `client.py`).
 docker-compose.yml services (network cwru-demo-net):
 
   mri-marshal     marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data
-                          --recon-host $RECON_HOST --recon-port $RECON_PORT $MARSHAL_DUMP
+                          $MARSHAL_LATEST --recon-host $RECON_HOST --recon-port $RECON_PORT
                   ports 8080 (HTTP API) + 9100 (MRD TCP, scanner-facing);
                   volume $SESSION_DATA_DIR -> /session-data
   recon           fire-python: python-ismrmrd-server main.py, MRD TCP :9002,
@@ -167,31 +176,23 @@ docker-compose.yml services (network cwru-demo-net):
   #   client.py -c invertcontrast --address mri-marshal --port 9100 phantom.h5
 ```
 
-`MARSHAL_DUMP` is passed straight through to the marshal command; live mode
-forwards k-space to `recon` and serves live snapshots, dump mode archives the full
-scanner stream and serves no live snapshot (see Storage Layout).
+There is one mode: the marshal always archives both sides in full and always serves
+the viewer snapshot (see Storage Layout).
 
 ## Storage Layout
 
-`--dump` selects the archival mode. Modes are mutually exclusive — marshal commits to one at process startup. The selected mode's subtree is the only one populated.
+There is one mode: everything from the scanner and from recon is always archived under `dump/`, and the viewer snapshot is always on. There is no `live/` archive.
 
-Both modes use the same raw-MRD spool + post-close HDF5 convert model: incoming wire frames are written to `scan_<ts>.h5.spool` during the scan; on scan close the spool is replayed through the converter to produce the canonical `scan_<ts>.h5`. The `.spool` file is retained by default for forensic recovery.
+Archives use a raw-MRD spool + post-scan HDF5 convert model: incoming wire frames are written to `scan_<ts>.h5.spool` during the scan; after the scan the spool is converted in the background to the canonical `scan_<ts>.h5`, so the next scan never waits for it. The `.spool` file is deleted after a successful conversion and kept if conversion fails, for recovery.
 
 ```
 ${dump_dir}/                          session-data umbrella (--dump-dir flag)
 │
-├── live/                             ONLY in live mode (no --dump)
-│   ├── from_scanner/
-│   │   ├── scan_<ts>.h5.spool        raw MRD wire frames, written during scan
-│   │   └── scan_<ts>.h5              ISMRMRD HDF5, produced by converter on CLOSE
-│   └── from_reconstruction/
-│       ├── scan_<ts>.h5.spool
-│       └── scan_<ts>.h5
-│
-└── dump/                             ONLY in dump mode (--dump)
+├── marshal.log                       marshal log (MARSHAL_LOG_FILE)
+└── dump/                             always written
     ├── from_scanner/
     │   ├── scan_<ts>.h5.spool        raw MRD wire frames (full stream incl. ACQ)
-    │   └── scan_<ts>.h5              ISMRMRD HDF5, produced on CLOSE
+    │   └── scan_<ts>.h5              ISMRMRD HDF5, converted in background after the scan
     └── from_reconstruction/
         ├── scan_<ts>.h5.spool
         └── scan_<ts>.h5
@@ -201,19 +202,16 @@ ${latest_dir}/                        snapshot root (--latest-dir; compose defau
 │                                     With MARSHAL_LATEST= unset-to-empty, these
 │                                     files live under ${dump_dir}/live/ instead.)
 └── live/
-    ├── from_scanner/
-    │   └── latest_image.h5           closed companion, atomic-rename per IMAGE
     └── from_reconstruction/
-        ├── latest_image.h5
-        └── latest_error.png          single overwritten recon-failure indicator
+        └── latest_image.h5           closed viewer snapshot, atomic-rename per change
 ```
 
-- `<ts>` is shared between scanner and recon lanes within the active mode.
-- In live mode: `scan_<ts>.h5` archives images + waveforms (ECG). Raw acquisitions are NOT archived in live mode.
-- In dump mode: `scan_<ts>.h5` archives the full scanner stream — acquisitions + images + waveforms + text + config. No files under `live/`, no `latest_image.h5`.
+- `<ts>` is shared between scanner and recon lanes.
+- `scan_<ts>.h5` archives the full stream of its side — acquisitions + images + waveforms + text + config.
+- `latest_image.h5` holds the newest recon image for each slice position (position + slice orientation + image type from the image header). A new image at a position replaces the old one; a new scan (its metadata header) clears the set. No volume or slice-count guessing. Images of different sizes go into separate variables `image_0`, `image_1`, ...; magnitude and phase at the same position are both kept.
 - HDF5 files use canonical libismrmrd layout (`appendAcquisition`, `appendImage`, `appendWaveform`).
-- The per-scan `scan_<ts>.h5` is an archival output finalized on CLOSE. It is NOT a mid-scan readable interface (HDF5's default file locking would block mid-scan opens on an open writer anyway). Clients that need mid-scan reads use `latest_image.h5` (live mode only).
-- `GET /image/latest` in live mode: `204 No Content` before first IMAGE; `{path, error}` after. Readers open the companion file's `image_0` group. In dump mode: `404 Not Found` with `{"error":"dump mode; no live snapshot"}`.
+- The per-scan `scan_<ts>.h5` is an archival output finalized on CLOSE. It is NOT a mid-scan readable interface (HDF5's default file locking would block mid-scan opens on an open writer anyway). Clients that need mid-scan reads use `latest_image.h5`.
+- `GET /image/latest`: always `200` with `{path, images, generation, status, status_detail}`; `path` is `null` until the current scan has an image. Readers open the companion file's `image_0` (and `image_1`, ...) group. `GET /image/latest.h5`: `204` while there is no image.
 - The `.spool` file is present throughout the scan; it is a private format (`[uint16 tag][uint32 length][body]` per record) intended for post-scan replay, not a client-facing interface.
 
 ## Fault Tolerance
@@ -221,12 +219,13 @@ ${latest_dir}/                        snapshot root (--latest-dir; compose defau
 The marshal stays running regardless of recon failure:
 
 - Recon return reading runs on a background thread.
-- If recon is unreachable, scanner-side archival continues and recon connection state is reset for a later reconnect.
-- A scanner-visible MRD `IMAGE(1022)` failure image is pushed on the active scanner TCP connection.
-- `latest_error.png` is written so the webgl-client visually shows "reconstruction failed"
+- At startup the marshal tries the recon address once and logs `Recon host:port is reachable` or `is NOT reachable: <reason> — scans will fail until it is` (also in `/status` as `recon.startup_check`).
+- If recon is unreachable or its connection fails, scanner-side archival continues and the next scan opens a fresh recon connection.
+- A `RECON FAILED` MRD `IMAGE(1022)` (geometry copied from the scan's raw data, int16 pixels) and a CLOSE are pushed on the active scanner TCP connection, so the scan finalizes.
+- `/image/latest` reports `status: "recon failed"` with the reason in `status_detail`, so the webgl-client shows it in words
 - T4 test: kill recon mid-scan, assert marshal still accepts MRD TCP connections and GET /health returns 200
 
-If `--recon-host` is not set, the marshal has no reconstruction target: scanner data is still accepted — and archived when `--dump` is on — but never forwarded. When a recon target is configured, forwarding behaves the same in live and dump modes; `--dump` changes what is archived, not whether data reaches the recon.
+`--recon-host` is required when `--mrd-port` is used; the marshal refuses to start without it.
 
 ## WebSocket (Optional)
 

@@ -66,7 +66,9 @@ cat > "$OUT_DIR/README.md" <<'EOF'
     docker load -i cwru-images.tar
     docker images | grep -E "cwru|fire-python"
 
-## 2. Run — PICK ONE (a recon must come from somewhere; none runs by default)
+## 2. Run — PICK ONE (a recon must come from somewhere; none runs by default.
+##    RECON_HOST is required — compose stops with "RECON_HOST is not set" without it.
+##    To keep settings, put RECON_HOST=... / RECON_PORT=... in a .env file here.)
 
     mkdir -p session-data
 
@@ -78,22 +80,23 @@ cat > "$OUT_DIR/README.md" <<'EOF'
     docker network connect cwru-demo-net <recon-container-name>
 
     # (c) bundled TEST recon (demo only):
-    docker compose --profile test-recon up -d
+    RECON_HOST=recon docker compose --profile test-recon up -d
 
-    # Recording session (add in front of any of the above; viewer stays blank,
-    # everything the scanner sends is archived raw and replayable):
-    # MARSHAL_DUMP=--dump ...
+    # Every scan is always archived raw and replayable (no separate
+    # recording mode); the viewer stays live.
 
     docker compose ps                          # wait until healthy
-    curl localhost:8080/status                 # mode + recon configured?
+    curl localhost:8080/status                 # status + recon.startup_check "reachable"?
     # prove the recon is reachable BEFORE scanning (must print "Connected"):
     docker exec cwru-mri-marshal curl -v telnet://<recon-host-or-name>:<port>
 
 - WebGL UI:  http://<host>:3000
 - MRI HTTP:  http://<host>:8080   (/status, /image/latest, /image/latest.h5)
 - MRD TCP:   <host>:9100   <-- point the scanner here
-- k-space goes to the recon you configured; scanner-sent images pass
-  straight through to webgl.
+- everything the scanner sends (k-space and images) goes to the recon you
+  configured; the recon's images come back to the scanner and to webgl.
+- If the recon can't be reached, the scanner gets a "RECON FAILED" image
+  and the scan still ends; the marshal keeps running.
 
 ## 3. Feed data without a real scanner (optional)
     docker run --rm -v "$PWD/session-data:/data" fire-python:latest \
@@ -109,9 +112,10 @@ cat > "$OUT_DIR/README.md" <<'EOF'
   ROBOT_PORT/MRD_PORT env vars in front of the compose command).
 
 ## Results
-- Live mode: every scan archived to session-data/live/from_reconstruction/
-  scan_*.h5 (full images incl. position/orientation headers).
-- Dump mode: raw stream in session-data/dump/from_scanner/ (replayable).
+- Every scan: raw scanner stream in session-data/dump/from_scanner/ (replayable)
+  and recon output in session-data/dump/from_reconstruction/ (full images incl.
+  position/orientation headers), one scan_*.h5 per scan per side.
+- Marshal log: session-data/marshal.log
 
 ## Teardown
     docker network disconnect cwru-demo-net <recon-container-name>  # if (b)

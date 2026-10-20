@@ -1,4 +1,4 @@
-# Testing — live/dump × k-space/image
+# Testing — k-space/image
 
 One command runs the whole matrix:
 
@@ -9,14 +9,14 @@ One command runs the whole matrix:
 Or step by step (WSL, repo root). Images must be built first — and rebuilt after code updates — with `./scripts/build-client-images.sh` (it refreshes the code branches and prints the commit each image is built from).
 
 ```bash
-# start (live + bundled test recon)
+# start (bundled test recon; .env must have RECON_HOST=recon)
 docker compose --profile test-recon up -d
 docker compose ps                          # wait healthy
 ```
 
 **Open the browser now → http://localhost:3000** (on WSL use the Windows browser). Open it
 *before* pushing data — it's blank until the first push, then renders and updates live, so
-you don't miss a stream. (For a single push the last image is retained anyway; blank in dump.)
+you don't miss a stream. (For a single push the last image is retained anyway.)
 
 ```bash
 # phantom (k-space)
@@ -24,7 +24,7 @@ docker run --rm -v "$PWD/session-data:/data" fire-python:latest \
   python3 generate_cartesian_shepp_logan_dataset.py -o /data/phantom.h5
 ```
 
-## 1 — LIVE + k-space (recon)
+## 1 — k-space (recon)
 ```bash
 docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest \
   python3 client.py -c invertcontrast -o /data/out.h5 --address mri-marshal --port 9100 /data/phantom.h5
@@ -33,38 +33,20 @@ curl -s localhost:8080/image/latest        # 200, path ends .../from_reconstruct
 curl -s localhost:8080/image/latest.h5 -o session-data/snap_recon.h5
 ```
 
-## 2 — LIVE + image (bypass recon)
+## 2 — image (forwarded to recon like everything else)
 ```bash
 docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest \
   python3 client.py -o /data/out_img.h5 --address mri-marshal --port 9100 /data/snap_recon.h5
-curl -s localhost:8080/image/latest        # 200, path ends .../from_scanner/latest_image.h5
-# save the scanner-lane image as input for test 4:
-curl -s localhost:8080/image/latest.h5 -o session-data/snap_scanner.h5
+curl -s localhost:8080/image/latest        # 200, path ends .../from_reconstruction/latest_image.h5
 ```
 
-## Switch to dump
-```bash
-MARSHAL_DUMP=--dump docker compose --profile test-recon up -d --force-recreate mri-marshal
-```
-
-## 3 — DUMP + k-space
-```bash
-docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest \
-  python3 client.py -c invertcontrast -o /data/out.h5 --address mri-marshal --port 9100 /data/phantom.h5
-curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/image/latest   # 404
-ls session-data/dump/from_scanner session-data/dump/from_reconstruction # scan_*.h5
-```
-
-## 4 — DUMP + image
-```bash
-docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest \
-  python3 client.py -o /data/out_img.h5 --address mri-marshal --port 9100 /data/snap_scanner.h5
-curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/image/latest   # 404
-```
+## 3 — Archives (no dump switch any more)
+Every scan above is already archived: `ls session-data/dump/from_scanner session-data/dump/from_reconstruction`
+shows one `scan_*.h5` per scan per side (written in the background just after each scan ends).
 
 ## Streaming (fire only, watch it update at localhost:3000)
 
-Must be **live** mode, browser open. Fire protocol only (no mock streamers). `Ctrl-C` stops.
+Browser open. Fire protocol only (no mock streamers). `Ctrl-C` stops.
 
 ### Realistic single-connection streaming — `scripts/fire_stream.py` (recommended)
 One persistent MRD connection, paced, a *moving* phantom (image changes every frame) —
@@ -75,7 +57,7 @@ closest to a real scan. Uses python-ismrmrd-server's `connection.py`.
 docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
   python3 /scripts/fire_stream.py --address mri-marshal --port 9100 --mode kspace --fps 10 --frames 0 --matrix 128
 
-# direct image -> webgl (bypass recon)
+# image -> recon -> webgl
 docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
   python3 /scripts/fire_stream.py --address mri-marshal --port 9100 --mode image --fps 10 --frames 0 --matrix 128
 
@@ -90,7 +72,7 @@ docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:l
 ```
 Flags: `--mode kspace|image` · `--fps` rate · `--frames 0` = forever · `--matrix` size · `--slices` N.
 The orbiting bright dot makes each frame visibly different (each slice has its own phase).
-`--mode kspace` lands in `from_reconstruction`, `--mode image` in `from_scanner`.
+Both modes reach the viewer through the recon (`from_reconstruction`); what the streamer sent is archived under `dump/from_scanner/`.
 Expected rates on a quiet machine (ceiling = the single-core test recon, not
 the marshal — measured 2026-07-06, see
 `docs/reviews/2026-07-06-end-to-end-performance-audit.md`): single-slice
@@ -98,27 +80,23 @@ the marshal — measured 2026-07-06, see
 lowers this one-for-one. Judge pipeline speed by recon images/s
 (`/debug/perf` recv.recon_images), not the sender's fps heartbeat.
 
-**Verify multislice while streaming** (snapshot = the volume accumulated so
-far — it grows 1→N within a volume and resets at the next; 3D read = all
-slices):
+**Verify multislice while streaming** (snapshot = the newest recon image at
+each slice position — it grows 1→N as the first volume arrives, then each new
+image replaces its position; a new scan clears it; 3D read = all slices):
 ```bash
 docker exec cwru-webgl-client python3 -c "
 import h5py,os; os.environ['HDF5_USE_FILE_LOCKING']='FALSE'
 print(h5py.File('/latest/live/from_reconstruction/latest_image.h5','r')['dataset/image_0/data'].shape)"
 # (default RAM snapshot path; with MARSHAL_LATEST= (disk) use
 #  /session-data/live/from_reconstruction/latest_image.h5)
-#   -> (1..5, 1, 1, 128, 128)  = cycles 1→5 per volume while streaming,
-#      never exceeds the volume's slice count; (5, ...) after the scan ends
+#   -> (1..5, 1, 1, 128, 128)  = grows 1→5 during the first volume, then stays 5;
+#      never exceeds the number of slice positions
 docker exec cwru-webgl-client sh -c 'curl -s localhost:3000/api/read/client-webgl/1 | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[\"width\"],d[\"height\"],\"depth\",d[\"depth\"])"'
 #   -> 128 128 depth 5
 ```
 
-**Dump streaming:** flip marshal to dump, run the same command; UI blank, archives grow:
-```bash
-MARSHAL_DUMP=--dump docker compose --profile test-recon up -d --force-recreate mri-marshal
-# ...run fire_stream.py (either mode)...
-watch -n1 'ls session-data/dump/from_scanner/ | wc -l'     # climbs each frame
-```
+**Archives while streaming:** nothing to switch — every stream above is also archived
+under `session-data/dump/` (one `scan_<ts>.h5` per side when the stream ends).
 
 ### Quick loop alternative (client.py, contrast flips each frame)
 ```bash
@@ -131,8 +109,8 @@ docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python
 ```
 Browser (`from_reconstruction`) flips inverted ↔ normal every ~0.5s.
 
-### Stream direct images → webgl (bypass recon)
-Prep a few images with different noise once, then stream them direct in rotation:
+### Stream images → recon → webgl
+Prep a few images with different noise once, then stream them in rotation:
 ```bash
 # prep (recon k-space to image files, varying noise)
 docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest sh -c '
@@ -141,36 +119,25 @@ docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python
     python3 client.py -c simplefft -o /data/img_$n.h5 --address mri-marshal --port 9100 /data/p.h5
   done'
 
-# stream them DIRECT, in a loop (from_scanner, no recon; grain changes each frame)
+# stream them in a loop (forwarded to recon; grain changes each frame)
 docker run --rm --network cwru-demo-net -v "$PWD/session-data:/data" fire-python:latest sh -c '
   while true; do for n in 0.05 0.3 0.6; do
     python3 client.py -o /data/out.h5 --address mri-marshal --port 9100 /data/img_$n.h5
     sleep 0.5
   done; done'
 ```
-Browser (`from_scanner`) cycles through the three noise levels — visibly changing, recon untouched.
+Browser (`from_reconstruction`) cycles through the three noise levels, as returned by the recon.
 
-### Streaming in dump mode (archives pile up; UI blank by design)
-Flip marshal to dump, then run **either stream loop above, unchanged**:
-```bash
-MARSHAL_DUMP=--dump docker compose --profile test-recon up -d --force-recreate mri-marshal
-# ...now run the k-space loop OR the direct-image loop from above...
-```
-Nothing shows in the browser (`/image/latest` = 404). Instead watch the per-scan archives
-accumulate — one `scan_<ts>.h5` per loop iteration:
-```bash
-watch -n1 'ls session-data/dump/from_scanner/ | wc -l'          # count climbs each frame
-# k-space also fills dump/from_reconstruction/:
-ls session-data/dump/from_reconstruction/ | wc -l
-curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/image/latest   # 404
-```
+### Archives pile up while looping
+Dump mode is gone: the loops above already archive one `scan_<ts>.h5` per iteration per side
+(`watch -n1 'ls session-data/dump/from_scanner/ | wc -l'` climbs) while the browser keeps updating.
 
 ## Regression checks — 2026-08-18 scanner-test notes
 
 Each check maps to a symptom reported at the August 2026 scanner test (infinite
 re-render after the scan, jittering/black multislice panels, "frozen during
 the scan then a burst", slice-count changes ignored, 3-plane view contents,
-"recon does nothing"). Live mode, bundled test recon, browser optional — every
+"recon does nothing"). Bundled test recon, browser optional — every
 expectation below is checkable with `curl`. `S` is the streamer prefix:
 
 ```bash
@@ -185,10 +152,10 @@ T='curl -s localhost:3000/api/read/client-webgl/0'             # what the viewer
 | **3D feed quiet when idle** | `curl -s localhost:3000/api/read/client-webgl/1 \| md5sum` twice | identical (served from cache; no repeated HDF5 reads / "Error loading 3D volume" churn) |
 | **Updates *during* a multislice scan** | `eval $S --slices 3 --frames 24 --fps 3 &` then `for i in 1 2 3 4 5 6 7; do sleep 1; $G; done` | `generation` climbs while the scan runs, roughly one bump per recon image (e.g. 48 57 66 75 84 93) — not flat until the end. Pre-fix: frozen during the scan (waiting for the header's full slice count), burst after. |
 | **Parallel same-orientation stack, no black planes** | `eval $S --slices 3 --frames 5`, wait for the scan to finish, then `$T \| python3 -c "import sys,json;d=json.load(sys.stdin);print(len(d['slices']),[max(s['values']) for s in d['slices']])"` | `3 [4095, 4095, 4095]` — three slices, all non-black; the 3-D panel shows all three. Mid-scan a partial (1- or 2-slice) read is normal — sample after the volume completes. |
-| **Slice count changes between scans** | `eval $S --slices 2 --frames 3`; `$G`; `eval $S --slices 4 --frames 3`; `$G` | snapshot goes 2 → 4 slices once each scan's volume completes (`docker exec cwru-webgl-client python3 -c "import h5py;print(h5py.File('/latest/live/from_reconstruction/latest_image.h5','r')['dataset/image_0/data'].shape)"`), counter advanced; transient 1..3-slice shapes mid-scan are the incremental publish, not a regression |
+| **Slice count changes between scans** | `eval $S --slices 2 --frames 3`; `$G`; `eval $S --slices 4 --frames 3`; `$G` | snapshot goes 2 → 4 slices once each scan's volume completes (`docker exec cwru-webgl-client python3 -c "import h5py;print(h5py.File('/latest/live/from_reconstruction/latest_image.h5','r')['dataset/image_0/data'].shape)"`), counter advanced; transient 1..3-slice shapes mid-scan are the new scan's first images arriving (a new scan clears the set), not a regression |
 | **3-plane view: last 3 distinct planes, across scans** | `eval $S --orient tra --frames 5`; `eval $S --orient sag --frames 5`; `eval $S --orient cor --frames 5` | after the third scan the viewer's 3-D panel shows one transverse, one sagittal, one coronal plane (three separate scans!). Then `eval $S --orient sag --frames 5` again: only the sagittal plane refreshes; the other two stay — "one new slice and two older ones". |
-| **Nothing there yet** | `curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/image/latest` on a fresh marshal | `204` — not an error |
-| **"Recon does nothing"** | start with an unreachable recon: `RECON_HOST=10.255.255.1 docker compose up -d --force-recreate mri-marshal`, run any k-space scan | `docker logs cwru-mri-marshal \| grep -i recon` shows `Failed to connect to recon at 10.255.255.1:9002 …`; `$G` returns `"error":true` with the `latest_error.png` marker; `/health` stays 200. This is the signature to look for when the recon "does nothing" at the scanner (wrong/unset `RECON_HOST`). |
+| **Nothing there yet** | `$G` on a fresh marshal | `200` with `"path":null` and `"status":"waiting for scan"` — not an error (`/image/latest.h5` returns `204`) |
+| **"Recon does nothing"** | start with an unreachable recon: `RECON_HOST=10.255.255.1 docker compose up -d --force-recreate mri-marshal`, run any k-space scan | `docker logs cwru-mri-marshal \| grep -i recon` shows `Failed to connect to recon at 10.255.255.1:9002 …`; `$G` returns `"status":"recon failed"` with `"status_detail":"cannot connect to recon at 10.255.255.1:9002"`; the scanner side gets a `RECON FAILED` image and a CLOSE; `/health` stays 200. This is the signature to look for when the recon "does nothing" at the scanner (wrong/unset `RECON_HOST`). |
 
 Not covered here (needs a real browser / console): the zoom-pan death from
 the GPU texture leak (fixed by pairing every texture/buffer create with a
@@ -254,7 +221,7 @@ send (unit-tested against a verbatim port of `slice_control.cpp`).
 
 ## Record & replay
 
-Dump-mode recordings (`session-data/dump/from_scanner/scan_*.h5`) replay
+Recordings (`session-data/dump/from_scanner/scan_*.h5`, written for every scan) replay
 through the live stack with `scripts/replay_scan.py` — the marshal sees an
 ordinary scanner connection. Verified: a 30-frame k-space stream recorded at
 10 fps replayed in 3.4 s paced (`--fps 10`) and 0.6 s `--full-speed`, and the
@@ -283,9 +250,9 @@ Notes and limits:
 - K-space frame boundary = repetition change; waveforms (ECG) in the
   recording are not replayed (v1 limitation).
 
-## Back to live / teardown
+## Restart / teardown
 ```bash
-docker compose --profile test-recon up -d --force-recreate mri-marshal   # live again (webgl at :3000)
+docker compose --profile test-recon up -d --force-recreate mri-marshal   # fresh marshal (webgl at :3000)
 docker compose --profile test-recon down                                 # stop
 ```
 
@@ -295,14 +262,16 @@ identical every run — confirm freshness via file mtime, a new `scan_<ts>.h5`, 
 
 ## Troubleshooting
 
-- **First check, always:** `curl localhost:8080/status` — mode, scanner/recon
-  connectivity, active scan, last-image age, free disk, in one response.
+- **First check, always:** `curl localhost:8080/status` — version, status in words,
+  scanner/recon connectivity (incl. the startup recon check), active scan, viewer image
+  count, free disk, in one response.
 - **Stop streams with Ctrl-C**, not `docker rm -f` — Ctrl-C sends the MRD CLOSE. (A killed
-  stream is tolerated: the marshal accepts a new connection immediately and finalizes the
-  abandoned session in the background.)
+  stream is tolerated: the marshal sends recon a CLOSE, takes what recon still returns,
+  and then serves the next connection, which waits its turn meanwhile.)
 - **Recon down or unreachable**: scans proceed archived-only; the scanner receives a
-  failure image and a CLOSE (never hangs). The recon connect attempt is bounded (5 s) and
-  retried once per scan — restart the recon and start the next scan.
+  `RECON FAILED` image and a CLOSE (never hangs). A slow but alive recon is waited for
+  with no time limit after the scanner's CLOSE; a dead recon host is detected by TCP keepalive. The recon connection is attempted once when
+  the scanner connects (bounded to 5 s) — restart the recon and start the next scan.
 - **Viewer static while streaming**: hard-refresh the browser (Ctrl-Shift-R) after any
   webgl-client recreate; confirm frames server-side with
   `curl -s localhost:8080/debug/perf | grep -o '"recon_images":[0-9]*'` (run twice — climbs).

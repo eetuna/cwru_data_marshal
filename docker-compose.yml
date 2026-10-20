@@ -1,13 +1,17 @@
 # CWRU Data Marshal — single stack for the python-ismrmrd-server workflow.
 #
-#   RECON_HOST=<ip> RECON_PORT=<port> docker compose up -d   # real recon (production)
-#   docker compose --profile test-recon up -d                # bundled test recon
-#   MARSHAL_DUMP=--dump ... docker compose up ...            # dump/archival mode
-#   docker compose ps / down                                 # health / teardown
+# Settings live in .env (copy .env.example once; compose reads it automatically).
+# RECON_HOST is required — there is no default, so a forgotten recon address
+# stops `docker compose up` with a message instead of failing during a scan.
 #
-# Knobs (env): MARSHAL_DUMP (unset = live | --dump), RECON_HOST/RECON_PORT (recon target,
-# default recon:9002), SESSION_DATA_DIR (data path). Marshal routes automatically:
-# k-space -> recon; scanner-sent images -> straight to webgl.
+#   cp .env.example .env && edit RECON_HOST    # once per machine
+#   docker compose up -d                       # real recon at RECON_HOST
+#   docker compose --profile test-recon up -d  # bundled test recon (RECON_HOST=recon)
+#   docker compose ps / down                   # health / teardown
+#
+# The marshal passes everything scanner <-> recon through unchanged, archives
+# both directions under session-data/dump/, and shows recon images in the
+# viewer. Its log is also written to session-data/marshal.log.
 #
 # Slice control (unset = off): SLICE_AGENT_HOST=<MARS ip running `slice_agent --listen`>
 # turns on the UI -> marshal -> slice_agent command channel; SLICE_AGENT_PORT (9270);
@@ -34,27 +38,26 @@ services:
     image: cwru/mri-marshal:latest
     container_name: cwru-mri-marshal
     logging: *default-logging
-    # sh -c so MARSHAL_DUMP / MARSHAL_LATEST / RECON_HOST / RECON_PORT / SLICE_AGENT_*
+    # sh -c so MARSHAL_LATEST / RECON_HOST / RECON_PORT / SLICE_AGENT_*
     # are resolved at runtime. The slice-agent flags are emitted ONLY when
     # SLICE_AGENT_HOST is non-empty (shell ${VAR:+...}) so an unset/empty host
     # cannot swallow the next flag.
-    command: ["sh", "-c", "exec /opt/mri/build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data $$MARSHAL_LATEST --recon-host $$RECON_HOST --recon-port $$RECON_PORT $$MARSHAL_DUMP $${SLICE_AGENT_HOST:+--slice-agent-host $$SLICE_AGENT_HOST --slice-agent-port $$SLICE_AGENT_PORT $$SLICE_AGENT_EXTRA}"]
+    command: ["sh", "-c", "exec /opt/mri/build/marshal --http 0.0.0.0:8080 --mrd-port 9100 --dump-dir /session-data $$MARSHAL_LATEST --recon-host $$RECON_HOST --recon-port $$RECON_PORT $${SLICE_AGENT_HOST:+--slice-agent-host $$SLICE_AGENT_HOST --slice-agent-port $$SLICE_AGENT_PORT $$SLICE_AGENT_EXTRA}"]
     environment:
-      - MARSHAL_DUMP=${MARSHAL_DUMP:-}
       # RAM snapshot on by default; MARSHAL_LATEST= (empty) puts the
-      # snapshot back on disk under session-data. Same on/off pattern as
-      # MARSHAL_DUMP — no compose editing.
+      # snapshot back on disk under session-data.
       - MARSHAL_LATEST=${MARSHAL_LATEST:---latest-dir /latest}
-      - RECON_HOST=${RECON_HOST:-recon}
+      - RECON_HOST=${RECON_HOST:?RECON_HOST is not set - copy .env.example to .env and set it}
       - RECON_PORT=${RECON_PORT:-9002}
       # Slice command channel to the scanner-side `slice_agent --listen`.
       # Empty host = channel off (slice endpoints answer enabled:false).
       - SLICE_AGENT_HOST=${SLICE_AGENT_HOST:-}
       - SLICE_AGENT_PORT=${SLICE_AGENT_PORT:-9270}
       - SLICE_AGENT_EXTRA=${SLICE_AGENT_EXTRA:-}
+      - MARSHAL_LOG_FILE=/session-data/marshal.log
     volumes:
       - ${SESSION_DATA_DIR:-./session-data}:/session-data
-      # RAM-backed snapshot dir (latest_image.h5 / latest_error.png). Shared
+      # RAM-backed snapshot dir (latest_image.h5). Shared
       # host tmpfs so the viewer sees the same path. Snapshots are transient
       # by design; archives stay on /session-data.
       - /dev/shm/cwru-latest:/latest
@@ -62,6 +65,7 @@ services:
       - "${HTTP_PORT:-8080}:8080"   # HTTP API (/image/latest, /health)
       - "${MRD_PORT:-9100}:9100"    # MRD TCP (scanner)
     stop_grace_period: 60s
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 5s
@@ -75,8 +79,9 @@ services:
     container_name: cwru-recon
     logging: *default-logging
     # Bundled TEST recon (python-ismrmrd-server, MRD TCP :9002). OFF by default —
-    # production points RECON_HOST at a real recon. Turn this on for testing with:
-    #   docker compose --profile test-recon up -d      (RECON_HOST defaults to `recon`)
+    # production points RECON_HOST at a real recon. Turn this on for testing with
+    # RECON_HOST=recon in .env and:
+    #   docker compose --profile test-recon up -d
     profiles: ["test-recon"]
     command: ["python3", "/opt/code/python-ismrmrd-server/main.py", "-v", "-H=0.0.0.0", "-p=9002", "--defaultConfig=invertcontrast"]
     networks: [cwru-net]
@@ -102,6 +107,7 @@ services:
       - ${SESSION_DATA_DIR:-./session-data}:/session-data
     ports:
       - "${ROBOT_PORT:-8081}:8081"
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-s", "http://localhost:8081/"]
       interval: 5s

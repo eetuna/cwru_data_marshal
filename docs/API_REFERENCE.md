@@ -10,7 +10,7 @@ The marshal has two transport interfaces:
 
 ## MRD TCP Interface (Scanner and Recon)
 
-Scanner-side clients connect via raw TCP to the marshal's `--mrd-port` and send MRD messages. The marshal forwards to recon ([python-ismrmrd-server](https://github.com/kspaceKelvin/python-ismrmrd-server) on MRD TCP, default port `9002`) via a second MRD TCP connection. When `--dump` is enabled, it also archives standard ISMRMRD objects to canonical H5 files. Reconstructed images are pushed back to the scanner on the same socket.
+Scanner-side clients connect via raw TCP to the marshal's `--mrd-port` and send MRD messages. The marshal forwards to recon ([python-ismrmrd-server](https://github.com/kspaceKelvin/python-ismrmrd-server) on MRD TCP, default port `9002`) via a second MRD TCP connection, opened as soon as the scanner connects. It works like a pass-through: every scanner message (config, metadata XML, text, acquisitions, images, waveforms) is forwarded to recon verbatim and in order, and every recon message (images, text, waveforms, close) is relayed back to the scanner on the same socket. Both sides are always archived as canonical ISMRMRD H5 files. One scan per scanner connection; a second scanner connection waits its turn and is served when the current scan ends. On the scanner's CLOSE the marshal forwards CLOSE to recon and waits, with no time limit, for recon's CLOSE (or the end of its connection), relays it, then closes the scanner connection. If recon cannot be reached or its connection fails, the scanner gets a `RECON FAILED` MRD image (geometry copied from the scan's raw data, int16 pixels) and a CLOSE, so the scan still finalizes.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full wire protocol reference (message IDs, framing, body formats, session flow).
 
@@ -32,34 +32,26 @@ Health check. Returns `{"status": "ok", "uptime_s": 95}`.
 
 #### GET /image/latest
 
-**Live mode (default, no `--dump`):** returns a pointer to the closed companion snapshot — a stable path holding the most recently published live image update (2D slice, multi-slice stack image, or 3D volume image). Both lanes publish per incoming image; for a multislice recon the snapshot holds the volume accumulated so far (1→N slices, resetting at each volume boundary), so readers must not assume a fixed slice count:
+Always returns `200` with a pointer to the closed viewer snapshot plus the marshal's status. The snapshot holds the newest recon image for each slice position (position + slice orientation + image type from the image header): a new image at a position replaces the old one, and a new scan (its metadata header) clears the set. Images of different sizes go into separate variables `image_0`, `image_1`, ...; magnitude and phase images at the same position are both kept. Readers must not assume a fixed slice count:
 ```json
 {
   "path": "/latest/live/from_reconstruction/latest_image.h5",
-  "error": false,
-  "generation": 57
+  "images": 5,
+  "generation": 57,
+  "status": "scanning",
+  "status_detail": ""
 }
 ```
 
-- `path` — stable reader-facing HDF5 file. Always a closed HDF5 atomically renamed by marshal on each incoming live IMAGE. Openable with default ISMRMRD / h5py / HDFView settings. Contents live under group `image_0`. With `--latest-dir` (the compose default: a RAM-backed dir shared with the viewer) the path is under that root; without the flag, under `--dump-dir`.
-- `error` — true if reconstruction is currently failing.
-- `generation` — monotonic publish counter. Remember the last value and skip re-reading the snapshot when it hasn't changed.
+- `path` — stable reader-facing HDF5 file, or `null` until the current scan has an image. Always a closed HDF5 atomically renamed by marshal on each change. Openable with default ISMRMRD / h5py / HDFView settings. Contents live under `image_0` (and `image_1`, ... for other image sizes). With `--latest-dir` (the compose default: a RAM-backed dir shared with the viewer) the path is under that root; without the flag, under `--dump-dir`.
+- `images` — how many images the snapshot holds.
+- `generation` — bumps on every change (new scan, new image written). Remember the last value and skip re-reading the snapshot when it hasn't changed.
+- `status` — one of `"waiting for scan"`, `"scanning"`, `"waiting for recon to finish"`, `"scan finished"`, `"recon failed"`.
+- `status_detail` — why, for `"recon failed"` (e.g. `"cannot connect to recon at host:port"`, `"recon connection ended without CLOSE"`).
 
-When reconstruction has failed:
-```json
-{
-  "path": "/session-data/live/from_reconstruction/latest_error.png",
-  "error": true
-}
-```
+If recon fails during a scan, the scanner receives a `RECON FAILED` MRD `IMAGE(1022)` and a CLOSE on its connection.
 
-If a scanner MRD TCP connection is active when recon fails, the scanner also receives a valid MRD `IMAGE(1022)` failure image on that same connection.
-
-Before the current scan has published any live IMAGE, `GET /image/latest` returns `204 No Content`.
-
-**Dump mode (`--dump`):** returns `404 Not Found` with body `{"error":"dump mode; no live snapshot"}`. Dump mode is archival-only — poll `/image/latest` only in live mode.
-
-The per-scan history file (`<mode>/from_*/scan_<ts>.h5`) is an archival output produced on CLOSE. It is not a mid-scan reader interface in either mode. Clients that need the per-scan archive open it after the scan ends.
+The per-scan archive file (`dump/from_*/scan_<ts>.h5`) is written in the background after the scan ends. It is not a mid-scan reader interface. Clients that need the per-scan archive open it after the scan ends.
 
 #### GET /image/latest.h5
 
@@ -72,7 +64,7 @@ img = h5py.File(io.BytesIO(r.read()), "r")["dataset/image_0/data"]
 ```
 
 - `ETag` carries the publish generation. Send `If-None-Match: <etag>` when polling; the marshal answers `304 Not Modified` until a new image is published, so only actual new images are downloaded.
-- `204 No Content` before the first image; `503 Service Unavailable` while reconstruction is failing; `404` in dump mode.
+- `204 No Content` while there is no image yet; otherwise the file bytes.
 
 #### GET /status
 
@@ -80,38 +72,28 @@ One-glance operational summary (read-only):
 
 ```json
 {
-  "mode": "live",
+  "version": "mri-data-marshal @ 1a2b3c4",
+  "status": "scanning",
+  "status_detail": "",
   "scanner_connected": true,
-  "recon": {"configured": true, "target": "recon:9002", "connected": true},
+  "recon": {"configured": true, "target": "recon:9002", "connected": true,
+            "startup_check": "reachable"},
   "scan": {"active": true, "file": "scan_2026-07-03T....h5"},
   "images": {"from_scanner_total": 300, "from_recon_total": 198},
-  "last_image_age_s": 0.2,
+  "viewer_images": 5,
   "disk_free_gb": 41.3,
   "uptime_s": 5231
 }
 ```
 
-`disk_free_gb` refers to the archive root (`--dump-dir`). `last_image_age_s` is null until the first snapshot publish.
+`disk_free_gb` refers to the archive root (`--dump-dir`). `version` is the `<branch> @ <commit>` baked in at image build. `status`/`status_detail` are the same as in `/image/latest`. `recon.startup_check` is `"reachable"` or the reason the startup connection test failed. `viewer_images` = images in the viewer snapshot.
 
 #### GET /debug/sinks
 
-Per-pipeline counters for retention verification. Returns mode-specific JSON:
+Per-pipeline counters for retention verification. Always reports the dump archive counters:
 
 ```json
-// Live mode
 {
-  "mode": "live",
-  "live": {
-    "from_scanner": {"acq": 0, "img": 0, "wf": 1076, "open": false,
-                     "dropped": 0, "queued_jobs": 0,
-                     "high_watermark_hit": false},
-    "from_reconstruction": { ... }
-  }
-}
-
-// Dump mode
-{
-  "mode": "dump",
   "dump": {
     "from_scanner":        { "converted_acq": 240000, "converted_img": 0,
                              "converted_wf": 1875, "conversion_ok": true,
@@ -123,11 +105,11 @@ Per-pipeline counters for retention verification. Returns mode-specific JSON:
 }
 ```
 
-Use this to measure archival retention. `dropped_records` / `dropped` must remain zero under any non-disk-failure operating condition.
+Use this to measure archival retention. `dropped_records` must remain zero under any non-disk-failure operating condition.
 
 #### GET /debug/perf
 
-Free-running performance counters since process start. Two snapshots and a delta between them give per-second rates. Intended for FPS / throughput debugging, regression detection, and the contract tripwires below.
+Free-running performance counters since process start. Two snapshots and a delta between them give per-second rates. Intended for FPS / throughput debugging, and regression detection.
 
 ```json
 {
@@ -137,18 +119,11 @@ Free-running performance counters since process start. Two snapshots and a delta
     "recon_images": 234,
     "scanner_waveforms": 237
   },
-  "publish_attempts": {"scanner": 0, "recon": 46},
   "latest_writer": {
-    "enqueued": 46,
-    "coalesced": 0,
-    "dropped_oldest": 0,
-    "completed": 46,
+    "writes": 46,
     "failed": 0,
-    "max_queue_depth": 1,
     "last_write_us": 3625,
-    "max_write_us": 41135,
-    "last_drain_lag_us": 88,
-    "max_drain_lag_us": 473
+    "max_write_us": 41135
   }
 }
 ```
@@ -156,17 +131,11 @@ Free-running performance counters since process start. Two snapshots and a delta
 Field meanings:
 
 - `recv.*` — counts of MRD wire messages observed entering marshal per lane.
-- `publish_attempts.*` — counts of `publish_latest_snapshot` calls per lane.
-- `latest_writer.enqueued` — jobs accepted by `LatestImageWriter::enqueue`.
-- `latest_writer.coalesced` — **contract tripwire**, must remain `0`. Non-zero means a same-destination coalesce path was introduced (a regression).
-- `latest_writer.dropped_oldest` — overload-backstop drops at the 64-job queue cap. Should be 0 under normal load; non-zero indicates sustained writer stall (look at `max_write_us`).
-- `latest_writer.completed` — jobs that finished writing successfully. **Should equal `enqueued - dropped_oldest`** in steady state.
-- `latest_writer.failed` — exceptions during `write_latest_image_h5_file`.
-- `latest_writer.max_queue_depth` — high-watermark queue depth.
+- `latest_writer.writes` — viewer-snapshot writes completed.
+- `latest_writer.failed` — snapshot writes that failed.
 - `latest_writer.{last,max}_write_us` — write durations (microseconds).
-- `latest_writer.{last,max}_drain_lag_us` — time from `enqueue` to the worker popping the job (microseconds). High values indicate writer is the bottleneck.
 
-Use `latest_writer.completed/sec` as the steady-state publish rate to localize regressions.
+Use `latest_writer.writes/sec` as the steady-state snapshot rate to localize regressions.
 
 #### GET /transform
 
@@ -256,7 +225,7 @@ Returns the latest cached pose:
 
 #### GET /dump/scanner
 
-List archived scanner HDF5 files under `dump/from_scanner/` (populated only when `--dump` is on):
+List archived scanner HDF5 files under `dump/from_scanner/` (every scan is archived here):
 ```json
 [{"path": "dump/from_scanner/scan_2026-04-14T16:30:00.123Z.h5", "size": 1234567, "modified": 1744651800}]
 ```
@@ -273,13 +242,11 @@ List archived reconstruction HDF5 files under `dump/from_reconstruction/` (same 
 |------|---------|-------------|
 | `--http host:port` | `0.0.0.0:8080` | HTTP listen address (query/control endpoints) |
 | `--mrd-port N` | `0` (disabled) | MRD TCP listen port (scanner connections). Listener only starts when a non-zero value is passed (`docker-compose.yml` passes `9100`). |
-| `--dump-dir path` | `./data` | Session-data root. Holds `live/from_scanner/`, `live/from_reconstruction/`, and — when `--dump` is on — `dump/from_scanner/`, `dump/from_reconstruction/`. |
-| `--dump` | off | Enable retrospective canonical ISMRMRD H5 dump writing |
-| `--latest-dir path` | (unset) | Alternate root for the transient snapshot artifacts (`latest_image.h5`, `latest_error.png`). Unset = they live under `--dump-dir` (historical layout, byte-identical behavior). The compose file points this at a shared RAM-backed dir (`/dev/shm/cwru-latest`) so per-volume snapshot I/O never touches — or stalls on — the archive disk. Archives are unaffected either way. |
-| `--recon-host host` | (none) | Recon service hostname for MRD TCP forwarding |
-| `--recon-port N` | `9002` | Recon service port. Used only when `--recon-host` is set. |
-| `--recon-connect-timeout-ms N` | `5000` | Bound on recon DNS resolve + TCP connect. On expiry the scan proceeds archived-only (scanner receives a failure image and a marshal CLOSE). |
-| `--recon-close-timeout-ms N` | `30000` | After the scanner's CLOSE is forwarded, how long to wait for recon to flush tail images and send its own CLOSE. On expiry the marshal emits its own CLOSE so the scanner never hangs. Sized for slow recons (e.g. GRAPPA on a remote VM). |
+| `--dump-dir path` | `./data` | Session-data root. Holds the always-on archives `dump/from_scanner/` and `dump/from_reconstruction/` (one `scan_<ts>.h5` per scan per side). |
+| `--latest-dir path` | (unset) | Alternate root for the transient viewer snapshot (`latest_image.h5`). Unset = it lives under `--dump-dir`. The compose file points this at a shared RAM-backed dir (`/dev/shm/cwru-latest`) so snapshot I/O never touches — or stalls on — the archive disk. Archives are unaffected either way. |
+| `--recon-host host` | (none) | Recon service hostname for MRD TCP forwarding. **Required** when `--mrd-port` is used — the marshal refuses to start without it. At startup the marshal tries to connect once and logs `Recon host:port is reachable` or `is NOT reachable: <reason> — scans will fail until it is`. |
+| `--recon-port N` | `9002` | Recon service port. |
+| `--recon-connect-timeout-ms N` | `5000` | Bound on recon DNS resolve + TCP connect. On expiry the scan proceeds archived-only (scanner receives a `RECON FAILED` image and a CLOSE). |
 | `--ws-port N` | (none) | Optional WebSocket listener port |
 | `--slice-agent-host host` | (none = channel off) | Scanner-side `slice_agent --listen` host (the MARS). Enables the slice command channel. Compose: `SLICE_AGENT_HOST`. |
 | `--slice-agent-port N` | `9270` | `slice_agent` port. Compose: `SLICE_AGENT_PORT`. |
@@ -381,7 +348,7 @@ import requests
 # Get latest image path
 resp = requests.get('http://localhost:8080/image/latest')
 data = resp.json()
-print(f"Image path: {data['path']}, error: {data['error']}")
+print(f"Image path: {data['path']}, status: {data['status']}")
 
 # Submit pose
 requests.post('http://localhost:8080/pose', json={
@@ -402,6 +369,6 @@ print(f"Tip: {tip['entries'][0]['values'][:3]}")
 
 ## Data Flow
 
-At a glance: scanner data and recon returns travel over **MRD TCP**; all query/control (image pointer, pose, transform, slice commands, health, dump listing, debug) is **HTTP**; slice commands additionally leave the marshal as 56-byte `SliceCommand` packets on a separate **TCP** connection to the scanner-side `slice_agent` (port 9270, only when `--slice-agent-host` is set). `<mode>` is `live` (default) or `dump` (`--dump`); the two are mutually exclusive and only the selected mode's subtree is populated. The only mid-scan readable interface is `latest_image.h5` (live mode only); `scan_<ts>.h5` is an archival output finalized on CLOSE.
+At a glance: scanner data and recon returns travel over **MRD TCP**; all query/control (image pointer, pose, transform, slice commands, health, dump listing, debug) is **HTTP**; slice commands additionally leave the marshal as 56-byte `SliceCommand` packets on a separate **TCP** connection to the scanner-side `slice_agent` (port 9270, only when `--slice-agent-host` is set). There is one mode: both sides are always archived under `dump/` and the viewer snapshot is always on. The only mid-scan readable interface is `latest_image.h5`; `scan_<ts>.h5` is an archival output written in the background after the scan ends.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system diagram, session flow, and wire-protocol reference.

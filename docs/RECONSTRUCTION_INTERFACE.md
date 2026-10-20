@@ -5,15 +5,17 @@ This document describes the MRD TCP interface between the MRI Marshal and recons
 ## Transport
 
 Marshal is the **client** on the recon leg. It opens an MRD TCP connection to the
-recon server, forwards k-space, and reads reconstructed images back on the *same*
-connection. The wire protocol is **raw TCP** with python-ismrmrd-server's 2-byte
+recon server as soon as a scanner connects, forwards everything the scanner sends,
+and reads the recon's messages back on the *same* connection. The wire protocol is **raw TCP** with python-ismrmrd-server's 2-byte
 message-ID framing — the same protocol the scanner uses, so the recon server is
 agnostic to whether a scanner or the marshal is driving it.
 
-Configure via: `--recon-host <host> --recon-port <port>`. In the default stack
-(`docker-compose.yml`) marshal is launched with `--recon-host recon --recon-port
-9002`, pointing at the `recon` service. If `--recon-host` is left unset, scanner
-data is accepted but not forwarded to recon. Add `--dump` for H5 archival mirrors.
+Configure via: `--recon-host <host> --recon-port <port>` (`--recon-host` is
+required with `--mrd-port`; the marshal refuses to start without it). In the stack
+(`docker-compose.yml`) these come from `RECON_HOST` / `RECON_PORT` in `.env` —
+`RECON_HOST` has no default; set `RECON_HOST=recon` and use `--profile test-recon`
+for the bundled `recon` service. At startup the marshal tries the address once and
+logs whether it is reachable. Both directions are always archived as H5.
 
 ## Data Flow
 
@@ -23,6 +25,7 @@ MRI Marshal                         Recon Service
     │── CONFIG_FILE(1) ──────────────────>│  select handler (e.g. "invertcontrast")
     │── METADATA_XML(3) ─────────────────>│  ISMRMRD XML header
     │── ACQUISITION(1008) × N ───────────>│  k-space lines
+    │── IMAGE(1022) × K (optional) ──────>│  scanner-sent images
     │── WAVEFORM(1026) × M (optional) ──>│  ECG / physio data
     │── CLOSE(4) ────────────────────────>│  end of scan
     │                                     │
@@ -31,13 +34,14 @@ MRI Marshal                         Recon Service
     │                                     │
 ```
 
-**Routing.** Marshal opens the recon session lazily: it connects and forwards the
-buffered CONFIG/METADATA only when **k-space (ACQUISITION) arrives**. So the recon
-leg engages only for k-space scans. Reconstructed images come back as IMAGE(1022)
-on the same connection and are published to downstream clients.
-
-A scanner-sent IMAGE(1022) is already reconstructed, so marshal does **not** forward
-it to recon — it is published directly. Only ACQUISITION drives the recon service.
+**Routing.** Pass-through, like python-ismrmrd-server: one recon connection per
+scanner connection (one scan), opened when the scanner connects. Every scanner
+message (config, metadata XML, text, acquisitions, images, waveforms) is forwarded
+verbatim and in order — scanner-sent IMAGE(1022) included. Every recon message
+(images, text, waveforms, close) is relayed back to the scanner; recon images also
+feed the viewer snapshot. On the scanner's CLOSE the marshal forwards CLOSE and
+waits with no time limit for the recon's CLOSE (or the end of its connection),
+relays it, and closes the scanner connection — a slow recon is simply waited for.
 
 **Image geometry.** Every IMAGE(1022) carries its spatial pose in the ISMRMRD
 `ImageHeader`: `position[3]` (slice center in scanner coordinates, mm) and the
@@ -59,6 +63,7 @@ The recon service is a TCP server that:
    - CONFIG_FILE(1) or CONFIG_TEXT(2) — selects the reconstruction handler
    - METADATA_XML_TEXT(3) — ISMRMRD XML header describing the scan
    - ACQUISITION(1008) — one k-space line (340B header + trajectory + samples)
+   - IMAGE(1022) — scanner-sent images, if any
    - WAVEFORM(1026) — physio data (40B header + uint32 samples), used for cardiac gating
    - CLOSE(4) — end of input
 4. **Processes** the acquisitions (e.g. 2D IFFT, GRAPPA).
@@ -99,18 +104,15 @@ Options, in increasing order of effort:
 If the recon service is unreachable or crashes mid-scan:
 
 - The marshal's recon forwarder marks the recon connection disconnected and logs a warning
-- The marshal continues accepting scanner data (`--dump` H5 recording continues when enabled)
-- A scanner-visible MRD `IMAGE(1022)` failure image is pushed on the active scanner TCP connection
-- A "reconstruction failed" PNG is written to `latest_error.png`
-- `GET /image/latest` returns `{"path": "...latest_error.png", "error": true}`
-- The webgl-client renders the failure image
-- Later scanner sessions can reconnect to recon when it is available again
+- The marshal keeps running and keeps archiving the scanner data
+- The scanner gets a `RECON FAILED` MRD `IMAGE(1022)` (geometry copied from the scan's raw data, int16 pixels) and a CLOSE, so the scan finalizes
+- `GET /image/latest` returns `"status": "recon failed"` with the reason in `status_detail` (e.g. `"cannot connect to recon at host:port"`, `"recon connection ended without CLOSE"`)
+- The webgl-client shows that status in words
+- The next scanner session opens a fresh recon connection; a dead recon host is detected by TCP keepalive
 
 No special error handling is needed on the recon side — TCP disconnection is sufficient.
 
 ## Storage
 
-- Live scanner data (always): `${dump_dir}/live/from_scanner/scan_<ts>.h5` (canonical ISMRMRD HDF5, appended).
-- Live recon data (always): `${dump_dir}/live/from_reconstruction/scan_<ts>.h5` (canonical ISMRMRD HDF5, appended; images grouped by `image_<image_series_index>`).
-- Dump mirrors (with `--dump`): `${dump_dir}/dump/from_scanner/scan_<ts>.h5` and `${dump_dir}/dump/from_reconstruction/scan_<ts>.h5`.
-- Live clients read the closed companion file at the path returned by `GET /image/latest` and open group `image_0` to read the most recently published image update.
+- Always: `${dump_dir}/dump/from_scanner/scan_<ts>.h5` and `${dump_dir}/dump/from_reconstruction/scan_<ts>.h5` (canonical ISMRMRD HDF5, one per scan per side, converted from a spool in the background after the scan). There is no `live/` archive.
+- Live clients read the closed companion file at the path returned by `GET /image/latest` (`null` until the scan has an image). It holds the newest recon image per slice position; images of different sizes are in `image_0`, `image_1`, ...

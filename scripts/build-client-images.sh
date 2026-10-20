@@ -32,8 +32,7 @@ MRI_BRANCH="${MRI_BRANCH:-mri-data-marshal}"
 ROBOT_BRANCH="${ROBOT_BRANCH:-robot_data_marshal_with_catheter_system_components}"
 UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/cwru-mercis/cwru_data_marshal.git}"
 
-# Never hang on an interactive credential prompt; an unreachable/unauthorised
-# remote just means "build the local branch".
+# Never hang on an interactive credential prompt.
 export GIT_TERMINAL_PROMPT=0
 
 # Print the commit to build for a branch (stdout); diagnostics go to stderr.
@@ -54,8 +53,12 @@ resolve_commit() {
         exit 1
     fi
     if [ -z "$remote_sha" ]; then
-        echo "  ! cwru-mercis unreachable; building local '$branch'." >&2
-        echo "$local_sha"; return 0
+        # Building the local copy here silently produced images from old code.
+        echo "" >&2
+        echo "  ✗ ERROR: cannot reach $UPSTREAM_REPO to get the latest '$branch'." >&2
+        echo "           Check the network / GitHub access, or build a folder on purpose:" >&2
+        echo "           MRI_BUILD_DIR=<marshal checkout> / ROBOT_BUILD_DIR=<robot checkout>." >&2
+        exit 1
     fi
     if [ -z "$local_sha" ] || git merge-base --is-ancestor "$local_sha" "$remote_sha" 2>/dev/null; then
         echo "$remote_sha"; return 0
@@ -113,7 +116,8 @@ echo ""
 
 # Build MRI Marshal
 echo "Building cwru/mri-marshal..."
-docker build -f "$PROJECT_ROOT/docker/Dockerfile.mri" -t cwru/mri-marshal:latest "$MRI_BUILD_DIR"
+docker build -f "$PROJECT_ROOT/docker/Dockerfile.mri" -t cwru/mri-marshal:latest \
+  --build-arg MARSHAL_VERSION="$MRI_BRANCH @ $MRI_DESC" "$MRI_BUILD_DIR"
 
 # Build recon = python-ismrmrd-server. Build context is the server root (its
 # Dockerfile COPYs the whole source tree); -f points at docker/Dockerfile inside it.

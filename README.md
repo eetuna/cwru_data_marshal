@@ -9,22 +9,25 @@ with a WebGL viewer on top.
 ## Run it
 
 ```bash
-RECON_HOST=<ip> RECON_PORT=<port> docker compose up -d   # real recon (production)
-docker compose --profile test-recon up -d                # bundled test recon
+cp .env.example .env                                     # then set RECON_HOST (required)
+docker compose up -d                                     # real recon (production)
+docker compose --profile test-recon up -d                # bundled test recon (RECON_HOST=recon in .env)
 docker compose ps                                        # wait until healthy
 ```
 
-Add `MARSHAL_DUMP=--dump` in front for dump/archival mode. Then open the viewer at
-**http://localhost:3000**. Drive data in with a real scanner or `python-ismrmrd-server`
+`RECON_HOST` has no default — compose stops with `RECON_HOST is not set` until
+`.env` sets it. Then open the viewer at
+**http://localhost:3000** (or `http://<marshal-machine>:3000` from another machine). Drive data in with a real scanner or `python-ismrmrd-server`
 `client.py` against `mri-marshal:9100` (see [QUICK_START](docs/QUICK_START.md)).
 
-Knobs (env on `docker compose up`): `MARSHAL_DUMP` (unset = live, `--dump` = dump), `MARSHAL_LATEST`
+Knobs (in `.env`, template `.env.example`, or env on `docker compose up`): `MARSHAL_LATEST`
 (RAM snapshot — default on at `/dev/shm/cwru-latest`; set empty for on-disk),
 `RECON_HOST`/`RECON_PORT` (recon target), `SESSION_DATA_DIR` (data path),
 `SLICE_AGENT_HOST`/`SLICE_AGENT_PORT`/`SLICE_AGENT_EXTRA` (slice control; off unless the host is set),
 `HTTP_PORT`/`MRD_PORT`/`ROBOT_PORT`/`UI_PORT`/`WRITE_PORT`
-(exposed ports). The marshal routes automatically: k-space → recon; scanner-sent images →
-straight to the viewer (no per-scan choice). UI slice commands (translate/rotate/set
+(exposed ports). There is one mode: everything the scanner sends (k-space and images) is
+archived and forwarded to recon, everything recon sends back is archived and relayed to
+the scanner, and recon's images feed the viewer. UI slice commands (translate/rotate/set
 position+orientation) go over a separate TCP connection to the scanner-side
 `slice_agent --listen` (port 9270; on only when `SLICE_AGENT_HOST` is set) — see
 [SLICE_CONTROL_HANDOFF.md](docs/SLICE_CONTROL_HANDOFF.md).
@@ -50,8 +53,8 @@ robot clients <──HTTP :8081──> robot-marshal ──> webgl-client
 
 ## Documentation
 
-- **[QUICK_START.md](docs/QUICK_START.md)** — run it, feed data, live vs dump.
-- **[TESTING.md](docs/TESTING.md)** — verify live/dump × k-space/image (or `./scripts/test-modes.sh`).
+- **[QUICK_START.md](docs/QUICK_START.md)** — run it, feed data, read the archives.
+- **[TESTING.md](docs/TESTING.md)** — verify k-space/image streams (or `./scripts/test-modes.sh`).
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — how it works: wire protocol, routing, storage, fault tolerance.
 - **[API_REFERENCE.md](docs/API_REFERENCE.md)** — HTTP endpoints + MRD TCP messages.
 - **[RECONSTRUCTION_INTERFACE.md](docs/RECONSTRUCTION_INTERFACE.md)** — the recon contract (swap in your own MRD-TCP recon).
@@ -69,6 +72,7 @@ recon) and `robot_data_marshal_with_catheter_system_components` (robot marshal,
 clients, webgl). The build script fetches each from GitHub, exports it at its
 commit (a clean copy — never your working folder) and prints
 `Building from: <branch> @ <commit>` — so `git pull` alone never affects what
-gets built, and the printed line is the truth. To build uncommitted local code
+gets built, and the printed line is the truth. If GitHub can't be reached the
+script stops with an error instead of building old local code. To build uncommitted local code
 on purpose: `MRI_BUILD_DIR=<checkout>` / `ROBOT_BUILD_DIR=<checkout>`. After
 rebuilding, restart with `docker compose up -d --force-recreate`.

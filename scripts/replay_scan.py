@@ -2,8 +2,8 @@
 """replay_scan.py — replay a recorded scan archive at the marshal as if a
 scanner were sending it.
 
-Input: a scan_*.h5 recorded by the marshal (dump mode: session-data/dump/
-from_scanner/, or a live-mode archive). Sends CONFIG + METADATA + the
+Input: a scan_*.h5 recorded by the marshal (every scan is archived under
+session-data/dump/from_scanner/). Sends CONFIG + METADATA + the
 recorded acquisitions/images over one MRD TCP connection, then CLOSE —
 indistinguishable from a live scan to the marshal/recon/viewer.
 

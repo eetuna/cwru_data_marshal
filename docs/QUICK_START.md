@@ -30,64 +30,63 @@ rebuilds are fast. Success ends with `Build complete! All 5 images ready.`
 > `ROBOT_BUILD_DIR=<checkout>` in front of the command builds that folder
 > as-is (the script says so loudly). After rebuilding, restart the stack with
 > `docker compose up -d --force-recreate` — a plain `up -d` keeps the old
-> containers running on the old images.
+> containers running on the old images. If the script cannot reach the
+> cwru-mercis GitHub repo it stops with an error (it never silently builds
+> old local code). The built marshal prints its `<branch> @ <commit>` version
+> in its log and in `/status`.
 
 ---
 
 ## Step 2 — Start the stack (pick ONE command)
 
-Every configuration has exactly five settings. Every command below states
-what you get for **all five**, so nothing is implicit:
+**First, once per machine:** settings live in `.env` next to
+`docker-compose.yml`. Copy the template and set `RECON_HOST` (required —
+there is no default; without it `docker compose` stops with
+`RECON_HOST is not set - copy .env.example to .env and set it`):
+```bash
+cp .env.example .env     # then edit: RECON_HOST=recon (test recon) or the real recon's IP
+```
 
-> **recon** (test or real) · **mode** (live or dump) · **data folder** ·
-> **snapshot** (RAM or disk) · **ports**
+Every configuration has four settings. Every command below states
+what you get for **all four**, so nothing is implicit:
 
-**2a. Demo / testing** (the usual choice):
+> **recon** (test or real) · **data folder** · **snapshot** (RAM or disk) · **ports**
+
+There is one mode: every scan is always archived in full (k-space included,
+under `session-data/dump/`) *and* the viewer updates live during the scan.
+
+**2a. Demo / testing** (the usual choice; `.env` has `RECON_HOST=recon`):
 ```bash
 docker compose --profile test-recon up -d
 ```
-> You get: recon = **bundled test recon** · mode = **live** (viewer updates
-> during scan; archives images+ECG) · data → **./session-data** · snapshot =
+> You get: recon = **bundled test recon** · data → **./session-data** · snapshot =
 > **RAM** · ports = **3000 UI / 8080 API / 9100 scanner / 8081 robot**
 
-**2b. Production — real recon:**
+**2b. Production — real recon** (`.env` has `RECON_HOST=10.0.0.5`, `RECON_PORT=9002`):
 ```bash
-RECON_HOST=10.0.0.5 RECON_PORT=9002 docker compose up -d
+docker compose up -d
 ```
-> You get: recon = **yours at 10.0.0.5:9002** · mode = **live** · data →
+> You get: recon = **yours at 10.0.0.5:9002** · data →
 > **./session-data** · snapshot = **RAM** · ports = **defaults as above**
 
-**2c. Recording session — test recon, dump mode** (records everything
-including raw k-space; viewer blank by design):
-```bash
-MARSHAL_DUMP=--dump docker compose --profile test-recon up -d
-```
-> You get: recon = **bundled test recon** · mode = **dump** (full archive to
-> `session-data/dump/`, no live view) · data → **./session-data** · snapshot =
-> **none** (dump mode has no snapshot) · ports = **defaults**
-
-**2d. Recording session — real recon, dump mode:**
-```bash
-MARSHAL_DUMP=--dump RECON_HOST=10.0.0.5 RECON_PORT=9002 docker compose up -d
-```
-> You get: recon = **yours** · mode = **dump** · data → **./session-data** ·
-> snapshot = **none** · ports = **defaults**
+**2c/2d. Recording session:** no separate command any more — 2a and 2b
+already record everything the scanner and recon send.
 
 **2e. MRI-only — no robot** (scanner → marshal → recon → viewer; the robot
 marshal and the 6 robot data clients are not started at all):
 ```bash
 docker compose --profile test-recon up -d --no-deps mri-marshal recon webgl-client
 ```
-> You get: recon = **bundled test recon** · mode = **live** · data →
+> You get: recon = **bundled test recon** · data →
 > **./session-data** · snapshot = **RAM** · ports = **3000 UI / 8080 API /
 > 9100 scanner** (no robot, so nothing on 8081). The viewer's robot panel
 > stays empty and webgl logs harmless robot-connection errors — expected.
 > Measured 2026-07-06: this subset sustains the full 20 fps kspace stream.
 
 For MRI-only with a **real** recon: same idea, drop the profile and the recon
-service, set the recon address:
+service, with the recon address in `.env`:
 ```bash
-RECON_HOST=10.0.0.5 RECON_PORT=9002 docker compose up -d --no-deps mri-marshal webgl-client
+docker compose up -d --no-deps mri-marshal webgl-client
 ```
 
 If the **full stack is already running** and you want to switch to MRI-only,
@@ -109,7 +108,7 @@ Each example shows the FULL command and the FULL result:
 ```bash
 SESSION_DATA_DIR=/data/experiment1 docker compose --profile test-recon up -d
 ```
-> You get: test recon · live · data → **/data/experiment1** · snapshot = RAM · default ports
+> You get: test recon · data → **/data/experiment1** · snapshot = RAM · default ports
 
 **Snapshot on disk instead of RAM** (you normally never need this — the
 snapshot is the viewer's throwaway current-frame file; RAM just makes it
@@ -117,37 +116,42 @@ stall-proof; your scan data is on disk either way):
 ```bash
 MARSHAL_LATEST= docker compose --profile test-recon up -d
 ```
-> You get: test recon · live · data → ./session-data · snapshot = **disk**
-> (`session-data/live/.../latest_image.h5`) · default ports
+> You get: test recon · data → ./session-data · snapshot = **disk**
+> (`latest_image.h5` under `session-data/`) · default ports
 
 **Different ports:**
 ```bash
 UI_PORT=13000 HTTP_PORT=18080 MRD_PORT=19100 docker compose --profile test-recon up -d
 ```
-> You get: test recon · live · data → ./session-data · snapshot = RAM ·
+> You get: test recon · data → ./session-data · snapshot = RAM ·
 > ports = **13000 UI / 18080 API / 19100 scanner / 8081 robot**
 
 **Several at once** (they always stack):
 ```bash
-UI_PORT=13000 SESSION_DATA_DIR=/data/exp1 MARSHAL_DUMP=--dump \
+UI_PORT=13000 SESSION_DATA_DIR=/data/exp1 \
 RECON_HOST=10.0.0.5 RECON_PORT=9002 docker compose up -d
 ```
-> You get: recon = **yours** · mode = **dump** · data → **/data/exp1** ·
-> snapshot = none (dump) · ports = **13000 UI**, others default
+> You get: recon = **yours** · data → **/data/exp1** ·
+> snapshot = RAM · ports = **13000 UI**, others default
 
-Rule: bundled recon = keep `--profile test-recon`, don't set `RECON_HOST`.
-Real recon = set `RECON_HOST`, drop the profile. Never both.
+(Values typed in front of the command override `.env` for that run; put
+anything you want to keep in `.env`.)
 
-> **Never pass `RECON_HOST` through as an empty value.** The stock compose file
-> guards against it (`${RECON_HOST:-recon}` substitutes the default even for a
-> set-but-empty variable), but a hand-edited compose file, `docker run -e
+Rule: bundled recon = `RECON_HOST=recon` plus `--profile test-recon`.
+Real recon = `RECON_HOST=<its IP>`, drop the profile. Never both.
+
+> **`RECON_HOST` must not be empty.** The stock compose file stops with an
+> error if it is unset or empty. A hand-edited compose file, `docker run -e
 > RECON_HOST=`, or a direct `marshal --recon-host` with a missing value makes
 > the flag swallow the next flag as its hostname — the marshal detects this and
-> refuses to start with a clear error naming the cause. Leave the variable
-> unset to get the default. (Setting `MARSHAL_LATEST=` empty is fine — there
-> the flag and value travel together inside the variable.) There is no
-> recon-less mode: with no reachable recon the marshal keeps working but logs
-> `Failed to connect to recon` per scan and pushes a failure image.
+> refuses to start with a clear error naming the cause; `--recon-host` is
+> required whenever `--mrd-port` is used. (Setting `MARSHAL_LATEST=` empty is
+> fine — there the flag and value travel together inside the variable.) At
+> startup the marshal tries the recon address once and logs `Recon <host>:<port>
+> is reachable` or `is NOT reachable: <reason> — scans will fail until it is`.
+> There is no recon-less mode: with no reachable recon the marshal keeps
+> running, archives the scan, and sends the scanner a `RECON FAILED` image and
+> a CLOSE so the scan still finishes.
 
 ---
 
@@ -166,11 +170,14 @@ clients — and `cwru-recon` only if you used the test-recon profile.
 
 Healthy `/status` looks like:
 ```json
-{"mode":"live", "scanner_connected":false, "recon":{"configured":true,"connected":false},
+{"version":"<branch> @ <commit>", "status":"waiting for scan", "scanner_connected":false,
+ "recon":{"configured":true,"connected":false,"startup_check":"reachable"},
  "scan":{"active":false}, "disk_free_gb":41.3, ...}
 ```
 `scanner_connected` and `recon.connected` are `false` until a scan starts —
-that's normal. (`recon.connected` turns `true` on the first k-space scan.)
+that's normal. (`recon.connected` turns `true` when a scan connects.) If
+`recon.startup_check` is not `"reachable"`, it says why — fix that before
+scanning.
 `/status` is the first thing to check whenever anything seems wrong.
 
 ---
@@ -180,19 +187,20 @@ that's normal. (`recon.connected` turns `true` on the first k-space scan.)
 Open **http://localhost:3000** in a browser (your `UI_PORT` if you changed
 it) — *before* sending data, so you don't miss the stream. It shows the robot
 scene immediately; the MRI panel stays empty until the first image arrives in
-step 5. In dump mode the MRI panel stays blank the whole time — by design.
+step 5. Opened from another machine (`http://<marshal-host>:3000`) it works
+the same. Until an image arrives it shows the marshal's status in words, e.g.
+`No image yet — ✗ RECON FAILED (cannot connect to recon at …)`.
 
 ---
 
 ## Step 5 — Send data (pick ONE command)
 
-(If you started in dump mode: all of these still work, data is archived, but
-the viewer stays blank — that's the mode, not a failure.)
-
 **5a. Real scanner.** Point it at `<marshal-host>:9100` over raw MRD TCP
 (the host's IP on your network; port = your `MRD_PORT` if you changed it).
-Nothing else to run — the marshal forwards k-space to the recon and pushes the
-reconstructed images back to the scanner and to the viewer automatically.
+Nothing else to run — the marshal forwards everything the scanner sends to the
+recon and pushes the recon's images back to the scanner and to the viewer
+automatically. One scan per scanner connection; a second connection waits its
+turn and is served when the current scan ends.
 
 **5b. Moving test phantom through the recon** — the full-pipeline test
 (scanner→marshal→recon→viewer). Ctrl-C to stop:
@@ -215,15 +223,15 @@ docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:l
 > volumes/s) — the *test* recon reconstructs slices one at a time; a real
 > recon lifts this. The pipeline itself is not the limit.
 
-**5d. Moving test phantom straight to the viewer** — bypasses the recon
-entirely; use this to judge viewer smoothness at full speed:
+**5d. Moving test phantom as ready-made images** — the scanner side sends
+images instead of k-space; the marshal forwards them to the recon like
+everything else and the viewer shows what the recon sends back:
 ```bash
 docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
   python3 /scripts/fire_stream.py --address mri-marshal --port 9100 \
   --mode image --fps 15 --frames 0 --matrix 128 --slices 1
 ```
-> You'll see: smooth orbit at the full requested fps. If 5d is smooth but 5b
-> is choppy, the difference is the test recon — nothing else.
+> You'll see: the orbit, paced by what the recon returns.
 
 **5e. One-shot static push** — a single dataset through the recon, then exits
 (no motion; good for a minimal end-to-end check):
@@ -274,7 +282,7 @@ Then the `+`/`−` buttons and rotation sliders in the browser move the slice.
 
 Knobs for 5b–5d: `--fps N` (pace) · `--frames N` (how many; 0 = until Ctrl-C)
 · `--matrix N` (image size) · `--slices N` (multislice) ·
-`--mode kspace|image` (through recon | straight to viewer).
+`--mode kspace|image` (send k-space | send images; both go through the recon).
 
 ---
 
@@ -300,18 +308,16 @@ done
 
 ## Step 6 — Check the results
 
-Live mode (ports = yours if remapped):
+Ports = yours if remapped:
 ```bash
 # viewer at :3000 shows the moving phantom
-curl localhost:8080/status                      # last_image_age_s small and resetting
-ls session-data/live/from_reconstruction/       # scan_*.h5 appears after each scan ends
-```
-
-Dump mode:
-```bash
+curl localhost:8080/status                      # "status":"scanning" during a scan, "scan finished" after
 ls session-data/dump/from_scanner/              # full-stream archives incl. k-space
 ls session-data/dump/from_reconstruction/       # recon output archives
+ls session-data/marshal.log                     # the marshal's log, kept on disk
 ```
+Each scan gets one `scan_<timestamp>.h5` per side. The HDF5 file is written in
+the background just after the scan ends, so the next scan never waits for it.
 
 A client on **another machine** (no shared folder needed):
 ```bash
@@ -325,7 +331,7 @@ curl http://<marshal-host>:8080/image/latest.h5 -o latest.h5    # the actual ima
 Record an experiment, then replay it later as if a scanner were sending it —
 the stack cannot tell the difference.
 
-**Record** — run the stack in dump mode (Step 2c/2d) and scan; everything the
+**Record** — nothing to switch on: run the stack (Step 2) and scan; everything the
 scanner sends (k-space included) lands in `session-data/dump/from_scanner/scan_<ts>.h5`.
 
 **Replay at the recorded pace** (default; uses the recording's timestamps —
@@ -367,12 +373,14 @@ would be left behind holding the network. Data in `session-data/` survives —
 
 - Everything durable lands in `session-data/` (`SESSION_DATA_DIR` moves it).
   The viewer's current-frame snapshot is internal plumbing — not user data.
-- Auto-routing: k-space → recon; scanner-sent images → straight to the UI.
+- Routing: everything the scanner sends → recon; recon's replies → scanner + viewer.
 - ISMRMRD headers 340/198/40 must match scanner/marshal/recon.
-- Recon looks dead (no recon images; viewer shows only scanner-sent data)?
+- Recon looks dead (no recon images; viewer says RECON FAILED)?
   `docker logs cwru-mri-marshal | grep -i recon` — a
   `Failed to connect to recon at <host>:<port>` line means `RECON_HOST` points
-  at nothing reachable (the 2026-08-18 scanner-test failure mode). Check the
-  env you launched compose with, and that the recon machine's port is open.
+  at nothing reachable (the 2026-08-18 scanner-test failure mode). Check
+  `.env`, and that the recon machine's port is open. A slow recon is simply
+  waited for — after the scanner's CLOSE the marshal waits with no time limit
+  for the recon's CLOSE; a dead recon host is detected by TCP keepalive.
 - Full test matrix, performance checks, troubleshooting: [TESTING.md](TESTING.md).
 - Every endpoint and flag: [API_REFERENCE.md](API_REFERENCE.md).

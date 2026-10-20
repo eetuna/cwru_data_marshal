@@ -28,6 +28,10 @@ RUN git clone --depth 1 --branch v1.13.7 https://github.com/ismrmrd/ismrmrd.git 
 # Copy MRI Marshal source from build context (MRI worktree)
 COPY . /opt/mri
 
+# Which code this image runs (shown in the log and GET /status).
+ARG MARSHAL_VERSION=unknown
+ENV MARSHAL_VERSION=${MARSHAL_VERSION}
+
 # Build MRI Marshal only (clients run on HOST)
 RUN cmake -S /opt/mri -B /opt/mri/build \
     -DCMAKE_BUILD_TYPE=Release \

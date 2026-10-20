@@ -8,14 +8,14 @@ streams paced frames of a *moving* Shepp-Logan phantom over that one connection,
 reading return messages back on the same socket (exactly like a real scanner):
 
   --mode kspace : send ACQUISITION lines per frame -> marshal -> recon -> image back
-  --mode image  : send a reconstructed IMAGE per frame -> published directly (bypass recon)
+  --mode image  : send a reconstructed IMAGE per frame -> marshal -> recon (forwarded like everything else)
 
 Multislice: --slices N streams an N-slice volume per frame. In kspace mode each
 slice is sent with idx.slice + LAST_IN_SLICE flags (recon reconstructs per
 slice); in image mode one IMAGE message carries the whole 3D stack.
 
-Works in live or dump mode (dump is a marshal setting — same stream; the marshal
-archives instead of publishing). Run inside the fire-python image, e.g.:
+The marshal always archives the stream and feeds the viewer from the recon's
+replies (there is no separate dump mode). Run inside the fire-python image, e.g.:
 
   docker run --rm --network cwru-demo-net -v "$PWD/scripts:/scripts" fire-python:latest \
     python3 /scripts/fire_stream.py --address mri-marshal --port 9100 \

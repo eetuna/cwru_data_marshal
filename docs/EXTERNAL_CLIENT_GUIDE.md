@@ -32,7 +32,7 @@ docker images | grep -E "cwru|fire-python"
 
 # 2. Start the stack (point at your production recon)
 mkdir -p session-data
-RECON_HOST=<recon-ip> RECON_PORT=<port> docker compose up -d   # live mode (default)
+RECON_HOST=<recon-ip> RECON_PORT=<port> docker compose up -d   # RECON_HOST is required
 docker compose ps                                              # wait until healthy
 
 # 3. Verify
@@ -40,27 +40,30 @@ curl http://localhost:8080/health           # MRI Marshal  -> {"status":"ok"}
 curl http://localhost:8081/                  # Robot Marshal (HTML)
 ```
 
-**Recon target.** The marshal forwards k-space to the recon service at
-`RECON_HOST:RECON_PORT` (default `recon:9002`). Point it at a production recon
-with `RECON_HOST=<ip> RECON_PORT=<port>`. To run the bundled test recon instead,
-enable the `test-recon` profile (the `recon` service is off by default):
+**Recon target.** The marshal forwards everything the scanner sends to the recon
+service at `RECON_HOST:RECON_PORT`. `RECON_HOST` has no default — without it
+`docker compose` stops with `RECON_HOST is not set - copy .env.example to .env and
+set it`. Point it at a production recon with `RECON_HOST=<ip> RECON_PORT=<port>`
+(best kept in `.env`; template `.env.example` in the repo root). To run the bundled
+test recon instead, set `RECON_HOST=recon` and enable the `test-recon` profile (the
+`recon` service is off by default):
 
 ```bash
-docker compose --profile test-recon up -d
+docker compose --profile test-recon up -d     # with RECON_HOST=recon in .env
 ```
 
-Prefix either start command with `MARSHAL_DUMP=--dump` for dump/archival mode.
+There is one mode: every scan is always archived and the live viewer snapshot is
+always on.
 
 **Configuration knobs:**
 
-- `MARSHAL_DUMP` — unset = live mode (mid-scan `/image/latest` snapshot pipeline
-  active); `--dump` = archival-only mode (canonical ISMRMRD H5 written at scan
-  close, no live snapshot). The two modes are mutually exclusive.
-- `RECON_HOST` / `RECON_PORT` — recon target (default `recon:9002`). Set to the
-  real recon's IP in production; leave unset to get the default. Never pass an
-  *empty* `RECON_HOST` through to the marshal command line (possible with a
-  hand-edited compose file or `docker run -e RECON_HOST=`) — the marshal
-  detects the resulting misparse and refuses to start.
+- `RECON_HOST` / `RECON_PORT` — recon target (`RECON_HOST` required, no default;
+  `RECON_PORT` 9002). Set to the real recon's IP in production, or `recon` for the
+  bundled test recon. Never pass an *empty* `RECON_HOST` through to the marshal
+  command line (possible with a hand-edited compose file or `docker run -e
+  RECON_HOST=`) — the marshal detects the resulting misparse and refuses to start.
+  At startup the marshal logs whether the recon is reachable.
+- `SLICE_AGENT_HOST` / `SLICE_AGENT_PORT` — scanner-side slice agent (empty = off).
 - `MARSHAL_LATEST` — RAM snapshot toggle. Default on (`--latest-dir /latest`,
   host `/dev/shm/cwru-latest`); set empty (`MARSHAL_LATEST=`) to put the
   snapshot back on disk under `session-data/live/`.
@@ -82,7 +85,8 @@ Prefix either start command with `MARSHAL_DUMP=--dump` for dump/archival mode.
 | WebGL client (viewer) | `webgl-client` | 3000 / 3001 | browser UI (`http://localhost:3000`) |
 
 The **viewer is the webgl-client** at `http://localhost:3000` — open it in a
-browser on the host.
+browser on the host, or at `http://<host-ip>:3000` from another machine (it uses
+the address the page was opened from).
 
 Ports bind to `0.0.0.0`, so remote clients on the same LAN can connect using the
 host IP:
@@ -118,12 +122,15 @@ Scanner and recon data do **not** use HTTP. They use **raw MRD over TCP** with
 (or `<host-ip>:9100`). A session sends:
 
 ```
-CONFIG_FILE + METADATA_XML + ACQUISITION x N (+ WAVEFORM) + CLOSE
+CONFIG_FILE + METADATA_XML + ACQUISITION x N (+ IMAGE, WAVEFORM) + CLOSE
 ```
 
-The marshal forwards k-space to the recon service and pushes reconstructed
-`IMAGE` messages back on the same socket. (Scanner-sent images bypass recon and
-go straight to the viewer.) See [ARCHITECTURE.md](ARCHITECTURE.md) for message
+One scan per connection. The marshal forwards every message to the recon service
+verbatim and in order (scanner-sent images included) and relays everything the
+recon sends back (images, text, waveforms, CLOSE) on the same socket. After your
+CLOSE it waits, with no time limit, for the recon's CLOSE, relays it and closes the
+connection. A second connection waits its turn. If the recon can't be reached, you
+get a `RECON FAILED` image and a CLOSE. See [ARCHITECTURE.md](ARCHITECTURE.md) for message
 IDs, framing, and body formats.
 
 If you don't have a real scanner, drive the stack with `python-ismrmrd-server`'s
@@ -146,28 +153,30 @@ Any client that speaks the python-ismrmrd-server TCP protocol works here.
 
 ## Task 2 — Read the latest reconstructed image
 
-In **live mode**, poll `GET /image/latest`. It returns a pointer to a stable,
-closed HDF5 snapshot that the marshal atomically renames on each new image:
+Poll `GET /image/latest`. It always returns `200` with a pointer to a stable,
+closed HDF5 snapshot that the marshal atomically renames on each change, plus
+the marshal's status:
 
 ```json
 { "path": "/latest/live/from_reconstruction/latest_image.h5",
-  "error": false, "generation": 42 }
+  "images": 5, "generation": 42, "status": "scanning", "status_detail": "" }
 ```
 
-- `path` — closed HDF5 file; image data lives under group `image_0`. With the
+- `path` — closed HDF5 file, or `null` until the current scan has an image. It
+  holds the newest recon image for each slice position (a new scan clears it);
+  image data lives under group `image_0` (`image_1`, ... for other image sizes). With the
   default stack the snapshot lives on the RAM-backed `/latest` volume (host
   `/dev/shm/cwru-latest`); with `MARSHAL_LATEST=` (disk mode) it is under
   `session-data/live/...` instead.
-- `generation` — increments per published image; poll cheaply by comparing it.
-- `error` — `true` if reconstruction is currently failing (`path` then points to
-  a `latest_error.png`).
-- **`204 No Content`** — no live image published yet this scan.
-- **`404 Not Found`** — dump mode: archival-only. Read the per-scan
-  `dump/from_reconstruction/scan_*.h5` after the scan ends.
+- `generation` — bumps on every change (new scan, new image); poll cheaply by comparing it.
+- `status` — `"waiting for scan"`, `"scanning"`, `"waiting for recon to finish"`,
+  `"scan finished"` or `"recon failed"` (`status_detail` says why).
+- Per-scan archives: `dump/from_reconstruction/scan_*.h5`, readable after the scan ends.
 
 **Reader on another machine (or no shared volume)?** Skip the path entirely and
 fetch the bytes over HTTP — `GET /image/latest.h5` returns the snapshot file
-itself (supports `ETag`/`If-None-Match` keyed on `generation`):
+itself, or `204` when there is no image yet (supports `ETag`/`If-None-Match`
+keyed on `generation`):
 
 ```python
 r = requests.get(f"{MRI}/image/latest.h5")
@@ -180,15 +189,14 @@ import time, requests, h5py
 MRI = "http://localhost:8080"
 while True:
     r = requests.get(f"{MRI}/image/latest")
-    if r.status_code == 200:
-        info = r.json()
-        if not info["error"]:
-            # Open with locking disabled; the file is closed & atomically renamed.
-            with h5py.File(info["path"], "r") as f:
-                img = f["image_0"]["data"][:]   # ISMRMRD image group
-                print("image", img.shape)
-    elif r.status_code == 204:
-        pass  # nothing yet
+    info = r.json()                     # always 200
+    if info["path"] is not None:
+        # Open with locking disabled; the file is closed & atomically renamed.
+        with h5py.File(info["path"], "r") as f:
+            img = f["image_0"]["data"][:]   # ISMRMRD image group
+            print("image", img.shape)
+    else:
+        print(info["status"], info["status_detail"])  # nothing yet
     time.sleep(0.05)
 ```
 
@@ -263,9 +271,9 @@ ISMRMRD / h5py / HDFView settings.
 
 - Set `HDF5_USE_FILE_LOCKING=FALSE` in the reader's environment.
 - `latest_image.h5` is always a closed file (atomic rename), so a plain open is
-  safe. The per-scan `scan_<ts>.h5` archive is finalized at scan close — open it
-  after the scan, not mid-scan.
-- Image contents are under group `image_0`.
+  safe. The per-scan `scan_<ts>.h5` archive is written in the background just
+  after the scan ends — open it after the scan, not mid-scan.
+- Image contents are under group `image_0` (`image_1`, ... for other image sizes).
 
 ---
 
@@ -280,8 +288,8 @@ httplib::Client mri("localhost", 8080);
 auto r = mri.Get("/image/latest");
 if (r && r->status == 200) {
     auto info = nlohmann::json::parse(r->body);
-    // info["path"], info["error"] -> open the HDF5 with an ISMRMRD/HDF5 lib
-} // r->status == 204: none yet; 404: dump mode
+    // info["path"] (null = none yet), info["status"] -> open the HDF5 with an ISMRMRD/HDF5 lib
+}
 ```
 
 For the scanner side in C++, speak the MRD TCP protocol on port 9100
@@ -305,9 +313,10 @@ docker compose ps
 docker logs cwru-mri-marshal
 docker logs cwru-robot-marshal
 
-# Recon "does nothing" (no recon images, viewer shows only scanner data)?
-# A per-scan "Failed to connect to recon at <host>:<port>" line means
-# RECON_HOST points at nothing reachable.
+# Recon "does nothing" (no recon images, viewer says RECON FAILED)?
+# A startup "is NOT reachable" or per-scan "Failed to connect to recon at
+# <host>:<port>" line means RECON_HOST points at nothing reachable.
+# (Also kept on disk: session-data/marshal.log.)
 docker logs cwru-mri-marshal | grep -i recon
 
 # Rebuilt the images but new features are missing? The build script prints
