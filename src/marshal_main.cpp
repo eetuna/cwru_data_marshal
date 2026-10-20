@@ -6,6 +6,7 @@
  * Flags: --http host:port, --ws-port N, --mrd-port N,
  *        --recon-host HOST (required with --mrd-port), --recon-port N,
  *        --dump-dir PATH, --latest-dir PATH, --recon-connect-timeout-ms N,
+ *        --dump (archive only, viewer off),
  *        --slice-agent-host HOST (enables the slice command channel),
  *        --slice-agent-port N, --slice-resend-ms N
  */
@@ -174,6 +175,7 @@ int main(int argc, char** argv)
     std::string http_bind = "0.0.0.0:8080";
     std::string dump_dir  = "./data";
     std::string latest_dir;      // empty = snapshots live under dump_dir
+    bool dump_mode = false;      // --dump: archive only, viewer off
     std::string recon_host;
     uint16_t recon_port = 9002;
     uint16_t ws_port = 0;
@@ -219,6 +221,8 @@ int main(int argc, char** argv)
             dump_dir = argv[++i];
         else if (a == "--latest-dir" && i + 1 < argc)
             latest_dir = argv[++i];
+        else if (a == "--dump")
+            dump_mode = true;
         else if (a == "--max-body-size" && i + 1 < argc) {
             if (!checked_parse_size(argv[++i], max_body_size)) {
                 LOG_ERROR("--max-body-size: invalid value '" << argv[i] << "'");
@@ -288,6 +292,7 @@ int main(int argc, char** argv)
     state.ws_port = ws_port;
     state.dump_dir = dump_dir;
     state.latest_dir = latest_dir;
+    state.dump_mode = dump_mode;
     // Everything from the scanner and from recon is archived, always.
     state.dump_recorder = std::make_unique<mrd::DumpRecorder>(state.dump_dir);
     mrd::dump_scanner_dir(state.dump_dir);
@@ -359,6 +364,7 @@ int main(int argc, char** argv)
         std::ostringstream cfg;
         cfg << "marshal " << state.version << " listening http=" << http_bind
             << " dump-dir=" << dump_dir
+            << " dump=" << (dump_mode ? "on (viewer off)" : "off")
             << " max_body=" << max_body_size;
         if (!latest_dir.empty()) cfg << " latest-dir=" << latest_dir;
         if (!recon_host.empty()) cfg << " recon=" << recon_host << ":" << recon_port

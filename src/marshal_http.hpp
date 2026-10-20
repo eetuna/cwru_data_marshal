@@ -87,7 +87,7 @@ inline void handle_recon_image(MarshalState& state, const void* data, size_t siz
     mrd::update_slice_geometry(state, bytes, size);
     state.perf_recon_images_received.fetch_add(1, std::memory_order_relaxed);
     state.dump_recorder->append_recon_image(std::vector<uint8_t>(bytes, bytes + size));
-    state.snapshot->add_image(bytes, size);
+    if (!state.dump_mode) state.snapshot->add_image(bytes, size);
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +108,7 @@ static auto handle_get_image_latest(const http::request<Body>& req, MarshalState
     // Bumps on every change the snapshot reflects (new scan, new image);
     // pollers re-read only when it changes.
     j["generation"] = v.generation;
-    j["status"] = status;
+    j["status"] = state.dump_mode ? status + " (dump mode, viewer off)" : status;
     j["status_detail"] = detail;    return json_response(req, http::status::ok, j);
 }
 
@@ -663,6 +663,7 @@ static auto handle_get_status(const http::request<Body>& req, MarshalState& stat
     nlohmann::json j;
     const auto [status, detail] = state.get_status();
     j["version"] = state.version;
+    j["dump_mode"] = state.dump_mode;
     j["status"] = status;
     j["status_detail"] = detail;
     auto now = std::chrono::steady_clock::now();

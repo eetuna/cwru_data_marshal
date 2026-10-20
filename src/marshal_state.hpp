@@ -90,6 +90,8 @@ struct MarshalState {
 
     // The viewer's copy of the current scan's images (GET /image/latest).
     std::unique_ptr<mrd::LatestSnapshot> snapshot;
+    // --dump: archive only, viewer off (no images go to the snapshot).
+    bool dump_mode{false};
 
     // What the marshal is doing, in words, for /status and the viewer:
     // "waiting for scan", "scanning", "waiting for recon to finish",

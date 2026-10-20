@@ -138,6 +138,24 @@ TEST_CASE("Recon image reaches the viewer snapshot and the status", "[http][late
     CHECK(j["status_detail"] == "cannot connect");
 }
 
+TEST_CASE("Dump mode: images archived, viewer off and says so", "[http][latest][dump]") {
+    MarshalState state; init_state(state);
+    state.dump_mode = true;
+    state.snapshot->begin_scan(TEST_XML);
+    state.set_status("scanning");
+
+    auto img = make_wire_image(1, 0, 3.0f);
+    handle_recon_image(state, img.data(), img.size());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    http::request<http::string_body> req{http::verb::get, "/image/latest", 11};
+    auto j = json::parse(dispatch(req, state).body());
+    CHECK(j["path"].is_null());
+    CHECK(j["images"] == 0);
+    CHECK(j["status"] == "scanning (dump mode, viewer off)");
+    CHECK(state.perf_recon_images_received.load() == 1);
+}
+
 TEST_CASE("Snapshot keeps the newest image per slice position", "[http][latest][multislice]") {
     MarshalState state; init_state(state);
     state.snapshot->begin_scan(TEST_XML);
