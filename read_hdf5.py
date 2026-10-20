@@ -22,6 +22,7 @@ Usage:
 import sys, os, json
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 import h5py
+import numpy as np
 
 
 ORTHO_TOL = 1e-3
@@ -144,13 +145,26 @@ def _extract_geometry_from_header_row(row, nx, ny):
     return out
 
 
+def _pixels(arr):
+    """Pixel array -> finite float array. ISMRMRD complex pixels are stored as
+    a {real, imag} compound (shown as magnitude); NaN/Inf become 0 (JSON has
+    no NaN, and one bad pixel must not fail the whole read)."""
+    arr = np.asarray(arr)
+    names = arr.dtype.names or ()
+    if "real" in names and "imag" in names:
+        arr = np.hypot(arr["real"].astype(np.float64), arr["imag"].astype(np.float64))
+    elif np.iscomplexobj(arr):
+        arr = np.abs(arr)
+    return np.nan_to_num(arr.astype(np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def _build_slice_record(values_2d, nx, ny, header_row, source_index, display_index):
     rec = {
         "slice_index": int(display_index),
         "source_index": int(source_index),
         "width": int(nx),
         "height": int(ny),
-        "values": values_2d.flatten().tolist(),
+        "values": _pixels(values_2d).flatten().tolist(),
     }
     rec.update(_extract_geometry_from_header_row(header_row, nx, ny))
 
@@ -163,11 +177,11 @@ def _build_slice_record(values_2d, nx, ny, header_row, source_index, display_ind
     return rec
 
 
-def find_image_dataset(f):
-    """Return the image-data dataset, canonical ISMRMRD or legacy layout."""
-    # Legacy layout: single /images/data
+def find_image_datasets(f):
+    """All image-data datasets, canonical ISMRMRD (one <group>/image_<n> per
+    image size) or the legacy single /images/data layout."""
     if "images" in f and isinstance(f["images"], h5py.Group) and "data" in f["images"]:
-        return f["images"]["data"]
+        return [f["images"]["data"]]
     # Canonical ISMRMRD: <group>/image_<n>/data
     found = []
 
@@ -181,13 +195,21 @@ def find_image_dataset(f):
     if not found:
         raise KeyError("no image data dataset found "
                        "(looked for /images/data and <group>/image_*/data)")
-    # Pick the latest appended image (image_0, image_1, ...)
     found.sort(key=lambda n: (len(n), n))
-    return f[found[-1]]
+    return [f[n] for n in found]
+
+
+def find_image_dataset(f):
+    """The last image-data dataset (kept for callers that want just one)."""
+    return find_image_datasets(f)[-1]
 
 
 def read_frame(fpath, frame_index, mode):
-    """Read one frame from the file; returns a JSON-serializable dict."""
+    """Read one frame from the file; returns a JSON-serializable dict.
+
+    The marshal writes one image variable per image size; in 2D mode the
+    slices of every variable are shown together, in 3D mode the largest
+    variable (one size) is the volume."""
     if not os.path.exists(fpath):
         return {"error": f"File not found: {fpath}"}
 
@@ -198,138 +220,168 @@ def read_frame(fpath, frame_index, mode):
     except Exception:
         f = h5py.File(fpath, "r")
     try:
-        dset = find_image_dataset(f)
-        try:
-            dset.refresh()
-        except Exception:
-            pass
-
-        shape = dset.shape
-        if len(shape) == 5:            # [n_images, channels, z, y, x]
-            data = dset
-            n_frames, n_ch, nz, ny, nx = shape
-        elif len(shape) == 4:          # [channels, z, y, x] single image
-            data = dset[()].reshape((1,) + shape)
-            n_frames, n_ch, nz, ny, nx = data.shape
-        else:
-            return {"error": f"unexpected image dataset shape {shape}"}
-
-        # frame_index <= 0 means "newest". The marshal appends images to the
-        # snapshot during a scan, so entry [0] is the OLDEST frame; the live
-        # viewer must read the newest or it freezes on the scan's first frame.
-        fi = (n_frames - 1) if frame_index <= 0 else min(frame_index, n_frames - 1)
-
-        # Canonical ISMRMRD stores a 2D multislice volume as N appended images
-        # ([N, ch, 1, y, x]) whose per-entry headers carry the slice index; a
-        # true 3D image is one entry with z > 1. Read the sibling header
-        # dataset and order entries by their slice field (the standard,
-        # recon-agnostic way to reassemble the volume).
-        slice_order = None
-        hdr_rows = None
-        if nz == 1 and n_frames > 1:
-            try:
-                hdr_rows = dset.parent["header"][()]
-                slices = [int(h["slice"]) for h in hdr_rows]
-                # order entries by slice index (stable for repeats)
-                slice_order = sorted(range(n_frames), key=lambda i: slices[i])
-            except Exception:
-                slice_order = list(range(n_frames))   # headers unreadable: file order
-                hdr_rows = None
-        elif "header" in dset.parent:
-            try:
-                hdr_rows = dset.parent["header"][()]
-            except Exception:
-                hdr_rows = None
-
-        if mode == "2d":
+        dsets = find_image_datasets(f)
+        if mode == "2d" and len(dsets) > 1:
+            parts = [_read_dataset(d, frame_index, mode) for d in dsets]
+            parts = [p for p in parts if "error" not in p]
+            if not parts:
+                return {"error": "no readable image data"}
             slices = []
-            selected_idx = 0
-
-            if slice_order is not None and hdr_rows is not None:
-                for disp_idx, src_idx in enumerate(slice_order):
-                    if src_idx >= len(hdr_rows):
-                        continue
-                    values_2d = data[src_idx, 0, 0, :, :]
-                    slices.append(_build_slice_record(values_2d, nx, ny, hdr_rows[src_idx], src_idx, disp_idx))
-                selected_idx = len(slices) // 2 if slices else 0
-            else:
-                # Fallback path: preserve previous behavior by selecting a single
-                # displayed slice when full per-slice header mapping is unavailable.
-                header_idx = fi
-                values_2d = data[fi, 0, nz // 2, :, :]
-                if hdr_rows is not None and len(hdr_rows) > header_idx:
-                    slices.append(_build_slice_record(values_2d, nx, ny, hdr_rows[header_idx], header_idx, 0))
-                else:
-                    slices.append({
-                        "slice_index": 0,
-                        "source_index": int(fi),
-                        "width": int(nx),
-                        "height": int(ny),
-                        "values": values_2d.flatten().tolist(),
-                        "geometry_valid": False,
-                        "geometry_error": "header_unavailable",
-                    })
-
-            selected = slices[selected_idx] if slices else {
-                "width": int(nx),
-                "height": int(ny),
-                "values": [],
-                "geometry_valid": False,
-                "geometry_error": "no_slice_records",
-            }
-
-            # Backward-compatible fields + new per-slice payload.
-            result = {
-                "width": int(selected.get("width", nx)),
-                "height": int(selected.get("height", ny)),
-                "values": selected.get("values", []),
-                "slice_count": int(len(slices)),
-                "selected_slice_index": int(selected_idx),
-                "slices": slices,
-            }
-            for key in (
-                "position", "orientation", "pixelSize",
-                "read_dir", "phase_dir", "slice_dir",
-                "geometry_valid", "geometry_error", "slice"
-            ):
-                if key in selected:
-                    result[key] = selected[key]
+            for p in parts:
+                for rec in p.get("slices", []):
+                    rec = dict(rec)
+                    rec["slice_index"] = len(slices)
+                    slices.append(rec)
+            sel = len(slices) // 2 if slices else 0
+            result = dict(parts[0])
+            result["slices"] = slices
+            result["slice_count"] = len(slices)
+            result["selected_slice_index"] = sel
+            if slices:
+                for key in ("width", "height", "values", "position", "orientation",
+                            "pixelSize", "read_dir", "phase_dir", "slice_dir",
+                            "geometry_valid", "geometry_error", "slice"):
+                    if key in slices[sel]:
+                        result[key] = slices[sel][key]
             return result
-        elif mode == "3d":
-            if slice_order is not None:
-                values = []
-                slice_geometries = []
-                for i in slice_order:
-                    values.extend(data[i, 0, 0, :, :].flatten().tolist())
-                    if hdr_rows is not None and i < len(hdr_rows):
-                        entry = {"source_index": int(i)}
-                        entry.update(_extract_geometry_from_header_row(hdr_rows[i], nx, ny))
-                        names = getattr(getattr(hdr_rows[i], "dtype", None), "names", None) or ()
-                        if "slice" in names:
-                            try:
-                                entry["slice"] = int(hdr_rows[i]["slice"])
-                            except Exception:
-                                pass
-                        slice_geometries.append(entry)
-                depth = len(slice_order)
-            else:
-                values = data[fi, 0, :, :, :].flatten().tolist()
-                depth = nz
-                slice_geometries = []
-            result = {
-                "width": int(nx),
-                "height": int(ny),
-                "depth": int(depth),
-                "values": values,
-                "slice_geometries": slice_geometries,
-            }
-            if hdr_rows is not None and len(hdr_rows) > fi:
-                result.update(_extract_geometry_from_header_row(hdr_rows[fi], nx, ny))
-            return result
-        else:
-            return {"error": f"Unknown mode: {mode}"}
+        if mode == "3d" and len(dsets) > 1:
+            dsets = [max(dsets, key=lambda d: d.shape[0])]
+        return _read_dataset(dsets[-1], frame_index, mode)
     finally:
         f.close()
+
+
+def _read_dataset(dset, frame_index, mode):
+    """Read one image-data dataset (one image size)."""
+    try:
+        dset.refresh()
+    except Exception:
+        pass
+
+    shape = dset.shape
+    if len(shape) == 5:            # [n_images, channels, z, y, x]
+        data = dset
+        n_frames, n_ch, nz, ny, nx = shape
+    elif len(shape) == 4:          # [channels, z, y, x] single image
+        data = dset[()].reshape((1,) + shape)
+        n_frames, n_ch, nz, ny, nx = data.shape
+    else:
+        return {"error": f"unexpected image dataset shape {shape}"}
+
+    # frame_index <= 0 means "newest". The marshal appends images to the
+    # snapshot during a scan, so entry [0] is the OLDEST frame; the live
+    # viewer must read the newest or it freezes on the scan's first frame.
+    fi = (n_frames - 1) if frame_index <= 0 else min(frame_index, n_frames - 1)
+
+    # Canonical ISMRMRD stores a 2D multislice volume as N appended images
+    # ([N, ch, 1, y, x]) whose per-entry headers carry the slice index; a
+    # true 3D image is one entry with z > 1. Read the sibling header
+    # dataset and order entries by their slice field (the standard,
+    # recon-agnostic way to reassemble the volume).
+    slice_order = None
+    hdr_rows = None
+    if nz == 1 and n_frames > 1:
+        try:
+            hdr_rows = dset.parent["header"][()]
+            slices = [int(h["slice"]) for h in hdr_rows]
+            # order entries by slice index (stable for repeats)
+            slice_order = sorted(range(n_frames), key=lambda i: slices[i])
+        except Exception:
+            slice_order = list(range(n_frames))   # headers unreadable: file order
+            hdr_rows = None
+    elif "header" in dset.parent:
+        try:
+            hdr_rows = dset.parent["header"][()]
+        except Exception:
+            hdr_rows = None
+
+    if mode == "2d":
+        slices = []
+        selected_idx = 0
+
+        if slice_order is not None and hdr_rows is not None:
+            for disp_idx, src_idx in enumerate(slice_order):
+                if src_idx >= len(hdr_rows):
+                    continue
+                values_2d = data[src_idx, 0, 0, :, :]
+                slices.append(_build_slice_record(values_2d, nx, ny, hdr_rows[src_idx], src_idx, disp_idx))
+            selected_idx = len(slices) // 2 if slices else 0
+        else:
+            # Fallback path: preserve previous behavior by selecting a single
+            # displayed slice when full per-slice header mapping is unavailable.
+            header_idx = fi
+            values_2d = data[fi, 0, nz // 2, :, :]
+            if hdr_rows is not None and len(hdr_rows) > header_idx:
+                slices.append(_build_slice_record(values_2d, nx, ny, hdr_rows[header_idx], header_idx, 0))
+            else:
+                slices.append({
+                    "slice_index": 0,
+                    "source_index": int(fi),
+                    "width": int(nx),
+                    "height": int(ny),
+                    "values": _pixels(values_2d).flatten().tolist(),
+                    "geometry_valid": False,
+                    "geometry_error": "header_unavailable",
+                })
+
+        selected = slices[selected_idx] if slices else {
+            "width": int(nx),
+            "height": int(ny),
+            "values": [],
+            "geometry_valid": False,
+            "geometry_error": "no_slice_records",
+        }
+
+        # Backward-compatible fields + new per-slice payload.
+        result = {
+            "width": int(selected.get("width", nx)),
+            "height": int(selected.get("height", ny)),
+            "values": selected.get("values", []),
+            "slice_count": int(len(slices)),
+            "selected_slice_index": int(selected_idx),
+            "slices": slices,
+        }
+        for key in (
+            "position", "orientation", "pixelSize",
+            "read_dir", "phase_dir", "slice_dir",
+            "geometry_valid", "geometry_error", "slice"
+        ):
+            if key in selected:
+                result[key] = selected[key]
+        return result
+    elif mode == "3d":
+        if slice_order is not None:
+            values = []
+            slice_geometries = []
+            for i in slice_order:
+                values.extend(_pixels(data[i, 0, 0, :, :]).flatten().tolist())
+                if hdr_rows is not None and i < len(hdr_rows):
+                    entry = {"source_index": int(i)}
+                    entry.update(_extract_geometry_from_header_row(hdr_rows[i], nx, ny))
+                    names = getattr(getattr(hdr_rows[i], "dtype", None), "names", None) or ()
+                    if "slice" in names:
+                        try:
+                            entry["slice"] = int(hdr_rows[i]["slice"])
+                        except Exception:
+                            pass
+                    slice_geometries.append(entry)
+            depth = len(slice_order)
+        else:
+            values = _pixels(data[fi, 0, :, :, :]).flatten().tolist()
+            depth = nz
+            slice_geometries = []
+        result = {
+            "width": int(nx),
+            "height": int(ny),
+            "depth": int(depth),
+            "values": values,
+            "slice_geometries": slice_geometries,
+        }
+        if hdr_rows is not None and len(hdr_rows) > fi:
+            result.update(_extract_geometry_from_header_row(hdr_rows[fi], nx, ny))
+        return result
+    else:
+        return {"error": f"Unknown mode: {mode}"}
 
 
 def serve():

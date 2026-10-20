@@ -37,10 +37,9 @@ async function appendHdf5ReadMetric(entry) {
 // HDF5 reader using Python h5py (mirrors viz_client_main.cpp logic)
 //
 // viz_client flow:
-//   1. GET /image/latest  -> { path, error }  (marshal v2 API; live mode only.
-//      Returns 204 No Content when no image yet, 404 in dump mode. The old
-//      /v1/mrd/latest route with frame_index/dims was removed in the v2 rewrite,
-//      so frame_index defaults to 0 for the single-frame latest companion.)
+//   1. GET /image/latest  -> { path, generation, status, status_detail }
+//      `path` is null until the current scan has an image; `status` says what
+//      the marshal is doing ("scanning", "recon failed", ...).
 //   2. Open HDF5 file at path in SWMR read mode
 //   3. Read /images/data dataset  shape [frames, channels, z, y, x] float32
 //   4. Extract middle slice (2D) or full volume (3D) for the given frame
@@ -52,19 +51,18 @@ async function appendHdf5ReadMetric(entry) {
  * Fetch latest frame metadata from MRI Marshal.
  */
 async function fetchMriLatest() {
-  const response = await axios.get(`${MRI_MARSHAL_SERVER}/image/latest`, {
-    timeout: 2000,
-    // Don't throw on 404 (dump mode); treat it as "no data" like an empty 204.
-    validateStatus: (s) => (s >= 200 && s < 300) || s === 404,
-  });
+  const response = await axios.get(`${MRI_MARSHAL_SERVER}/image/latest`, { timeout: 2000 });
   const data = response.data;
-  // 204 No Content (no image yet) or 404 (dump mode) -> empty/non-object body.
+  // An older marshal answers 204 (empty body) before the first image.
   if (!data || typeof data !== 'object') {
-    return { path: null, frame_index: 0, dims: {}, timestamp: Date.now() };
+    return { path: null, frame_index: 0, dims: {}, generation: null, timestamp: Date.now(),
+             status: 'waiting for scan', status_detail: '' };
   }
   const meta = data.data || data;
   return {
-    path: meta.path,
+    path: meta.path || null,
+    status: meta.status || '',
+    status_detail: meta.status_detail || '',
     // v2 /image/latest exposes a single latest image and no frame_index/dims.
     frame_index: meta.frame_index ?? 0,
     dims: meta.dims || {},
@@ -113,6 +111,19 @@ function changeToken(meta) {
 // body without spawning an h5py read. noteGeneration() clears both caches
 // on a detected marshal restart.
 const mriReadCache = { '2d': null, '3d': null };
+
+// Every MRI response carries the marshal's own words for what it is doing,
+// so the page can say "recon failed" instead of going blank.
+function withStatus(body, meta) {
+  return { ...body, marshal_status: meta.status, marshal_status_detail: meta.status_detail };
+}
+
+// No image in the current scan yet: not an error, just nothing to draw.
+function waitingBody(meta) {
+  noteGeneration(meta);
+  return { waiting: true, timestamp: changeToken(meta),
+           marshal_status: meta.status, marshal_status_detail: meta.status_detail };
+}
 
 function cachedMriBody(mode, meta) {
   noteGeneration(meta);
@@ -254,11 +265,11 @@ app.get('/api/read/:clientId/:fileKey', async (req, res) => {
         const readStartedAtMs = Date.now();
         const meta = await fetchMriLatest();
         if (!meta.path) {
-          return res.status(503).json({ error: 'No MRI data available yet' });
+          return res.json(waitingBody(meta));
         }
         const cached2d = cachedMriBody('2d', meta);
         if (cached2d) {
-          return res.json(cached2d);
+          return res.json(withStatus(cached2d, meta));
         }
         const hdf5ReadStartedAtMs = Date.now();
         const sliceData = await readHdf5Frame(meta.path, meta.frame_index, '2d');
@@ -284,7 +295,7 @@ app.get('/api/read/:clientId/:fileKey', async (req, res) => {
           total_duration_ms: readEndedAtMs - readStartedAtMs
         });
         mriReadCache['2d'] = { generation: meta.generation, path: meta.path, body: sliceData };
-        return res.json(sliceData);
+        return res.json(withStatus(sliceData, meta));
       } catch (err) {
         console.error(`[2D] MRI read error: ${err.message}`);
         return res.status(503).json({ error: 'MRI image read failed', details: err.message, fileName });
@@ -298,18 +309,18 @@ app.get('/api/read/:clientId/:fileKey', async (req, res) => {
       try {
         const meta = await fetchMriLatest();
         if (!meta.path) {
-          return res.status(503).json({ error: 'No MRI data available yet' });
+          return res.json(waitingBody(meta));
         }
         const cached3d = cachedMriBody('3d', meta);
         if (cached3d) {
-          return res.json(cached3d);
+          return res.json(withStatus(cached3d, meta));
         }
         const volumeData = await readHdf5Frame(meta.path, meta.frame_index, '3d');
         volumeData.timestamp = changeToken(meta);
         volumeData.generation = meta.generation;
         console.log(`[3D] frame ${meta.frame_index} -> ${volumeData.width}x${volumeData.height}x${volumeData.depth} from ${path.basename(meta.path)}`);
         mriReadCache['3d'] = { generation: meta.generation, path: meta.path, body: volumeData };
-        return res.json(volumeData);
+        return res.json(withStatus(volumeData, meta));
       } catch (err) {
         console.error(`[3D] MRI read error: ${err.message}`);
         return res.status(503).json({ error: 'MRI volume read failed', details: err.message, fileName });

@@ -180,8 +180,10 @@ async function main() {
     },
   } : null;
 
-  const readServerUrl = "http://localhost:3000";    // Main server (handles routing and fallbacks)
-  const writeServerUrl = "http://localhost:3001";   // Backend write server (for writing data)
+  // Same host the page was opened from, so the viewer works from any
+  // machine on the network, not only the one running Docker.
+  const readServerUrl = window.location.origin;                                          // Main server (serves this page)
+  const writeServerUrl = `${window.location.protocol}//${window.location.hostname}:3001`; // Backend write server
   const clientId = "client-webgl";
   
   let volumeSlices = null;
@@ -1059,17 +1061,31 @@ initRotationSliders();
     return sliceLocationHistory.flatMap((e) => e.slices);
   }
 
+  // The marshal's status in words, for the 2D status line.
+  function marshalStatusText(data) {
+    const s = data.marshal_status || '';
+    const d = data.marshal_status_detail ? ` (${data.marshal_status_detail})` : '';
+    if (s === 'recon failed') return `✗ RECON FAILED${d}`;
+    return s ? `marshal: ${s}${d}` : '';
+  }
+
   async function updateTextureFromServer() {
-    //postWillRender2DImageToServer(data);
     try {
-     //postWillRender2DImageToServer(data);
       const response = await fetch(`${readServerUrl}/api/read/${clientId}/0`);
-      
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      //postWillRender2DImageToServer(data);
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.details || data.error || `HTTP error! status: ${response.status}`);
+      }
       data.received_in_webgl_demo_at = Date.now();
-      //postWillRender2DImageToServer(data);
+
+      const statusText = marshalStatusText(data);
+      if (data.waiting) {
+        updateStatus('status2d', `No image yet — ${statusText || 'waiting for scan'}`);
+        return false;
+      }
+      if (data.marshal_status === 'recon failed' && !(data.timestamp && data.timestamp !== lastTimestamp)) {
+        updateStatus('status2d', `${statusText} — showing the last images received`);
+      }
       
       if (data.timestamp && data.timestamp !== lastTimestamp) {
         lastTimestamp = data.timestamp;
@@ -1129,7 +1145,7 @@ initRotationSliders();
             : 'UNIQUE_FALLBACK_DEBUG: NOT_USED (per-slice slices[] path active)');
           
           const skippedCount = payloadSlices.length - renderableSlices.length;
-          updateStatus('status2d', `✓ showing ${currentDisplayedSlices.length}/${currentSnapshotSlices.length} slices (${currentImageData.width}x${currentImageData.height})${skippedCount > 0 ? `; skipped ${skippedCount} invalid-geometry` : ''}`);
+          updateStatus('status2d', `✓ showing ${currentDisplayedSlices.length}/${currentSnapshotSlices.length} slices (${currentImageData.width}x${currentImageData.height})${skippedCount > 0 ? `; skipped ${skippedCount} invalid-geometry` : ''}${statusText ? ` — ${statusText}` : ''}`);
           return true;
         }
       }
@@ -1250,10 +1266,12 @@ initRotationSliders();
   async function updateVolumeFromServer() {
     try {
       const response = await fetch(`${readServerUrl}/api/read/${clientId}/1`);
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      
-      const data = await response.json();
-      
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.details || data.error || `HTTP error! status: ${response.status}`);
+      }
+      if (data.waiting) return false;
+
       if (data.timestamp && data.timestamp !== lastVolumeTimestamp) {
         lastVolumeTimestamp = data.timestamp;
         
@@ -2236,6 +2254,7 @@ initRotationSliders();
   updateStatus('status', 'Loading data from server...');
   await updateTextureFromServer();
   await updateVolumeFromServer();
+  updateStatus('status', `Connected to ${readServerUrl}`);
 
   // Load chest surface mesh from static file (currently disabled)
   let meshBuffers = null;
