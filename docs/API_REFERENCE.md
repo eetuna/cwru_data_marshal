@@ -243,6 +243,7 @@ List archived reconstruction HDF5 files under `dump/from_reconstruction/` (same 
 | `--http host:port` | `0.0.0.0:8080` | HTTP listen address (query/control endpoints) |
 | `--mrd-port N` | `0` (disabled) | MRD TCP listen port (scanner connections). Listener only starts when a non-zero value is passed (`docker-compose.yml` passes `9100`). |
 | `--dump-dir path` | `./data` | Session-data root. Holds the always-on archives `dump/from_scanner/` and `dump/from_reconstruction/` (one `scan_<ts>.h5` per scan per side). |
+| `--dump` | off | Archive only, viewer off: images are still archived but not put in the viewer snapshot; `/image/latest` keeps `path: null` and its `status` ends in "(dump mode, viewer off)". Compose: `MARSHAL_DUMP=--dump`. |
 | `--latest-dir path` | (unset) | Alternate root for the transient viewer snapshot (`latest_image.h5`). Unset = it lives under `--dump-dir`. The compose file points this at a shared RAM-backed dir (`/dev/shm/cwru-latest`) so snapshot I/O never touches — or stalls on — the archive disk. Archives are unaffected either way. |
 | `--recon-host host` | (none) | Recon service hostname for MRD TCP forwarding. **Required** when `--mrd-port` is used — the marshal refuses to start without it. At startup the marshal tries to connect once and logs `Recon host:port is reachable` or `is NOT reachable: <reason> — scans will fail until it is`. |
 | `--recon-port N` | `9002` | Recon service port. |
