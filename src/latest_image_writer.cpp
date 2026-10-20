@@ -1,20 +1,17 @@
 /*
  * File: src/latest_image_writer.cpp
  * Project: CWRU Data Marshal - MRI Marshal
- * Purpose: Async writer for the live latest-image H5 file.
+ * Purpose: The viewer's copy of the current scan's images (see header).
  */
 
 #include "latest_image_writer.hpp"
 
-#include <atomic>
+#include <algorithm>
 #include <chrono>
-#include <condition_variable>
+#include <cmath>
 #include <cstring>
-#include <deque>
 #include <limits>
-#include <mutex>
 #include <stdexcept>
-#include <thread>
 
 #include <ismrmrd/ismrmrd.h>
 
@@ -28,67 +25,44 @@
 namespace mrd {
 namespace {
 
-constexpr const char* kImageVarName = "image_0";
-
-struct ParsedLatestWireImage {
+struct WireImage {
     ISMRMRD::ImageHeader header{};
-    std::string attributes;
-    const uint8_t* pixel_data{nullptr};
+    const char* attr{nullptr};
+    size_t attr_len{0};
+    const uint8_t* pixels{nullptr};
     size_t pixel_bytes{0};
 };
 
-bool parse_latest_wire_image(const std::vector<uint8_t>& image,
-                             ParsedLatestWireImage& parsed)
+bool parse(const uint8_t* data, size_t size, WireImage& out)
 {
-    if (image.size() < IMAGE_HEADER_BYTES + sizeof(uint64_t)) return false;
-
-    std::memcpy(&parsed.header, image.data(), sizeof(parsed.header));
-
+    if (size < IMAGE_HEADER_BYTES + sizeof(uint64_t)) return false;
+    std::memcpy(&out.header, data, sizeof(out.header));
     uint64_t attr_len = 0;
-    std::memcpy(&attr_len, image.data() + IMAGE_HEADER_BYTES, sizeof(uint64_t));
+    std::memcpy(&attr_len, data + IMAGE_HEADER_BYTES, sizeof(uint64_t));
     const size_t attr_off = IMAGE_HEADER_BYTES + sizeof(uint64_t);
-    // MEDIUM #13: overflow-safe bound check.
-    if (image.size() < attr_off) return false;
-    if (attr_len > image.size() - attr_off) return false;
-
-    const size_t pixel_off = attr_off + static_cast<size_t>(attr_len);
-    parsed.attributes.assign(reinterpret_cast<const char*>(image.data() + attr_off),
-                             static_cast<size_t>(attr_len));
-    // LOW/NIT #20: attribute_string_len is uint32_t. Reject attributes
-    // ≥ 4 GiB rather than silently truncating. Wire_guards already caps at
-    // 16 MiB upstream; this is a defense in depth.
-    if (parsed.attributes.size() > std::numeric_limits<uint32_t>::max()) {
-        return false;
-    }
-    parsed.header.attribute_string_len = static_cast<uint32_t>(parsed.attributes.size());
-    parsed.pixel_data = image.data() + pixel_off;
-    parsed.pixel_bytes = image.size() - pixel_off;
+    if (attr_len > size - attr_off) return false;
+    if (attr_len > std::numeric_limits<uint32_t>::max()) return false;
+    out.attr = reinterpret_cast<const char*>(data + attr_off);
+    out.attr_len = static_cast<size_t>(attr_len);
+    out.pixels = data + attr_off + out.attr_len;
+    out.pixel_bytes = size - attr_off - out.attr_len;
+    out.header.attribute_string_len = static_cast<uint32_t>(out.attr_len);
     return true;
 }
 
-bool append_latest_wire_image(MrdSink& sink, const ParsedLatestWireImage& image)
+// Position along the slice normal: orders a stack of parallel slices.
+double depth(const ISMRMRD::ImageHeader& h)
 {
-    sink.append_image(kImageVarName, image.header,
-                      image.attributes.data(), image.attributes.size(),
-                      image.pixel_data, image.pixel_bytes);
-    return true;
+    return double(h.position[0]) * h.slice_dir[0]
+         + double(h.position[1]) * h.slice_dir[1]
+         + double(h.position[2]) * h.slice_dir[2];
 }
 
-void write_latest_image_h5_file_append(const std::filesystem::path& path,
-                                       const std::string& xml,
-                                       const std::vector<std::vector<uint8_t>>& images)
+using SizeKey = std::tuple<uint16_t, uint16_t, uint16_t, uint16_t, uint16_t>;
+
+SizeKey size_key(const ISMRMRD::ImageHeader& h)
 {
-    MrdSink sink(path);
-    if (!xml.empty()) sink.set_header(xml);
-    for (const auto& image : images) {
-        ParsedLatestWireImage parsed;
-        if (!parse_latest_wire_image(image, parsed)) {
-            LOG_WARN("Skipping malformed image while writing latest H5");
-            continue;
-        }
-        append_latest_wire_image(sink, parsed);
-    }
-    sink.close();
+    return {h.matrix_size[0], h.matrix_size[1], h.matrix_size[2], h.channels, h.data_type};
 }
 
 } // namespace
@@ -97,188 +71,142 @@ void write_latest_image_h5_file(const std::filesystem::path& dest,
                                 const std::string& xml,
                                 const std::vector<std::vector<uint8_t>>& images)
 {
-    if (images.empty()) return;
+    std::vector<WireImage> parsed;
+    for (const auto& img : images) {
+        WireImage w;
+        if (parse(img.data(), img.size(), w)) parsed.push_back(w);
+        else LOG_WARN("Skipping malformed image while writing latest H5");
+    }
+    if (parsed.empty()) return;
+
+    // Stable, meaningful order: by image type, then along the slice normal.
+    std::stable_sort(parsed.begin(), parsed.end(), [](const WireImage& a, const WireImage& b) {
+        if (a.header.image_type != b.header.image_type)
+            return a.header.image_type < b.header.image_type;
+        return depth(a.header) < depth(b.header);
+    });
+
+    // An ISMRMRD image variable holds images of one size; one variable per size.
+    std::map<SizeKey, std::string> var_for_size;
 
     auto tmp = dest;
     tmp += ".tmp";
-
     std::error_code ec;
     std::filesystem::create_directories(dest.parent_path(), ec);
-    ec.clear();
     std::filesystem::remove(tmp, ec);
-
-    // Always use ISMRMRD::Dataset::appendImage per image. Produces the
-    // canonical ISMRMRD HDF5 layout readable by any standard consumer
-    // (real console, python-ismrmrd-server/client.py, h5py). An earlier
-    // "bulk" path wrote a custom 5D layout that only some readers
-    // handled, which silently broke N>1 multi-slice publishes. See
-    // docs/fps-regression-2026-04-22.md.
-    write_latest_image_h5_file_append(tmp, xml, images);
-
+    {
+        MrdSink sink(tmp);
+        if (!xml.empty()) sink.set_header(xml);
+        for (const auto& w : parsed) {
+            auto [it, inserted] = var_for_size.try_emplace(
+                size_key(w.header), "image_" + std::to_string(var_for_size.size()));
+            sink.append_image(it->second, w.header, w.attr, w.attr_len, w.pixels, w.pixel_bytes);
+        }
+        sink.close();
+    }
     std::filesystem::rename(tmp, dest, ec);
-    if (ec) {
-        std::filesystem::remove(dest, ec);
-        ec.clear();
-        std::filesystem::rename(tmp, dest, ec);
-        if (ec) throw std::runtime_error("rename latest H5 failed: " + ec.message());
-    }
+    if (ec) throw std::runtime_error("rename latest H5 failed: " + ec.message());
 }
 
-struct LatestImageWriter::Job {
-    std::filesystem::path dest;
-    std::string xml;
-    std::vector<std::vector<uint8_t>> images;
-    Completion completion;
-    std::chrono::steady_clock::time_point enqueued_at{};
-};
-
-struct LatestImageWriter::Impl {
-    // MEDIUM #14: bound the queue. Latest-image publication is naturally
-    // coalescible: a newer job for the same destination supersedes any
-    // older pending job for that destination. If the cap is hit and no
-    // coalesce opportunity exists, drop the oldest and log once.
-    static constexpr size_t kMaxQueuedJobs = 64;
-
-    std::mutex mtx;
-    std::condition_variable cv;
-    std::deque<Job> jobs;
-    bool stopping{false};
-    std::atomic<bool> drop_logged{false};
-    std::atomic<uint64_t> dropped_count{0};
-    // Perf counters exposed via perf(). All free-running; computed deltas
-    // between two snapshots give rates. max_* are high-watermarks.
-    std::atomic<uint64_t> perf_enqueued{0};
-    std::atomic<uint64_t> perf_coalesced{0};
-    std::atomic<uint64_t> perf_completed{0};
-    std::atomic<uint64_t> perf_failed{0};
-    std::atomic<uint64_t> perf_max_queue_depth{0};
-    std::atomic<uint64_t> perf_last_write_us{0};
-    std::atomic<uint64_t> perf_max_write_us{0};
-    std::atomic<uint64_t> perf_last_drain_lag_us{0};
-    std::atomic<uint64_t> perf_max_drain_lag_us{0};
-    std::thread worker;
-
-    Impl()
-        : worker([this] { run(); })
-    {}
-
-    ~Impl()
-    {
-        {
-            std::lock_guard<std::mutex> lk(mtx);
-            stopping = true;
-        }
-        cv.notify_one();
-        if (worker.joinable()) worker.join();
-    }
-
-    void enqueue(Job job)
-    {
-        job.enqueued_at = std::chrono::steady_clock::now();
-        perf_enqueued.fetch_add(1, std::memory_order_relaxed);
-        {
-            std::lock_guard<std::mutex> lk(mtx);
-            // No same-dest coalescing: silently replacing a pending payload
-            // with a newer one skips published snapshots between viz polls,
-            // which violates the losslessness contract. Writer stalls (seen
-            // as multi-second max_write_us on Docker bind mounts) used to
-            // make coalesce fire on ~34% of attempts, invisibly dropping
-            // frames. Instead, queue each publish and rely on the 64-entry
-            // bound + drop-oldest as overload backstop. Under normal load
-            // the writer drains fast and depth stays near 1.
-            if (jobs.size() >= kMaxQueuedJobs) {
-                jobs.pop_front();
-                dropped_count.fetch_add(1);
-                if (!drop_logged.exchange(true)) {
-                    LOG_WARN("LatestImageWriter queue exceeded " << kMaxQueuedJobs
-                             << " jobs; dropping oldest pending");
-                }
-            }
-            jobs.push_back(std::move(job));
-            const auto depth = static_cast<uint64_t>(jobs.size());
-            uint64_t prev = perf_max_queue_depth.load(std::memory_order_relaxed);
-            while (depth > prev &&
-                   !perf_max_queue_depth.compare_exchange_weak(
-                       prev, depth, std::memory_order_relaxed)) {}
-        }
-        cv.notify_one();
-    }
-
-    void run()
-    {
-        using clk = std::chrono::steady_clock;
-        for (;;) {
-            Job job;
-            {
-                std::unique_lock<std::mutex> lk(mtx);
-                cv.wait(lk, [&] { return stopping || !jobs.empty(); });
-                if (stopping && jobs.empty()) break;
-                job = std::move(jobs.front());
-                jobs.pop_front();
-            }
-
-            auto t0 = clk::now();
-            const auto drain_lag_us = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    t0 - job.enqueued_at).count());
-            perf_last_drain_lag_us.store(drain_lag_us, std::memory_order_relaxed);
-            {
-                uint64_t prev = perf_max_drain_lag_us.load(std::memory_order_relaxed);
-                while (drain_lag_us > prev &&
-                       !perf_max_drain_lag_us.compare_exchange_weak(
-                           prev, drain_lag_us, std::memory_order_relaxed)) {}
-            }
-            try {
-                write_latest_image_h5_file(job.dest, job.xml, job.images);
-                auto t1 = clk::now();
-                if (job.completion) job.completion(job.dest);
-                const auto write_us = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
-                perf_last_write_us.store(write_us, std::memory_order_relaxed);
-                {
-                    uint64_t prev = perf_max_write_us.load(std::memory_order_relaxed);
-                    while (write_us > prev &&
-                           !perf_max_write_us.compare_exchange_weak(
-                               prev, write_us, std::memory_order_relaxed)) {}
-                }
-                perf_completed.fetch_add(1, std::memory_order_relaxed);
-            } catch (const std::exception& e) {
-                perf_failed.fetch_add(1, std::memory_order_relaxed);
-                LOG_WARN("Latest H5 write failed: " << e.what());
-            }
-        }
-    }
-};
-
-LatestImageWriter::LatestImageWriter()
-    : impl_(std::make_unique<Impl>())
-{}
-
-LatestImageWriter::~LatestImageWriter() = default;
-
-void LatestImageWriter::enqueue(std::filesystem::path dest,
-                                std::string xml,
-                                std::vector<std::vector<uint8_t>> images,
-                                Completion completion)
+LatestSnapshot::LatestSnapshot(std::filesystem::path dir)
+    : dest_(std::move(dir) / "latest_image.h5")
 {
-    impl_->enqueue(Job{std::move(dest), std::move(xml), std::move(images),
-                       std::move(completion), {}});
+    std::error_code ec;
+    std::filesystem::remove(dest_, ec);
+    worker_ = std::thread(&LatestSnapshot::run, this);
 }
 
-LatestImageWriter::PerfSnapshot LatestImageWriter::perf() const
+LatestSnapshot::~LatestSnapshot()
 {
-    PerfSnapshot s;
-    s.enqueued          = impl_->perf_enqueued.load(std::memory_order_relaxed);
-    s.coalesced         = impl_->perf_coalesced.load(std::memory_order_relaxed);
-    s.dropped_oldest    = impl_->dropped_count.load(std::memory_order_relaxed);
-    s.completed         = impl_->perf_completed.load(std::memory_order_relaxed);
-    s.failed            = impl_->perf_failed.load(std::memory_order_relaxed);
-    s.max_queue_depth   = impl_->perf_max_queue_depth.load(std::memory_order_relaxed);
-    s.last_write_us     = impl_->perf_last_write_us.load(std::memory_order_relaxed);
-    s.max_write_us      = impl_->perf_max_write_us.load(std::memory_order_relaxed);
-    s.last_drain_lag_us = impl_->perf_last_drain_lag_us.load(std::memory_order_relaxed);
-    s.max_drain_lag_us  = impl_->perf_max_drain_lag_us.load(std::memory_order_relaxed);
-    return s;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        stop_ = true;
+    }
+    cv_.notify_all();
+    if (worker_.joinable()) worker_.join();
+}
+
+void LatestSnapshot::begin_scan(std::string xml_header)
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    images_.clear();
+    xml_ = std::move(xml_header);
+    ++scan_;
+    dirty_ = false;
+    view_.path.clear();
+    view_.images = 0;
+    ++view_.generation;
+}
+
+void LatestSnapshot::add_image(const uint8_t* body, size_t size)
+{
+    WireImage w;
+    if (!parse(body, size, w)) return;
+    const auto& h = w.header;
+    Key key{{std::llround(h.position[0] * 100.0), std::llround(h.position[1] * 100.0),
+             std::llround(h.position[2] * 100.0)},
+            {int32_t(std::lround(h.slice_dir[0] * 1000.0)),
+             int32_t(std::lround(h.slice_dir[1] * 1000.0)),
+             int32_t(std::lround(h.slice_dir[2] * 1000.0))},
+            h.image_type};
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        images_[key].assign(body, body + size);
+        dirty_ = true;
+    }
+    cv_.notify_one();
+}
+
+LatestSnapshot::View LatestSnapshot::view() const
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    return view_;
+}
+
+LatestSnapshot::Perf LatestSnapshot::perf() const
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    return perf_;
+}
+
+void LatestSnapshot::run()
+{
+    std::unique_lock<std::mutex> lk(mtx_);
+    for (;;) {
+        cv_.wait(lk, [this] { return stop_ || dirty_; });
+        if (stop_) return;
+        dirty_ = false;
+        const uint64_t scan = scan_;
+        const std::string xml = xml_;
+        std::vector<std::vector<uint8_t>> images;
+        images.reserve(images_.size());
+        for (const auto& [k, v] : images_) images.push_back(v);
+        lk.unlock();
+
+        bool ok = true;
+        const auto t0 = std::chrono::steady_clock::now();
+        try {
+            write_latest_image_h5_file(dest_, xml, images);
+        } catch (const std::exception& e) {
+            ok = false;
+            LOG_WARN("Latest H5 write failed: " << e.what());
+        }
+        const auto us = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - t0).count());
+
+        lk.lock();
+        if (!ok) {
+            ++perf_.failed;
+            continue;   // the next change writes again
+        }
+        ++perf_.writes;
+        perf_.last_write_us = us;
+        perf_.max_write_us = std::max(perf_.max_write_us, us);
+        if (scan != scan_) continue;   // a new scan started while writing
+        view_.path = dest_.string();
+        view_.images = images.size();
+        ++view_.generation;
+    }
 }
 
 } // namespace mrd

@@ -41,6 +41,8 @@ static std::string unique_temp_dir() {
 
 static void init_state(MarshalState& state) {
     state.dump_dir = unique_temp_dir();
+    state.dump_recorder = std::make_unique<mrd::DumpRecorder>(state.dump_dir);
+    state.snapshot = std::make_unique<mrd::LatestSnapshot>(mrd::live_recon_dir(state.dump_dir));
 }
 
 // Helper to call handle_http_request and capture response
@@ -64,7 +66,8 @@ TEST_CASE("GET /health returns ok", "[http]") {
 static std::vector<uint8_t> make_wire_image(uint16_t series,
                                             uint16_t slice = 0,
                                             float value = 1.0f,
-                                            uint16_t nz = 1) {
+                                            uint16_t nz = 1,
+                                            float z_mm = 0.0f) {
     ISMRMRD::ImageHeader hdr{};
     hdr.version = 1;
     hdr.data_type = ISMRMRD::ISMRMRD_FLOAT;
@@ -74,6 +77,11 @@ static std::vector<uint8_t> make_wire_image(uint16_t series,
     hdr.channels = 1;
     hdr.image_series_index = series;
     hdr.slice = slice;
+    hdr.image_type = ISMRMRD::ISMRMRD_IMTYPE_MAGNITUDE;
+    hdr.position[2] = z_mm;
+    hdr.read_dir[0] = 1.0f;
+    hdr.phase_dir[1] = 1.0f;
+    hdr.slice_dir[2] = 1.0f;
 
     std::string attr = "test";
     uint64_t attr_len = attr.size();
@@ -90,209 +98,74 @@ static std::vector<uint8_t> make_wire_image(uint16_t series,
     return body;
 }
 
-static uint32_t latest_image_count(const fs::path& path) {
-    ISMRMRD::Dataset ds(path.c_str(), "/dataset", false);
-    return ds.getNumberOfImages("image_0");
+// Poll /image/latest until the snapshot reflects `images` images.
+static json wait_latest(MarshalState& state, size_t images) {
+    json j;
+    for (int i = 0; i < 400; ++i) {
+        http::request<http::string_body> req{http::verb::get, "/image/latest", 11};
+        auto res = dispatch(req, state);
+        REQUIRE(res.result() == http::status::ok);
+        j = json::parse(res.body());
+        if (!j["path"].is_null() && j["images"] == images) return j;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return j;
 }
 
-static uint16_t latest_image_series(const fs::path& path) {
-    ISMRMRD::Dataset ds(path.c_str(), "/dataset", false);
-    ISMRMRD::Image<float> image;
-    ds.readImage("image_0", 0, image);
-    return image.getHead().image_series_index;
-}
-
-static uint16_t latest_image_series_at(const fs::path& path, uint32_t index) {
-    ISMRMRD::Dataset ds(path.c_str(), "/dataset", false);
-    ISMRMRD::Image<float> image;
-    ds.readImage("image_0", index, image);
-    return image.getHead().image_series_index;
-}
-
-static uint16_t latest_image_slice(const fs::path& path) {
-    ISMRMRD::Dataset ds(path.c_str(), "/dataset", false);
-    ISMRMRD::Image<float> image;
-    ds.readImage("image_0", 0, image);
-    return image.getHead().slice;
-}
-
-static uint16_t latest_image_slice_at(const fs::path& path, uint32_t index) {
-    ISMRMRD::Dataset ds(path.c_str(), "/dataset", false);
-    ISMRMRD::Image<float> image;
-    ds.readImage("image_0", index, image);
-    return image.getHead().slice;
-}
-
-static uint16_t latest_image_matrix_z(const fs::path& path) {
-    ISMRMRD::Dataset ds(path.c_str(), "/dataset", false);
-    ISMRMRD::Image<float> image;
-    ds.readImage("image_0", 0, image);
-    return image.getHead().matrix_size[2];
-}
-
-TEST_CASE("GET /image/latest returns 204 before first image", "[http]") {
+TEST_CASE("GET /image/latest before any image: no path, status in words", "[http][latest]") {
     MarshalState state; init_state(state);
     http::request<http::string_body> req{http::verb::get, "/image/latest", 11};
     auto res = dispatch(req, state);
-    REQUIRE(res.result() == http::status::no_content);
+    REQUIRE(res.result() == http::status::ok);
+    auto j = json::parse(res.body());
+    CHECK(j["path"].is_null());
+    CHECK(j["images"] == 0);
+    CHECK(j["status"] == "waiting for scan");
 }
 
-TEST_CASE("Dump mode disables live snapshot/history filesystem side effects",
-          "[http][dump][mode]") {
+TEST_CASE("Recon image reaches the viewer snapshot and the status", "[http][latest]") {
     MarshalState state; init_state(state);
-    state.dump_enabled = true;
-    state.current_xml_header = TEST_XML;
-    state.header_received.store(true);
-    state.current_scan_filename = "scan_dumpmode_test.h5";
+    state.snapshot->begin_scan(TEST_XML);
+    state.set_status("recon failed", "cannot connect");
 
-    SECTION("GET /image/latest returns 404") {
-        http::request<http::string_body> req{http::verb::get, "/image/latest", 11};
-        auto res = dispatch(req, state);
-        REQUIRE(res.result() == http::status::not_found);
-        auto j = json::parse(res.body());
-        CHECK(j.contains("error"));
-    }
+    auto img = make_wire_image(1, 0, 3.0f);
+    handle_recon_image(state, img.data(), img.size());
 
-    SECTION("handle_recon_image does not write live latest_image.h5") {
-        const auto live_recon = mrd::live_recon_dir(state.dump_dir);
-        const auto latest = live_recon / "latest_image.h5";
-        std::error_code ec;
-        fs::remove(latest, ec);
-
-        auto wire = make_wire_image(1, 0, 1.0f);
-        handle_recon_image(state, wire.data(), wire.size());
-
-        // Give any (incorrectly enqueued) live writer a moment to flush.
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-        CHECK_FALSE(fs::exists(latest));
-        std::lock_guard<std::mutex> lk(state.latest_image_mtx);
-        CHECK(state.latest_image_path.empty());
-    }
-
-    SECTION("Live recorders not constructed in dump mode") {
-        // The constructor gating in marshal_main.cpp lives outside this test
-        // (we instantiate MarshalState directly), but the contract is that
-        // when dump_enabled is true the http/listener paths skip the live
-        // calls entirely. Confirm via state: append_live_image must early-out
-        // and not lazily create a recorder.
-        REQUIRE(state.dump_enabled);
-        CHECK(state.scanner_live.recorder == nullptr);
-        CHECK(state.recon_live.recorder == nullptr);
-
-        auto wire = make_wire_image(2, 0, 2.0f);
-        handle_recon_image(state, wire.data(), wire.size());
-
-        // handle_recon_image returns early in dump mode, so the lazy
-        // construction in append_live_image must not have happened.
-        CHECK(state.recon_live.recorder == nullptr);
-    }
+    auto j = wait_latest(state, 1);
+    REQUIRE_FALSE(j["path"].is_null());
+    CHECK(fs::exists(j["path"].get<std::string>()));
+    CHECK(j["status"] == "recon failed");
+    CHECK(j["status_detail"] == "cannot connect");
 }
 
-TEST_CASE("Latest image path follows most recently updated lane", "[http][latest]") {
+TEST_CASE("Snapshot keeps the newest image per slice position", "[http][latest][multislice]") {
     MarshalState state; init_state(state);
-    state.latest_writer.reset();
-    state.current_xml_header = TEST_XML;
-    state.header_received.store(true);  // simulate post-XML-header state
-    state.current_scan_filename = "scan_test.h5";
+    state.snapshot->begin_scan(TEST_XML);
 
-    auto recon_first = make_wire_image(3, 0, 3.0f);
-    handle_recon_image(state, recon_first.data(), recon_first.size());
-
-    {
-        std::lock_guard<std::mutex> lk(state.latest_image_mtx);
-        CHECK(state.latest_image_path == (mrd::live_recon_dir(state.dump_dir) / "latest_image.h5").string());
-        CHECK(state.latest_image_error == false);
+    // Three positions, slice numbers all 0 (a recon that does not number
+    // slices): still three slices, because position decides, not numbering.
+    for (int z = 0; z < 3; ++z) {
+        auto img = make_wire_image(100 + z, 0, 1.0f, 1, 8.0f * z);
+        handle_recon_image(state, img.data(), img.size());
     }
+    auto j = wait_latest(state, 3);
+    CHECK(j["images"] == 3);
 
-    auto scanner_first = make_wire_image(8, 0, 8.0f);
-    mrd::append_live_image(state, mrd::LiveLane::Scanner, scanner_first.data(), scanner_first.size());
-
-    {
-        std::lock_guard<std::mutex> lk(state.latest_image_mtx);
-        CHECK(state.latest_image_path == (mrd::live_scanner_dir(state.dump_dir) / "latest_image.h5").string());
-        CHECK(state.latest_image_error == false);
+    // Next pass over the same positions replaces, never accumulates.
+    for (int z = 0; z < 3; ++z) {
+        auto img = make_wire_image(200 + z, 0, 2.0f, 1, 8.0f * z);
+        handle_recon_image(state, img.data(), img.size());
     }
+    j = wait_latest(state, 3);
+    CHECK(j["images"] == 3);
 
-    mrd::flush_all_live_lanes(state);
-    CHECK(fs::exists(mrd::live_recon_dir(state.dump_dir) / "scan_test.h5"));
-    CHECK(fs::exists(mrd::live_scanner_dir(state.dump_dir) / "scan_test.h5"));
-}
-
-TEST_CASE("Latest recon multislice grows within one series", "[http][latest][multislice]") {
-    MarshalState state; init_state(state);
-    state.latest_writer.reset();
-    state.current_xml_header = TEST_XML;
-    state.header_received.store(true);  // simulate post-XML-header state
-    state.current_scan_filename = "scan_multislice.h5";
-    state.recon_expected_slices = 2;
-
-    auto first = make_wire_image(7, 0, 1.0f);
-    auto second = make_wire_image(7, 1, 2.0f);
-
-    // Incremental publish: the first image of the series is already visible.
-    handle_recon_image(state, first.data(), first.size());
-    auto latest_path = mrd::live_recon_dir(state.dump_dir) / "latest_image.h5";
-    REQUIRE(fs::exists(latest_path));
-    CHECK(latest_image_count(latest_path) == 1);
-
-    handle_recon_image(state, second.data(), second.size());
-    REQUIRE(fs::exists(latest_path));
-    CHECK(latest_image_count(latest_path) == 2);
-    CHECK(latest_image_series_at(latest_path, 0) == 7);
-    CHECK(latest_image_series_at(latest_path, 1) == 7);
-    CHECK(latest_image_slice_at(latest_path, 0) == 0);
-    CHECK(latest_image_slice_at(latest_path, 1) == 1);
-}
-
-TEST_CASE("Latest recon series rollover replaces the prior logical result", "[http][latest][series]") {
-    MarshalState state; init_state(state);
-    state.latest_writer.reset();
-    state.current_xml_header = TEST_XML;
-    state.header_received.store(true);  // simulate post-XML-header state
-    state.current_scan_filename = "scan_series_rollover.h5";
-    state.recon_expected_slices = 2;
-
-    auto first = make_wire_image(7, 0, 1.0f);
-    auto second = make_wire_image(7, 1, 2.0f);
-    auto third = make_wire_image(8, 0, 3.0f);
-
-    auto latest_path = mrd::live_recon_dir(state.dump_dir) / "latest_image.h5";
-    handle_recon_image(state, first.data(), first.size());
-    handle_recon_image(state, second.data(), second.size());
-    REQUIRE(fs::exists(latest_path));
-    CHECK(latest_image_count(latest_path) == 2);
-
-    // New series supersedes the completed volume immediately (latest-wins):
-    // the snapshot shows the new partial series, not the stale series 7.
-    handle_recon_image(state, third.data(), third.size());
-    REQUIRE(fs::exists(latest_path));
-    CHECK(latest_image_count(latest_path) == 1);
-    CHECK(latest_image_series_at(latest_path, 0) == 8);
-
-    auto fourth = make_wire_image(8, 1, 4.0f);
-    handle_recon_image(state, fourth.data(), fourth.size());
-    REQUIRE(fs::exists(latest_path));
-    CHECK(latest_image_count(latest_path) == 2);
-    CHECK(latest_image_series_at(latest_path, 0) == 8);
-    CHECK(latest_image_series_at(latest_path, 1) == 8);
-}
-
-TEST_CASE("Latest recon preserves a single true 3D image", "[http][latest][3d]") {
-    MarshalState state; init_state(state);
-    state.latest_writer.reset();
-    state.current_xml_header = TEST_XML;
-    state.header_received.store(true);  // simulate post-XML-header state
-    state.current_scan_filename = "scan_3d.h5";
-
-    auto volume = make_wire_image(9, 0, 4.0f, 5);
-    auto latest_path = mrd::live_recon_dir(state.dump_dir) / "latest_image.h5";
-
-    handle_recon_image(state, volume.data(), volume.size());
-    REQUIRE(fs::exists(latest_path));
-    CHECK(latest_image_count(latest_path) == 1);
-    CHECK(latest_image_series(latest_path) == 9);
-    CHECK(latest_image_matrix_z(latest_path) == 5);
+    // A new scan starts empty.
+    const auto gen = j["generation"].get<uint64_t>();
+    state.snapshot->begin_scan(TEST_XML);
+    http::request<http::string_body> req{http::verb::get, "/image/latest", 11};
+    auto after = json::parse(dispatch(req, state).body());
+    CHECK(after["path"].is_null());
+    CHECK(after["generation"].get<uint64_t>() > gen);
 }
 
 TEST_CASE("GET /transform returns zeros then clears", "[http]") {

@@ -3,8 +3,9 @@
  * Project: CWRU Data Marshal - MRI Marshal
  * Purpose: Main server binary — new API (v2)
  *
- * Flags: --http host:port, --ws-port N, --recon-host HOST, --recon-port N,
- *        --dump-dir PATH, --dump, --recon-close-timeout-ms N,
+ * Flags: --http host:port, --ws-port N, --mrd-port N,
+ *        --recon-host HOST (required with --mrd-port), --recon-port N,
+ *        --dump-dir PATH, --latest-dir PATH, --recon-connect-timeout-ms N,
  *        --slice-agent-host HOST (enables the slice command channel),
  *        --slice-agent-port N, --slice-resend-ms N
  */
@@ -15,6 +16,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
@@ -30,7 +32,6 @@
 #include "marshal_http.hpp"
 #include "marshal_state.hpp"
 #include "marshal_ws.hpp"
-#include "live_image_recorder.hpp"
 #include "live_image_store.hpp"
 #include "mrd_io.hpp"
 #include "mrd_tcp_listener.hpp"
@@ -45,156 +46,7 @@
 #define LOG_COMPONENT "marshal_main"
 
 namespace fs = std::filesystem;
-
-static uint32_t png_crc32(const uint8_t* data, size_t len)
-{
-    uint32_t crc = 0xFFFFFFFFu;
-    for (size_t i = 0; i < len; ++i) {
-        crc ^= data[i];
-        for (int k = 0; k < 8; ++k)
-            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
-    }
-    return crc ^ 0xFFFFFFFFu;
-}
-
-static uint32_t png_adler32(const std::vector<uint8_t>& data)
-{
-    uint32_t a = 1, b = 0;
-    for (uint8_t v : data) {
-        a = (a + v) % 65521u;
-        b = (b + a) % 65521u;
-    }
-    return (b << 16) | a;
-}
-
-static void append_be32(std::vector<uint8_t>& out, uint32_t v)
-{
-    out.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
-    out.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
-    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
-    out.push_back(static_cast<uint8_t>(v & 0xFF));
-}
-
-static void append_png_chunk(std::vector<uint8_t>& out, const char type[4],
-                             const std::vector<uint8_t>& data)
-{
-    append_be32(out, static_cast<uint32_t>(data.size()));
-    size_t crc_start = out.size();
-    out.insert(out.end(), type, type + 4);
-    out.insert(out.end(), data.begin(), data.end());
-    uint32_t crc = png_crc32(out.data() + crc_start, out.size() - crc_start);
-    append_be32(out, crc);
-}
-
-static std::vector<uint8_t> build_error_png()
-{
-    constexpr uint32_t width = 512;
-    constexpr uint32_t height = 288;
-
-    std::vector<uint8_t> raw;
-    raw.reserve((width * 3 + 1) * height);
-    for (uint32_t y = 0; y < height; ++y) {
-        raw.push_back(0); // PNG filter type: none
-        for (uint32_t x = 0; x < width; ++x) {
-            const bool border = x < 10 || y < 10 || x >= width - 10 || y >= height - 10;
-            const bool diag = (x * height > y * width ? x * height - y * width : y * width - x * height) < 2500;
-            const bool anti = ((width - 1 - x) * height > y * width
-                               ? (width - 1 - x) * height - y * width
-                               : y * width - (width - 1 - x) * height) < 2500;
-            if (border || diag || anti) {
-                raw.insert(raw.end(), {255, 255, 255});
-            } else {
-                raw.insert(raw.end(), {180, 0, 0});
-            }
-        }
-    }
-
-    std::vector<uint8_t> zlib;
-    zlib.push_back(0x78); // zlib header: deflate, no compression/fastest
-    zlib.push_back(0x01);
-    size_t off = 0;
-    while (off < raw.size()) {
-        const size_t chunk = std::min<size_t>(65535, raw.size() - off);
-        const bool final = off + chunk == raw.size();
-        zlib.push_back(final ? 0x01 : 0x00); // stored block
-        uint16_t len = static_cast<uint16_t>(chunk);
-        uint16_t nlen = static_cast<uint16_t>(~len);
-        zlib.push_back(static_cast<uint8_t>(len & 0xFF));
-        zlib.push_back(static_cast<uint8_t>((len >> 8) & 0xFF));
-        zlib.push_back(static_cast<uint8_t>(nlen & 0xFF));
-        zlib.push_back(static_cast<uint8_t>((nlen >> 8) & 0xFF));
-        zlib.insert(zlib.end(), raw.begin() + off, raw.begin() + off + chunk);
-        off += chunk;
-    }
-    append_be32(zlib, png_adler32(raw));
-
-    std::vector<uint8_t> png = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
-    std::vector<uint8_t> ihdr;
-    append_be32(ihdr, width);
-    append_be32(ihdr, height);
-    ihdr.insert(ihdr.end(), {8, 2, 0, 0, 0}); // 8-bit RGB
-    append_png_chunk(png, "IHDR", ihdr);
-    append_png_chunk(png, "IDAT", zlib);
-    append_png_chunk(png, "IEND", {});
-    return png;
-}
-
-static void write_error_png(const fs::path& dump_dir)
-{
-    auto png = build_error_png();
-    auto path = mrd::live_recon_dir(dump_dir) / "latest_error.png";
-    mrd::write_standalone_file(path, png.data(), png.size());
-}
-
-static std::vector<uint8_t> build_recon_failure_image_body()
-{
-    constexpr uint16_t nx = 128;
-    constexpr uint16_t ny = 128;
-
-    ISMRMRD::ImageHeader hdr;
-    std::memset(&hdr, 0, sizeof(hdr));
-    hdr.version = 1;
-    hdr.data_type = ISMRMRD::ISMRMRD_FLOAT;
-    hdr.matrix_size[0] = nx;
-    hdr.matrix_size[1] = ny;
-    hdr.matrix_size[2] = 1;
-    hdr.channels = 1;
-    hdr.field_of_view[0] = static_cast<float>(nx);
-    hdr.field_of_view[1] = static_cast<float>(ny);
-    hdr.field_of_view[2] = 1.0f;
-    hdr.image_type = ISMRMRD::ISMRMRD_IMTYPE_MAGNITUDE;
-    hdr.image_series_index = 9999;
-
-    const std::string attr =
-        "<ismrmrdMeta><meta><name>DataRole</name><value>ReconFailure</value></meta>"
-        "<meta><name>ErrorMessage</name><value>RECON FAILED</value></meta></ismrmrdMeta>\0";
-    const uint64_t attr_len = static_cast<uint64_t>(attr.size());
-
-    std::vector<float> pixels(static_cast<size_t>(nx) * ny, 0.05f);
-    for (uint16_t y = 0; y < ny; ++y) {
-        for (uint16_t x = 0; x < nx; ++x) {
-            const bool border = x < 4 || y < 4 || x >= nx - 4 || y >= ny - 4;
-            const bool diag = (x > y ? x - y : y - x) < 3;
-            const bool anti = (x + y > nx - 3) && (x + y < nx + 3);
-            if (border || diag || anti) {
-                pixels[static_cast<size_t>(y) * nx + x] = 1.0f;
-            }
-        }
-    }
-
-    const size_t pixel_bytes = pixels.size() * sizeof(float);
-    std::vector<uint8_t> body(mrd::IMAGE_HEADER_BYTES + sizeof(uint64_t) +
-                              attr_len + pixel_bytes);
-    size_t off = 0;
-    std::memcpy(body.data() + off, &hdr, mrd::IMAGE_HEADER_BYTES);
-    off += mrd::IMAGE_HEADER_BYTES;
-    std::memcpy(body.data() + off, &attr_len, sizeof(uint64_t));
-    off += sizeof(uint64_t);
-    std::memcpy(body.data() + off, attr.data(), attr_len);
-    off += attr_len;
-    std::memcpy(body.data() + off, pixels.data(), pixel_bytes);
-    return body;
-}
+namespace net_check = boost::asio;
 
 namespace {
 
@@ -240,6 +92,30 @@ bool parse_host_port(const std::string& input, std::string& host, uint16_t& port
     host = input.substr(0, p);
     // LOW/NIT #19: reject trailing garbage in the port field.
     return checked_parse_uint16(input.substr(p + 1), port) && port != 0;
+}
+
+// One connect attempt to the recon address: "reachable" or the reason not.
+std::string check_recon_reachable(const std::string& host, uint16_t port, uint32_t timeout_ms)
+{
+    net_check::io_context ioc;
+    net_check::ip::tcp::socket sock(ioc);
+    net_check::ip::tcp::resolver resolver(ioc);
+    boost::system::error_code result = net_check::error::would_block;
+    bool done = false;
+    resolver.async_resolve(host, std::to_string(port),
+        [&](const boost::system::error_code& ec, net_check::ip::tcp::resolver::results_type r) {
+            if (ec) { result = ec; done = true; return; }
+            net_check::async_connect(sock, r,
+                [&](const boost::system::error_code& ec2, const net_check::ip::tcp::endpoint&) {
+                    result = ec2;
+                    done = true;
+                });
+        });
+    ioc.run_for(std::chrono::milliseconds(timeout_ms));
+    if (!done) return "no answer within " + std::to_string(timeout_ms) + " ms";
+    boost::system::error_code ignore;
+    sock.close(ignore);
+    return result ? result.message() : "reachable";
 }
 
 } // namespace
@@ -298,13 +174,11 @@ int main(int argc, char** argv)
     std::string http_bind = "0.0.0.0:8080";
     std::string dump_dir  = "./data";
     std::string latest_dir;      // empty = snapshots live under dump_dir
-    bool dump_enabled = false;
     std::string recon_host;
     uint16_t recon_port = 9002;
     uint16_t ws_port = 0;
     uint16_t mrd_port = 0;
     std::size_t max_body_size = 128ULL * 1024ULL * 1024ULL;
-    uint32_t recon_close_timeout_ms = 30000;
     uint32_t recon_connect_timeout_ms = 5000;
     mrd::SliceAgentConfig slice_cfg;           // host empty = channel disabled
     MarshalState::SliceAgentSettings slice_settings;
@@ -345,17 +219,9 @@ int main(int argc, char** argv)
             dump_dir = argv[++i];
         else if (a == "--latest-dir" && i + 1 < argc)
             latest_dir = argv[++i];
-        else if (a == "--dump")
-            dump_enabled = true;
         else if (a == "--max-body-size" && i + 1 < argc) {
             if (!checked_parse_size(argv[++i], max_body_size)) {
                 LOG_ERROR("--max-body-size: invalid value '" << argv[i] << "'");
-                return 1;
-            }
-        }
-        else if (a == "--recon-close-timeout-ms" && i + 1 < argc) {
-            if (!checked_parse_uint32(argv[++i], recon_close_timeout_ms)) {
-                LOG_ERROR("--recon-close-timeout-ms: invalid value '" << argv[i] << "'");
                 return 1;
             }
         }
@@ -406,111 +272,55 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // The marshal exists to sit between the scanner and recon: without a
+    // recon target every scan would fail, so refuse to start instead of
+    // failing quietly at the first scan.
+    if (mrd_port > 0 && recon_host.empty()) {
+        LOG_ERROR("--recon-host is required (where the reconstruction server listens)");
+        return 1;
+    }
+
     // State
     MarshalState state;
+    if (const char* v = std::getenv("MARSHAL_VERSION"); v && *v) state.version = v;
     state.http_host = http_host;
     state.http_port = http_port;
     state.ws_port = ws_port;
     state.dump_dir = dump_dir;
     state.latest_dir = latest_dir;
-    state.dump_enabled = dump_enabled;
-    if (state.dump_enabled)
-        state.dump_recorder = std::make_unique<mrd::DumpRecorder>(state.dump_dir);
+    // Everything from the scanner and from recon is archived, always.
+    state.dump_recorder = std::make_unique<mrd::DumpRecorder>(state.dump_dir);
+    mrd::dump_scanner_dir(state.dump_dir);
+    mrd::dump_recon_dir(state.dump_dir);
+    state.snapshot = std::make_unique<mrd::LatestSnapshot>(
+        mrd::live_recon_dir(mrd::latest_base_dir(state)));
     state.recon_url = recon_host.empty() ? "" : recon_host + ":" + std::to_string(recon_port);
     state.max_body_bytes = max_body_size;
-    state.recon_close_timeout_ms = recon_close_timeout_ms;
-    // Live infra (latest snapshot + per-lane history recorders) is mutually
-    // exclusive with dump mode. In dump mode the operator wants a pure
-    // archive; running the live snapshot/history pipelines alongside dump
-    // wastes work and confuses throughput tests.
-    if (!state.dump_enabled) {
-        state.latest_writer = std::make_unique<mrd::LatestImageWriter>();
-        state.scanner_live.recorder = std::make_unique<mrd::LiveImageRecorder>(
-            mrd::live_scanner_dir(state.dump_dir));
-        state.recon_live.recorder = std::make_unique<mrd::LiveImageRecorder>(
-            mrd::live_recon_dir(state.dump_dir));
-    }
 
-    // Ensure file directories used by the active mode only.
-    if (state.dump_enabled) {
-        mrd::dump_scanner_dir(state.dump_dir);
-        mrd::dump_recon_dir(state.dump_dir);
-    } else {
-        mrd::live_scanner_dir(state.dump_dir);
-        mrd::live_recon_dir(state.dump_dir);
-    }
-
-    // Recon forwarder via MRD TCP (optional)
+    // Recon forwarder via MRD TCP
     std::unique_ptr<mrd::ReconForwarder> forwarder;
     if (!recon_host.empty()) {
+        // A failed recon connection is reported to the scanner by the MRD
+        // listener (RECON FAILED image + CLOSE) and to the viewer via status.
         auto on_failure = [&state]() {
-            LOG_INFO("Finalizing recon lane after recon socket ended");
-            if (state.dump_enabled) {
-                if (state.dump_recorder) {
-                    state.dump_recorder->close_lane(mrd::DumpLane::Recon);
-                }
-            } else {
-                mrd::flush_live_lane(state, mrd::LiveLane::Recon);
-            }
-            mrd::mark_lane_finalized_after_eof(state, mrd::LiveLane::Recon);
-
-            // Live mode only: write the latest_error.png snapshot under
-            // live/from_reconstruction so /image/latest can return an error
-            // marker. In dump mode there is no live snapshot path and
-            // /image/latest returns 404, so skip the live filesystem write.
-            if (!state.dump_enabled) {
-                const auto latest_root = mrd::latest_base_dir(state);
-                write_error_png(latest_root);
-                auto png_path = mrd::live_recon_dir(latest_root) / "latest_error.png";
-                std::lock_guard<std::mutex> lk(state.latest_image_mtx);
-                state.latest_image_path = png_path.string();
-                state.latest_image_error = true;
-                // The error transition is a publish too: bump so
-                // generation-gated pollers (and the latest.h5 ETag) see a
-                // change and re-read instead of sitting on the last image.
-                state.latest_image_generation.fetch_add(1);
-            }
-
-            if (state.recon_failure_reported.exchange(true) == false) {
-                auto body = build_recon_failure_image_body();
-                // MEDIUM #18: log exceptions instead of silently swallowing.
-                try {
-                    state.mrd_push_message(mrd::MRD_MESSAGE_ISMRMRD_IMAGE,
-                                           body.data(), body.size());
-                } catch (const std::exception& e) {
-                    LOG_WARN("mrd_push_message (recon failure) threw: " << e.what());
-                } catch (...) {
-                    LOG_WARN("mrd_push_message (recon failure) threw unknown exception");
-                }
-            }
+            LOG_WARN("Recon connection failed");
+            state.set_status("recon failed", "recon connection failed");
         };
 
-        // Recon return callback: archive IMAGE messages for non-scanner clients,
-        // and push every MRD return message back to the scanner.
+        // Every recon message goes back to the scanner; images are also
+        // archived and shown in the viewer, text and waveforms archived.
         auto on_message = [&state](uint16_t tag, const void* data, size_t len) {
-            // MEDIUM #18: log exceptions instead of silently swallowing.
             try { state.mrd_push_message(tag, data, len); }
             catch (const std::exception& e) {
                 LOG_WARN("mrd_push_message (tag " << tag << ") threw: " << e.what());
-            } catch (...) {
-                LOG_WARN("mrd_push_message (tag " << tag << ") threw unknown exception");
             }
-
+            const auto* p = static_cast<const uint8_t*>(data);
             if (tag == mrd::MRD_MESSAGE_ISMRMRD_IMAGE) {
                 handle_recon_image(state, data, len);
             } else if (tag == mrd::MRD_MESSAGE_ISMRMRD_WAVEFORM) {
-                handle_recon_waveform(state, data, len);
-            } else if (tag == mrd::MRD_MESSAGE_TEXT && state.dump_enabled && state.dump_recorder) {
-                // Pass the full wire body verbatim ([uint32 len][text+NUL])
-                // so dump's byte-exact guarantee holds for recon TEXT too.
-                const auto* p = static_cast<const uint8_t*>(data);
-                std::vector<uint8_t> body(p, p + len);
-                // HIGH #10: enqueue returns a result; log dropped at
-                // callsite rather than only via post-hoc accessor.
-                auto r = state.dump_recorder->append_recon_text(std::move(body));
-                if (r == mrd::DumpEnqueueResult::Dropped) {
-                    LOG_WARN("DUMP drop at enqueue (recon_text)");
-                }
+                state.dump_recorder->append_recon_waveform(std::vector<uint8_t>(p, p + len));
+            } else if (tag == mrd::MRD_MESSAGE_TEXT) {
+                state.dump_recorder->append_recon_text(std::vector<uint8_t>(p, p + len));
             }
         };
 
@@ -547,13 +357,11 @@ int main(int argc, char** argv)
     // Log config
     {
         std::ostringstream cfg;
-        cfg << "marshal v2 listening http=" << http_bind
+        cfg << "marshal " << state.version << " listening http=" << http_bind
             << " dump-dir=" << dump_dir
-            << " dump=" << (dump_enabled ? "on" : "off")
             << " max_body=" << max_body_size;
         if (!latest_dir.empty()) cfg << " latest-dir=" << latest_dir;
         if (!recon_host.empty()) cfg << " recon=" << recon_host << ":" << recon_port
-                                     << " recon_close_timeout_ms=" << recon_close_timeout_ms
                                      << " recon_connect_timeout_ms=" << recon_connect_timeout_ms;
         if (ws_port > 0) cfg << " ws-port=" << ws_port;
         if (mrd_port > 0) cfg << " mrd-port=" << mrd_port;
@@ -563,6 +371,18 @@ int main(int argc, char** argv)
             cfg << " slice-agent=off";
         }
         LOG_INFO(cfg.str());
+    }
+
+    // Check the recon address once at startup so a wrong RECON_HOST shows
+    // up in the log and /status before the first scan, not during it.
+    if (!recon_host.empty()) {
+        state.recon_check = check_recon_reachable(recon_host, recon_port,
+                                                  recon_connect_timeout_ms);
+        if (state.recon_check == "reachable")
+            LOG_INFO("Recon " << state.recon_url << " is reachable");
+        else
+            LOG_WARN("Recon " << state.recon_url << " is NOT reachable: " << state.recon_check
+                     << " — scans will fail until it is");
     }
 
     // IO + acceptor
@@ -644,8 +464,8 @@ int main(int argc, char** argv)
         if (mrd_listener) mrd_listener->stop();
         http_sessions.shutdown_and_join();
         if (forwarder) forwarder->stop();
-        mrd::flush_all_live_lanes(state);
         state.close_scan();
+        state.dump_recorder->wait_for_conversions();
         ioc.stop();
     });
 

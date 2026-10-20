@@ -401,6 +401,14 @@ int main(int argc, char** argv) {
                     ahdr.scan_counter = static_cast<uint32_t>(
                         (volume_index * opt.slices + slice) * ny + line);
                     ahdr.idx.slice = slice;
+                    // Transverse stack, each slice at its own position along
+                    // the slice normal (6 mm apart, centred, as scripts/fire_stream.py), like a real
+                    // multislice prescription; recons copy this geometry
+                    // into the image headers.
+                    ahdr.read_dir[0] = 1.0f;
+                    ahdr.phase_dir[1] = 1.0f;
+                    ahdr.slice_dir[2] = 1.0f;
+                    ahdr.position[2] = (slice - (opt.slices - 1) / 2.0f) * 6.0f;
                     ahdr.idx.kspace_encode_step_1 = line;
                     ahdr.idx.repetition = static_cast<uint16_t>(volume_index % 65535);
 

@@ -49,6 +49,11 @@ def http_get(url, timeout=5):
         return 0, str(e)
 
 
+def get_latest(base_url):
+    status, body = http_get(f"{base_url}/image/latest")
+    return json.loads(body) if status == 200 else None
+
+
 def wait_for_latest_file(base_url, timeout=5):
     deadline = time.time() + timeout
     latest = None
@@ -56,7 +61,7 @@ def wait_for_latest_file(base_url, timeout=5):
         status, body = http_get(f"{base_url}/image/latest")
         if status == 200:
             latest = json.loads(body)
-            path = latest.get("path", "")
+            path = latest.get("path") or ""
             if path and os.path.exists(path):
                 return latest
         time.sleep(0.05)
@@ -89,17 +94,16 @@ class TestMarshalIntegration(unittest.TestCase):
     def setUp(self):
         self.dump_dir = tempfile.mkdtemp(prefix="marshal_test_")
 
-    def start_marshal(self, with_recon=False, dump=True):
+    def start_marshal(self):
+        # Recon is always configured; tests without a recon simply do not
+        # start the mock, so the marshal finds nothing listening there.
         cmd = [
             MARSHAL_BIN,
             "--http", f"0.0.0.0:{MARSHAL_HTTP_PORT}",
             "--mrd-port", str(MARSHAL_MRD_PORT),
             "--dump-dir", self.dump_dir,
+            "--recon-host", "localhost", "--recon-port", str(RECON_PORT),
         ]
-        if dump:
-            cmd.append("--dump")
-        if with_recon:
-            cmd += ["--recon-host", "localhost", "--recon-port", str(RECON_PORT)]
         self.marshal_proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertTrue(wait_for_port(MARSHAL_HTTP_PORT), "Marshal HTTP did not start")
@@ -184,12 +188,6 @@ class TestMarshalIntegration(unittest.TestCase):
     def base(self):
         return f"http://localhost:{MARSHAL_HTTP_PORT}"
 
-    def live_scanner_dir(self):
-        return os.path.join(self.dump_dir, "live", "from_scanner")
-
-    def live_recon_dir(self):
-        return os.path.join(self.dump_dir, "live", "from_reconstruction")
-
     def dump_scanner_dir(self):
         return os.path.join(self.dump_dir, "dump", "from_scanner")
 
@@ -197,84 +195,61 @@ class TestMarshalIntegration(unittest.TestCase):
         return os.path.join(self.dump_dir, "dump", "from_reconstruction")
 
     def test_t1_scanner_data_archived_without_recon(self):
-        self.start_marshal(with_recon=False)
+        # Nothing listens at the recon address: the scan still finalizes
+        # (RECON FAILED image + CLOSE) and everything the scanner sent is
+        # archived.
+        self.start_marshal()
         res = self.run_kspace(volumes=1)
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn("received CLOSE from marshal", res.stdout)
 
-        scanner_dir = self.dump_scanner_dir()
-        h5_files = [f for f in os.listdir(scanner_dir) if f.endswith(".h5")]
-        self.assertGreater(len(h5_files), 0, "No HDF5 file in from_scanner/")
-
+        self.assertTrue(wait_for_h5(self.dump_scanner_dir()),
+                        "No scanner archive H5 after scan close")
         status, body = http_get(f"{self.base()}/dump/scanner")
         self.assertEqual(status, 200)
-        dump = json.loads(body)
-        paths = "\n".join(item["path"] for item in dump)
-        self.assertIn(".h5", paths)
+        self.assertIn(".h5", "\n".join(item["path"] for item in json.loads(body)))
 
-        recon_dir = self.dump_recon_dir()
-        if os.path.exists(recon_dir):
-            recon_h5 = [f for f in os.listdir(recon_dir) if f.endswith(".h5")]
-            self.assertEqual(recon_h5, [], "Recon HDF5 should not exist in scanner-only dump")
+        latest = get_latest(self.base())
+        self.assertIsNone(latest["path"])
+        self.assertEqual(latest["status"], "recon failed")
 
-    def test_t2_roundtrip_pushes_images_back_to_scanner(self):
+    def test_t2_roundtrip_archives_and_shows_images(self):
+        # One mode: the round trip, both archives and the viewer snapshot
+        # all happen in the same scan.
         self.start_recon()
-        self.start_marshal(with_recon=True)
+        self.start_marshal()
         res = self.run_kspace(volumes=1)
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         self.assertIn("received", res.stdout)
 
-        # Dump mode is dump-exclusive: /image/latest serves no live snapshot,
-        # so the roundtrip proof is the scanner's "received" output above.
-        # Wait for the dump recorder's spool->H5 conversion at scan close.
+        latest = wait_for_latest_file(self.base())
+        self.assertIsNotNone(latest)
+        self.assertTrue(os.path.exists(latest["path"]), latest)
         self.assertTrue(wait_for_h5(self.dump_scanner_dir()),
-                        "No scanner dump H5 after scan close")
+                        "No scanner archive H5 after scan close")
         self.assertTrue(wait_for_h5(self.dump_recon_dir()),
-                        "No recon dump H5 after scan close")
+                        "No recon archive H5 after scan close")
+        self.assertEqual(get_latest(self.base())["status"], "scan finished")
 
-    def test_t2b_scanner_images_are_saved_not_forwarded_to_recon(self):
-        # Live mode: this test asserts on the live snapshot and live history,
-        # which --dump (dump-exclusive) disables entirely.
-        self.start_marshal(with_recon=True, dump=False)
+    def test_t2b_scanner_images_are_archived_and_forwarded_to_recon(self):
+        # The marshal is transparent: scanner images go to recon like
+        # everything else (the mock recon skips them) and are archived.
+        self.start_recon()
+        self.start_marshal()
         res = self.run_image_streamer(frames=3)
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
 
-        latest = wait_for_latest_file(self.base())
-        self.assertIsNotNone(latest)
-        self.assertFalse(latest["error"])
-        self.assertTrue(os.path.exists(latest["path"]), latest)
-        self.assertIn("from_scanner", latest["path"])
-
-        scanner_dir = self.live_scanner_dir()
-        self.assertGreater(len([f for f in os.listdir(scanner_dir)
-                                if f.startswith("scan_") and f.endswith(".h5")]), 0)
-        for recon_dir in (self.live_recon_dir(), self.dump_recon_dir()):
-            files = os.listdir(recon_dir) if os.path.isdir(recon_dir) else []
-            self.assertEqual([f for f in files
-                              if f.startswith("scan_") and f.endswith(".h5")], [])
-
-    def test_t3_dump_off_still_proxies_without_h5_archives(self):
-        self.start_recon()
-        self.start_marshal(with_recon=True, dump=False)
-        res = self.run_kspace(volumes=1)
-        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
-        self.assertIn("received", res.stdout)
-
-        latest = wait_for_latest_file(self.base())
-        self.assertIsNotNone(latest)
-        self.assertFalse(latest["error"])
-        self.assertTrue(os.path.exists(latest["path"]))
-
-        for path in (self.dump_scanner_dir(), self.dump_recon_dir()):
-            if not os.path.exists(path):
-                continue
-            dump_h5_files = [f for f in os.listdir(path)
-                             if f.startswith("scan_") and f.endswith(".h5")]
-            self.assertEqual(dump_h5_files, [],
-                             f"{path} should not contain dump H5 files with dump off")
+        self.assertTrue(wait_for_h5(self.dump_scanner_dir()),
+                        "No scanner archive H5 after scan close")
+        # The scan is over (archive written); stop the mock and read its log.
+        self.recon_proc.send_signal(signal.SIGTERM)
+        self.recon_proc.wait(timeout=5)
+        recon_log = self.recon_proc.stderr.read()
+        self.assertEqual(recon_log.count("IMAGE from client"), 3, recon_log)
 
     def test_t4_recon_kill_marshal_survives_and_reconnects(self):
         self.start_recon()
-        self.start_marshal(with_recon=True)
+        self.start_marshal()
 
         first = self.run_kspace(volumes=1)
         self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
@@ -300,9 +275,7 @@ class TestMarshalIntegration(unittest.TestCase):
 
     def test_t5_recon_failure_pushes_mrd_error_image_to_scanner(self):
         self.start_recon()
-        # Live mode: the /image/latest error-marker assertion at the end needs
-        # the live snapshot path, which --dump (dump-exclusive) disables.
-        self.start_marshal(with_recon=True, dump=False)
+        self.start_marshal()
         scanner = self.start_kspace_async()
         try:
             saw_normal_image = False
@@ -338,24 +311,20 @@ class TestMarshalIntegration(unittest.TestCase):
                     break
             self.assertTrue(saw_failure_image, "Scanner did not receive MRD failure image")
 
-            status, body = http_get(f"{self.base()}/image/latest")
-            self.assertEqual(status, 200)
-            latest = json.loads(body)
-            self.assertTrue(latest["error"])
+            # The viewer is told in words, and keeps the images it had.
+            latest = get_latest(self.base())
+            self.assertEqual(latest["status"], "recon failed")
             self.assertTrue(os.path.exists(latest["path"]))
         finally:
             self.stop_proc(scanner)
 
     def test_t6_multislice_latest_grows_then_completes(self):
-        # Incremental publish contract: the latest snapshot updates on every
-        # recon image, holding the volume accumulated so far (1..5 slices for
-        # the 5-slice mock scan). It must reach the full 5-slice stack, never
-        # exceed it, and the publish generation must climb during streaming —
-        # not stay flat until scan end.
+        # The snapshot holds the newest image per slice position: it grows
+        # 1..5 as the first volume arrives, then stays at 5 (later volumes
+        # replace, never accumulate), and the generation climbs while
+        # streaming.
         self.start_recon()
-        # Live mode (dump=False): --dump is dump-exclusive and disables the
-        # /image/latest snapshot entirely, which this test exists to observe.
-        self.start_marshal(with_recon=True, dump=False)
+        self.start_marshal()
         scanner = self.start_kspace_async()
         try:
             saw_completed_stack = False
@@ -365,9 +334,9 @@ class TestMarshalIntegration(unittest.TestCase):
             deadline = time.time() + 15
             while time.time() < deadline:
                 latest = wait_for_latest_file(self.base(), timeout=1)
-                if not latest or latest.get('error'):
+                if not latest:
                     continue
-                path = latest.get('path', '')
+                path = latest.get('path') or ''
                 if not path or not os.path.exists(path):
                     continue
                 count = latest_image_count(path)

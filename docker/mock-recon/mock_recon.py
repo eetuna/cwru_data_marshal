@@ -72,7 +72,7 @@ def reconstruct_slice(kspace_lines, nx, ny):
     return np.abs(image).astype(np.float32)
 
 
-def send_image(sock, image_data, image_series, slice_idx=0):
+def send_image(sock, image_data, image_series, slice_idx=0, acq_head=None):
     """Send an image back to the client using ismrmrd package (no hand-rolled offsets)."""
     ny, nx = image_data.shape
 
@@ -80,6 +80,14 @@ def send_image(sock, image_data, image_series, slice_idx=0):
     img = ismrmrd.Image.from_array(image_data.reshape(1, 1, ny, nx), transpose=False)
     img.image_series_index = image_series
     img.slice = slice_idx  # Spatial slice index (per mrdhelper.update_img_header_from_raw)
+    if acq_head is not None:
+        # Geometry from the slice's raw data, as real recons do
+        # (python-ismrmrd-server mrdhelper.update_img_header_from_raw).
+        img.position = tuple(acq_head.position)
+        img.read_dir = tuple(acq_head.read_dir)
+        img.phase_dir = tuple(acq_head.phase_dir)
+        img.slice_dir = tuple(acq_head.slice_dir)
+        img.patient_table_position = tuple(acq_head.patient_table_position)
     # data_type is set automatically by from_array based on dtype (float32 → FLOAT)
 
     # Send MRD_MESSAGE_ISMRMRD_IMAGE tag + serialize via ismrmrd
@@ -101,6 +109,7 @@ def handle_connection(conn, addr):
     acq_count = 0
     image_series = 0
     kspace_buffer = {}  # slice_idx -> [(line_idx, complex64 array)]
+    slice_heads = {}    # slice_idx -> last acquisition header (geometry for the image)
     slices_in_series = set()
 
     try:
@@ -149,7 +158,8 @@ def handle_connection(conn, addr):
                 for flush_slice_idx, lines in kspace_buffer.items():
                     if lines:
                         img = reconstruct_slice(lines, enc_nx, enc_ny)
-                        send_image(conn, img, image_series, flush_slice_idx)
+                        send_image(conn, img, image_series, flush_slice_idx,
+                                   slice_heads.get(flush_slice_idx))
                         slices_in_series.add(flush_slice_idx)
                 if slices_in_series:
                     image_series += 1
@@ -182,13 +192,15 @@ def handle_connection(conn, addr):
                 if slice_idx not in kspace_buffer:
                     kspace_buffer[slice_idx] = []
                 kspace_buffer[slice_idx].append((line_idx, samples))
+                slice_heads[slice_idx] = h
 
                 # Check LAST_IN_SLICE flag (ISMRMRD_ACQ_LAST_IN_SLICE=8, bit index 7)
                 if h.flags & (1 << 7):
                     lines = kspace_buffer.pop(slice_idx, [])
                     if lines:
                         img = reconstruct_slice(lines, enc_nx, enc_ny)
-                        send_image(conn, img, image_series, slice_idx)
+                        send_image(conn, img, image_series, slice_idx,
+                                   slice_heads.get(slice_idx))
                         slices_in_series.add(slice_idx)
                         if len(slices_in_series) >= max(1, enc_nz):
                             image_series += 1

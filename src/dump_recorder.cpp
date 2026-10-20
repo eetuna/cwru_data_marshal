@@ -56,6 +56,7 @@ DumpRecorder::DumpRecorder(std::filesystem::path dump_dir,
 
 DumpRecorder::~DumpRecorder()
 {
+    wait_for_conversions();
     // Destructor path (process shutdown / DumpRecorder reset): stop
     // admissions FIRST so no racy enqueue can slip in between
     // close_scan's barrier and worker teardown. Then stop the worker,
@@ -358,32 +359,42 @@ void DumpRecorder::close_scan()
     }
     scanner_.cv.notify_one();
     recon_.cv.notify_one();
-    scanner_fut.wait();
-    recon_fut.wait();
 
-    status_.store(ConversionStatus::Converting);
-    LOG_INFO("Converting dump spool to HDF5");
-    convert_lane(scanner_, stem, /*is_scanner_side=*/true);
-    convert_lane(recon_,   stem, /*is_scanner_side=*/false);
+    std::lock_guard<std::mutex> conv_lk(converter_mtx_);
+    if (converter_.joinable()) converter_.join();
+    converter_ = std::thread([this, stem, sf = std::move(scanner_fut),
+                              rf = std::move(recon_fut)]() mutable {
+        sf.wait();
+        rf.wait();
 
-    // Clear the old stem and the close_scan_pending_ guard. If a
-    // post-barrier record already generated a fresh stem (because it
-    // raced the barrier), scan_stem_ has been overwritten and we
-    // leave it alone. Otherwise we reset so the next scan starts
-    // clean.
-    {
-        std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
-        close_scan_pending_ = false;
-        scanner_.closed_for_stem = false;
-        recon_.closed_for_stem = false;
-        if (scan_stem_ == stem) {
-            scan_stem_.clear();
+        status_.store(ConversionStatus::Converting);
+        LOG_INFO("Converting dump spool to HDF5");
+        convert_lane(scanner_, stem, /*is_scanner_side=*/true);
+        convert_lane(recon_,   stem, /*is_scanner_side=*/false);
+
+        // Clear the old stem and the close_scan_pending_ guard. If a
+        // post-barrier record (the next scan) already generated a fresh
+        // stem, scan_stem_ has been overwritten and we leave it alone.
+        {
+            std::lock_guard<std::mutex> stem_lk(scan_stem_mtx_);
+            if (scan_stem_ == stem) {
+                close_scan_pending_ = false;
+                scanner_.closed_for_stem = false;
+                recon_.closed_for_stem = false;
+                scan_stem_.clear();
+            }
         }
-    }
 
-    const bool ok = scanner_.conversion_ok && recon_.conversion_ok;
-    status_.store(ok ? ConversionStatus::Complete : ConversionStatus::Failed);
-    LOG_INFO("Dump conversion " << (ok ? "complete" : "FAILED"));
+        const bool ok = scanner_.conversion_ok && recon_.conversion_ok;
+        status_.store(ok ? ConversionStatus::Complete : ConversionStatus::Failed);
+        LOG_INFO("Dump conversion " << (ok ? "complete" : "FAILED"));
+    });
+}
+
+void DumpRecorder::wait_for_conversions()
+{
+    std::lock_guard<std::mutex> conv_lk(converter_mtx_);
+    if (converter_.joinable()) converter_.join();
 }
 
 void DumpRecorder::close_lane(DumpLane lane_id)

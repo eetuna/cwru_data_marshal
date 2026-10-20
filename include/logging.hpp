@@ -14,6 +14,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <iomanip>
 #include <mutex>
@@ -55,13 +56,22 @@ inline std::string generate_request_id()
     return std::string(buf);
 }
 
-// Thread-safe single-line log output
+// Thread-safe single-line log output. Also appended to $MARSHAL_LOG_FILE
+// when set, so the log outlives the container.
 inline void log_msg(const char *level, const char *component, const std::string &msg)
 {
     static std::mutex log_mutex;
+    static std::FILE *log_file = [] {
+        const char *path = std::getenv("MARSHAL_LOG_FILE");
+        return (path && *path) ? std::fopen(path, "a") : nullptr;
+    }();
     std::string ts = timestamp();
     std::lock_guard<std::mutex> lock(log_mutex);
     std::fprintf(stderr, "%s [%s] [%s] %s\n", ts.c_str(), level, component, msg.c_str());
+    if (log_file) {
+        std::fprintf(log_file, "%s [%s] [%s] %s\n", ts.c_str(), level, component, msg.c_str());
+        std::fflush(log_file);
+    }
 }
 
 } // namespace marshal_log

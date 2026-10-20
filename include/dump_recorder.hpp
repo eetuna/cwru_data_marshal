@@ -76,7 +76,13 @@ public:
     DumpEnqueueResult start_scan(std::string filename,
                                  std::vector<uint8_t> xml_body,
                                  std::string header_xml);
+    // Ends the current scan. Returns at once: the scan's records are cut
+    // off from later ones immediately, and the spool -> HDF5 conversion runs
+    // on a background thread (one conversion at a time), so the next scan
+    // never waits for it.
     void close_scan();
+    // Block until every conversion started by close_scan() has finished.
+    void wait_for_conversions();
     void close_lane(DumpLane lane);
 
     // Byte-exact dump: these accept the FULL wire body exactly as
@@ -218,6 +224,8 @@ private:
     // treated as "the scan that just closed" and any new record
     // forces generation of a fresh stem + fresh spool rather than
     // reopening (and truncating) the closed one.
+    std::mutex converter_mtx_;
+    std::thread converter_;
     mutable std::mutex scan_stem_mtx_;
     std::string scan_stem_;
     bool close_scan_pending_{false};

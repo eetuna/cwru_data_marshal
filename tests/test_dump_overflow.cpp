@@ -90,6 +90,7 @@ TEST_CASE("DumpRecorder enqueue returns Accepted on happy path",
     REQUIRE(r2 == mrd::DumpEnqueueResult::Accepted);
 
     rec.close_scan();
+    rec.wait_for_conversions();
 }
 
 TEST_CASE("DumpRecorder with spool never drops under high-count acq flood",
@@ -128,6 +129,7 @@ TEST_CASE("DumpRecorder with spool never drops under high-count acq flood",
     }
 
     rec.close_scan();
+    rec.wait_for_conversions();
 
     REQUIRE_FALSE(rec.had_overflow());
     REQUIRE(rec.dropped_record_count() == 0);
@@ -200,6 +202,7 @@ TEST_CASE("DumpRecorder persists CONFIG_FILE / CONFIG_TEXT / TEXT sent before ME
                 == mrd::DumpEnqueueResult::Accepted);
 
         rec.close_scan();
+        rec.wait_for_conversions();
     }
 
     // DumpRecorder generates its own shared scan stem so scanner and
@@ -263,6 +266,7 @@ TEST_CASE("DumpRecorder supports back-to-back scans (second scan works)",
         }
 
         rec.close_scan();
+        rec.wait_for_conversions();
         REQUIRE(rec.dropped_record_count() == 0);
     }
 
@@ -305,6 +309,7 @@ TEST_CASE("DumpRecorder scanner+recon archives share the same <ts> stem",
     REQUIRE(rec.append_recon_text(text_body("recon hello"))
             == mrd::DumpEnqueueResult::Accepted);
     rec.close_scan();
+    rec.wait_for_conversions();
 
     auto scanner_h5 = find_single_h5(mrd::dump_scanner_dir(dir));
     auto recon_h5   = find_single_h5(mrd::dump_recon_dir(dir));
@@ -391,11 +396,13 @@ TEST_CASE("DumpRecorder close-barrier race: strict scan boundary "
         // the next enqueue must start a fresh scan (fresh stem, fresh
         // spool, fresh .h5).
         rec.close_scan();
+        rec.wait_for_conversions();
 
         // This record must land in a DIFFERENT .h5 than pre_close did.
         REQUIRE(rec.append_scanner_text(text_body(post_close))
                 == mrd::DumpEnqueueResult::Accepted);
         rec.close_scan();
+        rec.wait_for_conversions();
     }
 
     // Find the two .h5 files and assert pre/post content is split.
@@ -470,6 +477,7 @@ TEST_CASE("DumpRecorder close-barrier race under concurrent hammer: "
 
         started_close.store(true);
         rec.close_scan();
+        rec.wait_for_conversions();
         // Guarantee the hammer generates at least one post-close record
         // so the second close_scan has content to convert. Without this,
         // a slow thread start could let stop.store(true) run before any
@@ -478,6 +486,7 @@ TEST_CASE("DumpRecorder close-barrier race under concurrent hammer: "
         stop.store(true);
         hammer.join();
         rec.close_scan();
+        rec.wait_for_conversions();
     }
 
     // Locate scan-1 h5 (the one containing pre_close text). It MUST
@@ -547,6 +556,7 @@ TEST_CASE("DumpRecorder /debug/sinks counters after close + stale-counter reset"
     REQUIRE(rec.append_recon_text(text_body("scan1 recon"))
             == mrd::DumpEnqueueResult::Accepted);
     rec.close_scan();
+    rec.wait_for_conversions();
 
     // Fix #2: after close, /debug/sinks should STILL report non-zero
     // spool_records from the just-closed scan.
@@ -565,6 +575,7 @@ TEST_CASE("DumpRecorder /debug/sinks counters after close + stale-counter reset"
                 == mrd::DumpEnqueueResult::Accepted);
     }
     rec.close_scan();
+    rec.wait_for_conversions();
 
     auto snap2 = rec.counters();
     // Scanner: new count of 5 acqs; must not carry scan-1's 3.
@@ -676,6 +687,7 @@ TEST_CASE("DumpRecorder counters() is safe under concurrent polling during conve
     });
 
     rec.close_scan();
+    rec.wait_for_conversions();
     stop.store(true);
     poller.join();
 
@@ -721,6 +733,7 @@ TEST_CASE("DumpRecorder preserves byte-exact TEXT bodies (embedded NULs)",
         REQUIRE(rec.append_scanner_text(std::move(body))
                 == mrd::DumpEnqueueResult::Accepted);
         rec.close_scan();
+        rec.wait_for_conversions();
     }
 
     // Open the resulting h5 and pull text_0 as a variable-length
@@ -810,6 +823,7 @@ TEST_CASE("DumpRecorder preserves byte-exact METADATA_XML (embedded NUL)",
         REQUIRE(rec.start_scan("metadata_be.h5", body, header_xml)
                 == mrd::DumpEnqueueResult::Accepted);
         rec.close_scan();
+        rec.wait_for_conversions();
     }
 
     // Read the spool directly; HDF5 VLEN strings would truncate at
@@ -864,6 +878,7 @@ TEST_CASE("DumpRecorder enqueue returns Stopped after destruction",
     dump_start_scan(*rec, "stopped.h5",
                     "<?xml version=\"1.0\"?><ismrmrdHeader/>");
     rec->close_scan();
+    rec->wait_for_conversions();
     rec.reset();  // destructor sets stopping_ = true and joins worker
 
     // Can't call on destructed; instead, exercise the Stopped path by

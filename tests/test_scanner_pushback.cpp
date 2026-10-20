@@ -37,6 +37,8 @@ TEST_CASE("push_message_to_scanner returns promptly when no scanner connected",
           "[mrd][pushback]") {
     MarshalState state;
     state.dump_dir = "/tmp/test_scanner_pushback";
+    state.dump_recorder = std::make_unique<mrd::DumpRecorder>(state.dump_dir);
+    state.snapshot = std::make_unique<mrd::LatestSnapshot>(state.dump_dir / "latest");
 
     net::io_context ioc;
     uint16_t port = get_ephemeral_port();
@@ -84,6 +86,8 @@ TEST_CASE("push_message_to_scanner unblocks when stop() closes socket",
     //   4. The hammer thread returns and joins within a timeout.
     MarshalState state;
     state.dump_dir = "/tmp/test_scanner_pushback_stuck";
+    state.dump_recorder = std::make_unique<mrd::DumpRecorder>(state.dump_dir);
+    state.snapshot = std::make_unique<mrd::LatestSnapshot>(state.dump_dir / "latest");
 
     net::io_context ioc;
     uint16_t port = get_ephemeral_port();
@@ -147,6 +151,8 @@ TEST_CASE("push_message_to_scanner is lossless past the old 1024 cap",
     // arrives on the other side.
     MarshalState state;
     state.dump_dir = "/tmp/test_scanner_pushback_lossless";
+    state.dump_recorder = std::make_unique<mrd::DumpRecorder>(state.dump_dir);
+    state.snapshot = std::make_unique<mrd::LatestSnapshot>(state.dump_dir / "latest");
 
     net::io_context ioc;
     uint16_t port = get_ephemeral_port();
@@ -218,6 +224,8 @@ TEST_CASE("push_message_to_scanner serializes concurrent senders",
     // pattern end-to-end (i.e. no interleave).
     MarshalState state;
     state.dump_dir = "/tmp/test_scanner_pushback_ordering";
+    state.dump_recorder = std::make_unique<mrd::DumpRecorder>(state.dump_dir);
+    state.snapshot = std::make_unique<mrd::LatestSnapshot>(state.dump_dir / "latest");
 
     net::io_context ioc;
     uint16_t port = get_ephemeral_port();

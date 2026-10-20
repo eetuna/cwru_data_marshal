@@ -6,12 +6,15 @@
  * order they are received. A reader thread concurrently drains recon return
  * messages so IMAGE/TEXT/WAVEFORM/CLOSE can be pushed back to the scanner.
  *
- * Lifecycle:
- *   1. Scanner sends CONFIG → marshal calls begin_session() → connects to recon
- *   2. Marshal forwards each message via send() → writes to the socket
- *   3. Reader thread reads recon responses → calls message callback
- *   4. Scanner sends CLOSE → marshal calls end_session() → sends CLOSE, waits for reader
- *   5. Next scan: new begin_session() → new connection
+ * Lifecycle (one recon connection per scanner connection):
+ *   1. Scanner connects → marshal calls begin_session() → connects to recon
+ *   2. Marshal forwards every scanner message, in order, verbatim
+ *   3. Reader thread relays every recon message back (message callback)
+ *   4. Scanner sends CLOSE → marshal forwards it, then wait_until_done()
+ *      returns once recon has sent its CLOSE or its connection has ended.
+ *      There is no time limit: a slow recon is waited for, exactly as the
+ *      scanner would wait for it on a direct connection.
+ *   5. end_session() closes the connection.
  */
 
 #pragma once
@@ -30,6 +33,8 @@
 #include <thread>
 #include <vector>
 
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -70,7 +75,8 @@ public:
     // ioc_ is used only here — the reader/writer paths operate on the raw
     // native fd — so driving it with run_for on the calling thread is safe.
     bool begin_session() {
-        end_session();  // clean up any previous session
+        std::lock_guard<std::mutex> life(lifecycle_mtx_);
+        end_session_locked();  // clean up any previous session
         drop_logged_.store(false);
         failure_reported_.store(false);
         close_received_.store(false);
@@ -119,6 +125,21 @@ public:
 
             boost::system::error_code opt_ec;
             sock->set_option(tcp::no_delay(true), opt_ec);
+            // Dead-peer detection only: keepalive probes are answered by the
+            // recon host's kernel whenever the host is up, however long the
+            // recon process takes, so a slow recon is never cut off. A host
+            // that vanished (power loss, network gone) stops answering and
+            // the connection fails, which ends the session cleanly.
+            sock->set_option(net::socket_base::keep_alive(true), opt_ec);
+            {
+                const int fd = sock->native_handle();
+                int v = 30;
+                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &v, sizeof(v));
+                v = 10;
+                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &v, sizeof(v));
+                v = 3;
+                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &v, sizeof(v));
+            }
             // async_connect leaves the native fd in non-blocking mode
             // (synchronous net::connect did not). The reader/writer
             // paths issue raw blocking recv/send on the native fd and
@@ -148,10 +169,18 @@ public:
         }
     }
 
-    // Close connection, join reader thread. Call after CLOSE is sent.
+    // Close connection, join reader thread. Safe to call from several
+    // threads (the session thread and shutdown) and more than once.
     void end_session() {
+        std::lock_guard<std::mutex> life(lifecycle_mtx_);
+        end_session_locked();
+    }
+
+private:
+    void end_session_locked() {
         reader_running_.store(false);
         connected_.store(false);
+        notify_done();
 
         // Shutdown wakes blocking send/recv. Close/reset only after the
         // reader thread has exited so the fd cannot be reused underneath it.
@@ -168,6 +197,7 @@ public:
         }
     }
 
+public:
     // --- Message sending (called from marshal's MRD TCP listener thread) ---
     // These write synchronously to preserve python-server-like ordering.
 
@@ -233,12 +263,21 @@ public:
 
     bool is_connected() const { return connected_.load(); }
 
-    bool wait_for_close(std::chrono::milliseconds timeout) {
+    // Block until recon is done with this session: it sent CLOSE, or its
+    // connection ended (closed, failed, or end_session()). No time limit.
+    // Returns true when recon sent CLOSE.
+    bool wait_until_done() {
         std::unique_lock<std::mutex> lk(close_mtx_);
-        return close_cv_.wait_for(lk, timeout, [this]() {
+        close_cv_.wait(lk, [this]() {
             return close_received_.load() || !connected_.load();
         });
+        return close_received_.load();
     }
+
+    bool close_received() const { return close_received_.load(); }
+    // True once this session's recon connection failed (write/read error or
+    // the connection ended without CLOSE). Reset by begin_session().
+    bool failed() const { return failure_reported_.load(); }
 
     // Called by marshal to stop everything
     void stop() { end_session(); }
@@ -252,6 +291,7 @@ private:
 
     net::io_context ioc_;
     std::unique_ptr<tcp::socket> socket_;
+    std::mutex lifecycle_mtx_;   // begin_session / end_session
     std::mutex socket_mtx_;
     std::mutex send_mtx_;
     std::atomic<bool> connected_{false};
@@ -262,6 +302,15 @@ private:
     std::thread reader_;
     std::mutex close_mtx_;
     std::condition_variable close_cv_;
+
+    // Wake wait_until_done(). The predicate's atomics are stored before this
+    // call; taking close_mtx_ between the store and the notify guarantees a
+    // waiter that just checked the predicate is already blocked (no lost
+    // wakeup — with no timeout, a lost wakeup would hang the session).
+    void notify_done() {
+        { std::lock_guard<std::mutex> lk(close_mtx_); }
+        close_cv_.notify_all();
+    }
 
     void report_failure_once() {
         if (failure_reported_.exchange(true) == false && on_failure_) {
@@ -284,7 +333,7 @@ private:
             LOG_WARN(reason);
         }
         shutdown_socket();
-        close_cv_.notify_all();
+        notify_done();
         report_failure_once();
     }
 
@@ -328,7 +377,7 @@ private:
                         try { on_message_(msg_id, body.data(), body.size()); } catch (...) {}
                     }
                     close_received_.store(true);
-                    close_cv_.notify_all();
+                    notify_done();
                     break;
                 } else if (msg_id == MRD_MESSAGE_TEXT) {
                     LOG_DEBUG("Recon TEXT");
@@ -347,7 +396,7 @@ private:
         }
         connected_.store(false);
         if (failure) shutdown_socket();
-        close_cv_.notify_all();
+        notify_done();
         if (failure) report_failure_once();
         LOG_INFO("Recon reader ended");
     }

@@ -82,44 +82,12 @@ static auto text_response(const http::request<Body>& req,
 // ---------------------------------------------------------------------------
 inline void handle_recon_image(MarshalState& state, const void* data, size_t size)
 {
-    // Track slice geometry in every mode (recon lane) — the slice-translation
-    // command pushed to the scanner embeds it.
-    mrd::update_slice_geometry(state, static_cast<const uint8_t*>(data), size);
-
-    // Dump mode is exclusive of the live snapshot/history pipeline. Gate
-    // purely on the mode flag so a missing dump_recorder does not silently
-    // fall back to writing live output.
-    if (state.dump_enabled) {
-        if (state.dump_recorder) {
-            const auto* bytes = static_cast<const uint8_t*>(data);
-            state.dump_recorder->append_recon_image(
-                std::vector<uint8_t>(bytes, bytes + size));
-        }
-        return;
-    }
-
-    mrd::append_live_image(state, mrd::LiveLane::Recon,
-                           static_cast<const uint8_t*>(data), size);
-}
-
-inline void handle_recon_waveform(MarshalState& state, const void* data, size_t size)
-{
-    if (size < mrd::WAVEFORM_HEADER_BYTES) return;
-    const auto* whdr = static_cast<const ISMRMRD::WaveformHeader*>(data);
-    size_t data_bytes = size_t(whdr->number_of_samples) * whdr->channels * sizeof(uint32_t);
-    if (size < mrd::WAVEFORM_HEADER_BYTES + data_bytes) return;
-    if (state.dump_enabled) {
-        if (state.dump_recorder) {
-            const auto* bytes = static_cast<const uint8_t*>(data);
-            state.dump_recorder->append_recon_waveform(
-                std::vector<uint8_t>(bytes, bytes + size));
-        }
-        return;
-    }
-    // Live mode: persist recon-side waveforms via the per-lane history
-    // recorder so default-mode runs capture ECG too (not just images).
-    mrd::append_live_waveform(state, mrd::LiveLane::Recon,
-                              static_cast<const uint8_t*>(data), size);
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    // Slice geometry feeds the slice-command display (/read/slice_geometry).
+    mrd::update_slice_geometry(state, bytes, size);
+    state.perf_recon_images_received.fetch_add(1, std::memory_order_relaxed);
+    state.dump_recorder->append_recon_image(std::vector<uint8_t>(bytes, bytes + size));
+    state.snapshot->add_image(bytes, size);
 }
 
 // ---------------------------------------------------------------------------
@@ -129,24 +97,19 @@ template <class Body>
 static auto handle_get_image_latest(const http::request<Body>& req, MarshalState& state)
     -> http::response<http::string_body>
 {
-    if (state.dump_enabled) {
-        return json_response(req, http::status::not_found,
-                             {{"error", "dump mode; no live snapshot"}});
-    }
-    std::lock_guard<std::mutex> lk(state.latest_image_mtx);
-    if (state.latest_image_path.empty()) {
-        http::response<http::string_body> res{http::status::no_content, req.version()};
-        res.keep_alive(req.keep_alive());
-        return res;
-    }
+    // Always 200: `path` is null until the current scan has an image, and
+    // `status` says what the marshal is doing ("scanning", "recon failed",
+    // ...) so the viewer can show it instead of a blank screen.
+    const auto v = state.snapshot->view();
+    const auto [status, detail] = state.get_status();
     nlohmann::json j;
-    j["path"] = state.latest_image_path;
-    j["error"] = state.latest_image_error;
-    // Monotonic publish generation, bumped on every successful snapshot
-    // publish. Clients remember the last value and skip re-reading the
-    // snapshot when it hasn't changed.
-    j["generation"] = state.latest_image_generation.load();
-    return json_response(req, http::status::ok, j);
+    j["path"] = v.path.empty() ? nlohmann::json(nullptr) : nlohmann::json(v.path);
+    j["images"] = v.images;
+    // Bumps on every change the snapshot reflects (new scan, new image);
+    // pollers re-read only when it changes.
+    j["generation"] = v.generation;
+    j["status"] = status;
+    j["status_detail"] = detail;    return json_response(req, http::status::ok, j);
 }
 
 // ---------------------------------------------------------------------------
@@ -166,28 +129,13 @@ template <class Body>
 static auto handle_get_image_latest_h5(const http::request<Body>& req, MarshalState& state)
     -> http::response<http::string_body>
 {
-    if (state.dump_enabled) {
-        return json_response(req, http::status::not_found,
-                             {{"error", "dump mode; no live snapshot"}});
-    }
-
-    std::string path;
-    bool error = false;
-    uint64_t generation = 0;
-    {
-        std::lock_guard<std::mutex> lk(state.latest_image_mtx);
-        path = state.latest_image_path;
-        error = state.latest_image_error;
-        generation = state.latest_image_generation.load();
-    }
+    const auto v = state.snapshot->view();
+    const std::string path = v.path;
+    const uint64_t generation = v.generation;
     if (path.empty()) {
         http::response<http::string_body> res{http::status::no_content, req.version()};
         res.keep_alive(req.keep_alive());
         return res;
-    }
-    if (error) {
-        return json_response(req, http::status::service_unavailable,
-                             {{"error", "reconstruction failing"}, {"path", path}});
     }
 
     const std::string etag = "\"" + std::to_string(generation) + "\"";
@@ -713,7 +661,10 @@ template <class Body>
 static auto handle_get_status(const http::request<Body>& req, MarshalState& state)
 {
     nlohmann::json j;
-    j["mode"] = state.dump_enabled ? "dump" : "live";
+    const auto [status, detail] = state.get_status();
+    j["version"] = state.version;
+    j["status"] = status;
+    j["status_detail"] = detail;
     auto now = std::chrono::steady_clock::now();
     j["uptime_s"] = std::chrono::duration_cast<std::chrono::seconds>(now - state.start).count();
 
@@ -722,6 +673,7 @@ static auto handle_get_status(const http::request<Body>& req, MarshalState& stat
     j["recon"]["configured"] = !state.recon_url.empty();
     j["recon"]["target"] = state.recon_url;
     j["recon"]["connected"] = state.recon_connected();
+    j["recon"]["startup_check"] = state.recon_check;
 
     {
         std::lock_guard<std::mutex> lk(state.scan_mtx);
@@ -731,13 +683,7 @@ static auto handle_get_status(const http::request<Body>& req, MarshalState& stat
     j["images"]["from_scanner_total"] = state.perf_scanner_images_received.load();
     j["images"]["from_recon_total"] = state.perf_recon_images_received.load();
 
-    const int64_t lp = state.last_publish_ms.load();
-    if (lp > 0) {
-        j["last_image_age_s"] =
-            static_cast<double>(static_cast<int64_t>(mrd::now_ms_epoch()) - lp) / 1000.0;
-    } else {
-        j["last_image_age_s"] = nullptr;
-    }
+    j["viewer_images"] = state.snapshot->view().images;
 
     std::error_code ec;
     const auto sp = std::filesystem::space(state.dump_dir, ec);
@@ -759,9 +705,7 @@ template <class Body>
 static auto handle_get_debug_sinks(const http::request<Body>& req, MarshalState& state)
 {
     nlohmann::json j;
-    j["mode"] = state.dump_enabled ? "dump" : "live";
-
-    if (state.dump_enabled && state.dump_recorder) {
+    if (state.dump_recorder) {
         auto c = state.dump_recorder->counters();
         auto lane_json = [](const mrd::DumpRecorder::LaneSnapshot& l) {
             nlohmann::json o;
@@ -790,36 +734,6 @@ static auto handle_get_debug_sinks(const http::request<Body>& req, MarshalState&
         }
         j["dump"]["conversion_status"] = status;
     }
-    if (!state.dump_enabled) {
-        auto live_lane_json = [](const mrd::LiveImageRecorder::CounterSnapshot& c,
-                                 uint64_t dropped) {
-            nlohmann::json o;
-            o["acq"] = c.acq;
-            o["img"] = c.img;
-            o["wf"]  = c.wf;
-            o["open"] = c.sink_open;
-            // Post-fix: dropped should stay 0 under the lossless
-            // contract. Retained for visibility.
-            o["dropped"] = dropped;
-            // Live queue depth and high-watermark surface: new with
-            // the lossless-live change (no more drop-oldest). If the
-            // watermark fires, the HDF5 worker is behind; memory
-            // grows until it catches up.
-            o["queued_jobs"] = c.queued_jobs;
-            o["high_watermark_hit"] = c.high_watermark_hit;
-            return o;
-        };
-        if (state.scanner_live.recorder) {
-            j["live"]["from_scanner"] = live_lane_json(
-                state.scanner_live.recorder->counters(),
-                state.scanner_live.recorder->dropped_count());
-        }
-        if (state.recon_live.recorder) {
-            j["live"]["from_reconstruction"] = live_lane_json(
-                state.recon_live.recorder->counters(),
-                state.recon_live.recorder->dropped_count());
-        }
-    }
     return json_response(req, http::status::ok, j);
 }
 
@@ -838,22 +752,11 @@ static auto handle_get_debug_perf(const http::request<Body>& req, MarshalState& 
     j["recv"]["scanner_images"]    = state.perf_scanner_images_received.load();
     j["recv"]["recon_images"]      = state.perf_recon_images_received.load();
     j["recv"]["scanner_waveforms"] = state.perf_scanner_waveforms_received.load();
-    j["publish_attempts"]["scanner"] = state.perf_publish_attempts_scanner.load();
-    j["publish_attempts"]["recon"]   = state.perf_publish_attempts_recon.load();
-
-    if (state.latest_writer) {
-        auto p = state.latest_writer->perf();
-        j["latest_writer"]["enqueued"]          = p.enqueued;
-        j["latest_writer"]["coalesced"]         = p.coalesced;
-        j["latest_writer"]["dropped_oldest"]    = p.dropped_oldest;
-        j["latest_writer"]["completed"]         = p.completed;
-        j["latest_writer"]["failed"]            = p.failed;
-        j["latest_writer"]["max_queue_depth"]   = p.max_queue_depth;
-        j["latest_writer"]["last_write_us"]     = p.last_write_us;
-        j["latest_writer"]["max_write_us"]      = p.max_write_us;
-        j["latest_writer"]["last_drain_lag_us"] = p.last_drain_lag_us;
-        j["latest_writer"]["max_drain_lag_us"]  = p.max_drain_lag_us;
-    }
+    const auto p = state.snapshot->perf();
+    j["latest_writer"]["writes"]        = p.writes;
+    j["latest_writer"]["failed"]        = p.failed;
+    j["latest_writer"]["last_write_us"] = p.last_write_us;
+    j["latest_writer"]["max_write_us"]  = p.max_write_us;
 
     return json_response(req, http::status::ok, j);
 }

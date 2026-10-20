@@ -57,7 +57,6 @@ add_executable(marshal
   src/marshal_main.cpp
   src/mrd_sink.cpp
   src/dump_recorder.cpp
-  src/live_image_recorder.cpp
   src/latest_image_writer.cpp
 )
 target_link_libraries(marshal PRIVATE
@@ -133,7 +132,6 @@ if(BUILD_TESTING)
     tests/test_http_handlers.cpp
     src/mrd_sink.cpp
     src/dump_recorder.cpp
-    src/live_image_recorder.cpp
     src/latest_image_writer.cpp
   )
   target_link_libraries(unit_http_handlers PRIVATE
@@ -145,7 +143,6 @@ if(BUILD_TESTING)
     tests/test_http_endpoints.cpp
     src/mrd_sink.cpp
     src/dump_recorder.cpp
-    src/live_image_recorder.cpp
     src/latest_image_writer.cpp
   )
   target_link_libraries(it_http PRIVATE
@@ -157,7 +154,6 @@ if(BUILD_TESTING)
     tests/test_ws_client.cpp
     src/mrd_sink.cpp
     src/dump_recorder.cpp
-    src/live_image_recorder.cpp
     src/latest_image_writer.cpp
   )
   target_link_libraries(test_ws_client PRIVATE
@@ -171,18 +167,15 @@ if(BUILD_TESTING)
   target_include_directories(test_wire_guards PRIVATE include)
   add_test(NAME test_wire_guards COMMAND test_wire_guards)
 
-  # MEDIUM #14/#15: bounded queues for latest + live writers.
-  add_executable(test_bounded_queues
-    tests/test_bounded_queues.cpp
+  # Viewer snapshot: newest image per slice position, mixed sizes, order.
+  add_executable(test_latest_snapshot
+    tests/test_latest_snapshot.cpp
     src/mrd_sink.cpp
-    src/dump_recorder.cpp
-    src/live_image_recorder.cpp
     src/latest_image_writer.cpp
   )
-  target_link_libraries(test_bounded_queues PRIVATE
-    Catch2::Catch2WithMain Boost::system Threads::Threads
-    nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target})
-  add_test(NAME test_bounded_queues COMMAND test_bounded_queues)
+  target_link_libraries(test_latest_snapshot PRIVATE
+    Catch2::Catch2WithMain Threads::Threads ${hdf5_target} ${ismrmrd_target})
+  add_test(NAME test_latest_snapshot COMMAND test_latest_snapshot)
 
   # MEDIUM #11: HTTP body_limit must reject oversized bodies during read.
   add_executable(test_http_body_limit tests/test_http_body_limit.cpp)
@@ -201,39 +194,11 @@ if(BUILD_TESTING)
     nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target})
   add_test(NAME test_dump_overflow COMMAND test_dump_overflow)
 
-  # HIGH #9: recon_group_is_complete must wait for the XML header.
-  add_executable(test_recon_group_header
-    tests/test_recon_group_header.cpp
-    src/mrd_sink.cpp
-    src/dump_recorder.cpp
-    src/live_image_recorder.cpp
-    src/latest_image_writer.cpp
-  )
-  target_link_libraries(test_recon_group_header PRIVATE
-    Catch2::Catch2WithMain Boost::system Threads::Threads
-    nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target} CURL::libcurl)
-  add_test(NAME test_recon_group_header COMMAND test_recon_group_header)
-
-  # 2026-08-18 scanner-test regressions: per-publish generation counter,
-  # repeat-slice group flush, EOF flush of pending partial groups.
-  add_executable(test_publish_semantics
-    tests/test_publish_semantics.cpp
-    src/mrd_sink.cpp
-    src/dump_recorder.cpp
-    src/live_image_recorder.cpp
-    src/latest_image_writer.cpp
-  )
-  target_link_libraries(test_publish_semantics PRIVATE
-    Catch2::Catch2WithMain Boost::system Threads::Threads
-    nlohmann_json::nlohmann_json ${hdf5_target} ${ismrmrd_target} CURL::libcurl)
-  add_test(NAME test_publish_semantics COMMAND test_publish_semantics)
-
   # HIGH #8 regression: second concurrent scanner must be rejected.
   add_executable(test_scanner_race
     tests/test_scanner_race.cpp
     src/mrd_sink.cpp
     src/dump_recorder.cpp
-    src/live_image_recorder.cpp
     src/latest_image_writer.cpp
   )
   target_link_libraries(test_scanner_race PRIVATE
@@ -250,7 +215,6 @@ if(BUILD_TESTING)
     tests/test_slice_http.cpp
     src/mrd_sink.cpp
     src/dump_recorder.cpp
-    src/live_image_recorder.cpp
     src/latest_image_writer.cpp
   )
   target_link_libraries(test_slice_http PRIVATE
@@ -268,7 +232,6 @@ if(BUILD_TESTING)
     tests/test_scanner_pushback.cpp
     src/mrd_sink.cpp
     src/dump_recorder.cpp
-    src/live_image_recorder.cpp
     src/latest_image_writer.cpp
   )
   target_link_libraries(test_scanner_pushback PRIVATE
